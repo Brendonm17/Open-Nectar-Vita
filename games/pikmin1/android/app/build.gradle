@@ -51,8 +51,23 @@ android {
                           '-DANDROID_PLATFORM=android-29',
                           '-DPIKMIN_NATIVE_JAUDIO=ON',
                           '-DPIKMIN_NATIVE_OPTIMIZE=OFF'
-                targets 'SDL2', 'pikmin_pc', 'pikmin_pc_pal', 'nectar_installer', 'nectar_launcher',
-                        'pikmin2_pc', 'pikmin2_pc_pal'
+                // Online co-op: -PnectarOnlineDeps=<prefijo android-arm64 de
+                // scripts/netplay-deps.sh> compila la sesión y el transporte.
+                def onlineDeps = project.findProperty('nectarOnlineDeps')
+                if (onlineDeps) {
+                    arguments '-DNECTAR_ONLINE=ON', '-DPIKMIN_NETPLAY_BUILD=ON', '-DNECTAR_NET_ENABLE_GNS=ON',
+                              '-DPIKMIN_NETPLAY_SOURCE_ID=dev-online', // igual que el build de PC con el que juega
+                              "-DCMAKE_PREFIX_PATH=${onlineDeps}", "-DCMAKE_FIND_ROOT_PATH=${onlineDeps}"
+                }
+                targets 'SDL2', 'pikmin_pc', 'pikmin_pc_pal', 'nectar_installer', 'nectar_launcher'
+                // Netplay de 5laric sin la capa online: -PnectarNetplay=<id>, el
+                // mismo PIKMIN_NETPLAY_SOURCE_ID que el build de PC con el que juega.
+                def netplayId = project.findProperty('nectarNetplay')
+                if (netplayId && !onlineDeps) {
+                    arguments '-DPIKMIN_NETPLAY_BUILD=ON', '-DNECTAR_ONLINE=OFF', "-DPIKMIN_NETPLAY_SOURCE_ID=${netplayId}"
+                }
+                // -PnectarOnlyPikmin1: APK de prueba sin Pikmin 2.
+                if (!project.hasProperty('nectarOnlyPikmin1')) targets 'pikmin2_pc', 'pikmin2_pc_pal'
             }
         }
         ndk { abiFilters 'arm64-v8a' }

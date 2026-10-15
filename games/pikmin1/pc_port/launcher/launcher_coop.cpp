@@ -128,6 +128,19 @@ void CoopFlow::startJoin(const fs::path& exchangeDir, const std::vector<std::str
     mStage = Stage::PasteOffer;
 }
 
+// The game's ICE codes (pc_netplay_ice.h): v3 "NPIX3-" + base64url of
+// 0x03 and the kind byte, so an offer ('O') starts "NPIX3-A08" and an answer
+// ('A') "NPIX3-A0E"; older builds print NPIX2- offers and NPIX1- answers.
+static bool isOfferCode(const std::string& code)
+{
+    return code.rfind("NPIX3-A08", 0) == 0 || code.rfind("NPIX2-", 0) == 0;
+}
+
+static bool isAnswerCode(const std::string& code)
+{
+    return code.rfind("NPIX3-A0E", 0) == 0 || code.rfind("NPIX1-", 0) == 0;
+}
+
 bool CoopFlow::submitOffer(const std::string& text, std::string& error)
 {
     if (mRole != Role::Join || mStage != Stage::PasteOffer) {
@@ -139,12 +152,12 @@ bool CoopFlow::submitOffer(const std::string& text, std::string& error)
         error = "Paste the host's offer code first.";
         return false;
     }
-    if (code.rfind("NPIX1-", 0) == 0) {
-        error = "That is an answer code. Paste the host's offer (it starts with NPIX2-).";
+    if (isAnswerCode(code)) {
+        error = "That is an answer code. Paste the host's offer (it starts with NPIX3-A08).";
         return false;
     }
-    if (code.rfind("NPIX2-", 0) != 0) {
-        error = "That is not an offer code (it starts with NPIX2-).";
+    if (!isOfferCode(code)) {
+        error = "That is not an offer code (it starts with NPIX3-A08).";
         return false;
     }
     std::error_code ec;
@@ -172,12 +185,12 @@ bool CoopFlow::submitAnswer(const std::string& text, std::string& error)
         error = "Paste the other player's answer code first.";
         return false;
     }
-    if (code.rfind("NPIX2-", 0) == 0) {
-        error = "That is your own offer. Paste the answer the other player sent back (it starts with NPIX1-).";
+    if (isOfferCode(code)) {
+        error = "That is your own offer. Paste the answer the other player sent back (it starts with NPIX3-A0E).";
         return false;
     }
-    if (code.rfind("NPIX1-", 0) != 0) {
-        error = "That is not an answer code (it starts with NPIX1-).";
+    if (!isAnswerCode(code)) {
+        error = "That is not an answer code (it starts with NPIX3-A0E).";
         return false;
     }
     if (!writeCode(mDir / "answer.txt", code, error)) return false;

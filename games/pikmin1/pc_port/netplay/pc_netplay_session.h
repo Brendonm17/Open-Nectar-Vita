@@ -70,3 +70,5 @@ void pc_netplay_online_request_leave(void);
 void pc_netplay_online_request_rejoin(void);
 bool pc_netplay_online_spectating(void);
 bool pc_netplay_online_is_guest(void);
+/// Why the last online join failed (--online-error), once; null when none.
+const char* pc_netplay_online_take_error(void);

@@ -20,6 +20,19 @@
 #include "settings/pc_settings.h"
 #include "settings/pc_glass_menu.h"
 #include "settings/pc_settings_rows.h"
+#include "netplay/pc_online_menu.h"
+
+// Local/online choice for Co-op and VS: only netplay builds with the online
+// transport define it (pc_online_menu.cpp); elsewhere they go straight on.
+__attribute__((weak)) bool pc_online_menu_available(void);
+__attribute__((weak)) void pc_online_menu_open(bool vs);
+__attribute__((weak)) bool pc_online_menu_active(void);
+__attribute__((weak)) int pc_online_menu_update(Controller* input);
+
+namespace {
+int sPcOnlineAction = -1; // 2 Co-op / 3 VS while the local/online choice is open
+bool pc_online_choice_open() { return pc_online_menu_active != nullptr && pc_online_menu_active(); }
+} // namespace
 #endif
 
 /**
@@ -335,6 +348,9 @@ zen::ogScrTitleMgr::TitleStatus zen::ogScrTitleMgr::update(Controller* input)
 	}
 
 	mNoInputTimer += gsys->getFrameTime();
+#if defined(PIKI_PC_PORT)
+	if (pc_online_choice_open()) mNoInputTimer = 0.0f;
+#endif
 	if (mNoInputTimer >= 60.0f) {
 		input->updateCont(KBBTN_B);
 		mMainMenu->update(input);
@@ -343,9 +359,30 @@ zen::ogScrTitleMgr::TitleStatus zen::ogScrTitleMgr::update(Controller* input)
 	switch (mCurrentMenuID) {
 	case MENU_MainMenu:
 	{
+#if defined(PIKI_PC_PORT)
+		int forced = -1;
+		if (pc_online_choice_open()) {
+			const int r = pc_online_menu_update(input);
+			if (r == PC_ONLINE_MENU_CANCEL) {
+				mMainMenu->start(sPcOnlineAction == 3 ? 2 : 1); // back on the row
+				sPcOnlineAction = -1;
+			}
+			if (r != PC_ONLINE_MENU_LOCAL) {
+				break;
+			}
+			forced          = sPcOnlineAction;
+			sPcOnlineAction = -1;
+		}
+		if (forced < 0) {
+			mMainMenu->update(input);
+		}
+		int flag0         = forced < 0 ? mMainMenu->getStatusFlag() : 0;
+		mCurrentSelection = forced < 0 ? mMainMenu->getSelectMenu() : -1;
+#else
 		mMainMenu->update(input);
 		int flag0         = mMainMenu->getStatusFlag();
 		mCurrentSelection = mMainMenu->getSelectMenu();
+#endif
 		if (flag0 != 0) {
 			break;
 		}
@@ -357,6 +394,15 @@ zen::ogScrTitleMgr::TitleStatus zen::ogScrTitleMgr::update(Controller* input)
 		static const int kPcRowToAction[7] = { 0, 2, 3, 4, 1, 6, 5 };
 		if (mCurrentSelection >= 0 && mCurrentSelection < 7) {
 			mCurrentSelection = kPcRowToAction[mCurrentSelection];
+		}
+		if (forced >= 0) {
+			mCurrentSelection = forced;
+		} else if ((mCurrentSelection == 2 || mCurrentSelection == 3) && pc_online_menu_available != nullptr
+		           && pc_online_menu_available()) {
+			// Co-op / VS: local or online first.
+			sPcOnlineAction = mCurrentSelection;
+			pc_online_menu_open(mCurrentSelection == 3);
+			break;
 		}
 		if (mCurrentSelection >= 0 && mCurrentSelection != 4) {
 			// Cualquier salida del título decide de nuevo: el Randomizer solo

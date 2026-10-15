@@ -45,6 +45,7 @@
 // replays a logged session offline through the same per-Advance body.
 
 #include "netplay/pc_netplay_session.h"
+#include "netplay/pc_online_relaunch.h"
 
 #include "netplay/pc_coop_switch.h"
 #include "netplay/pc_input_log.h"
@@ -135,6 +136,22 @@
 #include <unistd.h>
 #endif
 
+// Ends the process with a session exit code. On Android the game thread
+// cannot run static destructors while the UI threads still use them (abort:
+// "mutex destroyed"), so it leaves without them there.
+[[noreturn]] static void session_exit(int code)
+{
+	fflush(stdout);
+	fflush(stderr);
+#if defined(__ANDROID__)
+	_exit(code);
+#else
+	std::exit(code);
+#endif
+}
+
+static std::string sOnlineError; // --online-error: shown once on the title
+
 namespace {
 
 namespace npx = pc_netplay_exit;
@@ -176,6 +193,8 @@ struct Config {
 	uint16_t onlinePort    = 0;  // --online-host <port>; 0 = random high port
 	std::string onlineCode;      // --online-join <code | @file>
 	std::string onlineCodeOut;   // --online-code-out <file>: the host writes its code there
+	bool onlineCodeClipboard = false; // --online-code-clipboard: the host copies its code to the clipboard
+	bool onlineFromMenu      = false; // guest started by the in-game menu (--online-code-once)
 	bool onlinePredictive  = false; // --online-predictive: Phase 4 captain prediction instead of the exact replica
 	int onlineSaveSlot     = 0;     // --online-save <1-3>: the host continues that file of its own card
 };
@@ -556,7 +575,7 @@ bool env_is_one(const char* name)
 	printf(fmt, arg != nullptr ? arg : "");
 	printf("\n");
 	fflush(stdout);
-	std::exit(npx::kUsage);
+	session_exit(npx::kUsage);
 }
 
 // ---- digests ----
@@ -609,7 +628,7 @@ void compute_local_hello()
 	if (const char* why = pc_vs_arena_prepare()) {
 		printf("[netplay] refusing session: the VS map cannot be played: %s\n", why);
 		fflush(stdout);
-		std::exit(npx::kUsage);
+		session_exit(npx::kUsage);
 	}
 	const u8* mod = nullptr;
 	const u8* ini = nullptr;
@@ -701,7 +720,7 @@ void load_scripted_file()
 	if (f == nullptr) {
 		printf("[netplay] local input file: cannot open %s\n", path);
 		fflush(stdout);
-		std::exit(npx::kInputFile);
+		session_exit(npx::kInputFile);
 	}
 	fseek(f, 0, SEEK_END);
 	const long size = ftell(f);
@@ -710,7 +729,7 @@ void load_scripted_file()
 		printf("[netplay] local input file: truncated %s\n", path);
 		fflush(stdout);
 		fclose(f);
-		std::exit(npx::kInputFile);
+		session_exit(npx::kInputFile);
 	}
 	sScriptBytes.resize((size_t)size);
 	const size_t got = fread(sScriptBytes.data(), 1, (size_t)size, f);
@@ -719,7 +738,7 @@ void load_scripted_file()
 	if (got < 10 || memcmp(sScriptBytes.data(), "PKNI", 4) != 0) {
 		printf("[netplay] local input file: bad magic %s\n", path);
 		fflush(stdout);
-		std::exit(npx::kInputFile);
+		session_exit(npx::kInputFile);
 	}
 	const uint16_t version = (uint16_t)(sScriptBytes[4] | ((uint16_t)sScriptBytes[5] << 8));
 	const uint16_t pads    = (uint16_t)(sScriptBytes[6] | ((uint16_t)sScriptBytes[7] << 8));
@@ -728,7 +747,7 @@ void load_scripted_file()
 		printf("[netplay] local input file: need pkni v2 4x14 or v3 4x16, got v%u %ux%u (%s)\n",
 		       (unsigned)version, (unsigned)pads, (unsigned)rec, path);
 		fflush(stdout);
-		std::exit(npx::kInputFile);
+		session_exit(npx::kInputFile);
 	}
 	sScriptRec    = rec;
 	sScriptTicks  = (sScriptBytes.size() - 10) / rec;
@@ -1483,6 +1502,8 @@ void parse_config()
 	if (hostVal != nullptr && joinVal != nullptr) usage_exit("--netplay-host and --netplay-join are exclusive%s", "");
 	const char* onlineHost = argv_value(sArgc, sArgv, "--online-host");
 	const char* onlineJoin = argv_value(sArgc, sArgv, "--online-join");
+	// Why the last online join failed (the in-game menu shows it on the title).
+	if (const char* e = argv_value(sArgc, sArgv, "--online-error")) sOnlineError = e;
 	if (onlineHost != nullptr || onlineJoin != nullptr) {
 		if (onlineHost != nullptr && onlineJoin != nullptr) usage_exit("--online-host and --online-join are exclusive%s", "");
 		if (hostVal != nullptr || joinVal != nullptr || replayVal != nullptr || launch.active)
@@ -1502,8 +1523,10 @@ void parse_config()
 	// Continuing a file: the host plays on its own card (only the host writes
 	// progress) and sends a copy to the guest. Otherwise both peers start a
 	// fresh run in a private folder, like the lockstep launcher.
+	// Always, even when NECTAR_SAVE_DIR names the player's folder (Android
+	// sets it): the guest's copy of the host's card must never land there.
 	if ((onlineHost != nullptr && onlineSave == 0) || onlineJoin != nullptr) {
-		if (getenv_nonempty("NECTAR_SAVE_DIR") == nullptr) {
+		{
 			char stamp[32];
 			const time_t now = time(nullptr);
 			strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", localtime(&now));
@@ -1531,9 +1554,11 @@ void parse_config()
 		sCfg.onlineSaveSlot = onlineSave;
 		// The code is a secret and never goes to the log; until the launcher
 		// shows it, the host must name a file for it.
-		const char* out = argv_value(sArgc, sArgv, "--online-code-out");
-		if (out == nullptr) usage_exit("--online-host needs --online-code-out <file> to hand over its code%s", "");
-		sCfg.onlineCodeOut = out;
+		const char* out          = argv_value(sArgc, sArgv, "--online-code-out");
+		sCfg.onlineCodeClipboard = argv_has(sArgc, sArgv, "--online-code-clipboard");
+		if (out == nullptr && !sCfg.onlineCodeClipboard)
+			usage_exit("--online-host needs --online-code-out <file> or --online-code-clipboard to hand over its code%s", "");
+		if (out != nullptr) sCfg.onlineCodeOut = out;
 	} else if (onlineJoin != nullptr) {
 		std::string code = onlineJoin;
 		if (!code.empty() && code[0] == '@') {
@@ -1544,6 +1569,11 @@ void parse_config()
 			fclose(f);
 			buf[n] = '\0';
 			code   = buf;
+			// The in-game menu hands the code over in a file read only once.
+			if (argv_has(sArgc, sArgv, "--online-code-once")) {
+				std::remove(onlineJoin + 1);
+				sCfg.onlineFromMenu = true;
+			}
 			while (!code.empty() && (code.back() == '\n' || code.back() == '\r' || code.back() == ' ')) code.pop_back();
 		}
 		sCfg.active           = true;
@@ -1643,6 +1673,8 @@ void parse_config()
 	sCfg.mode = asked == xfer::kModeVs ? xfer::kModeVs : xfer::kModeCoopDirect;
 	if (sCfg.mode == xfer::kModeVs) {
 		sCfg.vsMapFile = vsMapArg;
+		// Online VS has no map transfer: both peers play the built-in arena.
+		if (sCfg.online && !vsMapArg) pc_vs_map_select("");
 		if (!vsMapJson.empty()) {
 			// The host's map.json, written to this run's folder and played as a file.
 			const std::string dir  = launch.active ? launch.runDir : std::string(".");
@@ -1795,7 +1827,7 @@ void log_refusal_detail(uint8_t field, const Hello* peer)
 	// Best effort: tell the peer why (the channel is unreliable).
 	for (int i = 0; i < 5; ++i) send_hello_msg(xfer::kHsRefuse, field, 0);
 	stop_session();
-	std::exit(npx::kRefused);
+	session_exit(npx::kRefused);
 }
 
 [[noreturn]] void peer_refused_exit(uint8_t field)
@@ -1803,7 +1835,7 @@ void log_refusal_detail(uint8_t field, const Hello* peer)
 	printf("[netplay] handshake refused: %s (by the peer)\n", xfer::field_name(field == 0 ? 99 : field));
 	fflush(stdout);
 	stop_session();
-	std::exit(npx::kRefused);
+	session_exit(npx::kRefused);
 }
 
 double handshake_rtt_median()
@@ -1828,7 +1860,7 @@ bool handshake_pump()
 		       (int)sSentAck, (int)sGotAck, (unsigned long long)sHsSamples.size());
 		fflush(stdout);
 		stop_session();
-		std::exit(npx::kRefused);
+		session_exit(npx::kRefused);
 	}
 	if (now - sHsLastSendMs >= 100) {
 		const uint64_t nonce = sHsNextNonce++;
@@ -2125,7 +2157,7 @@ void replay_load(const char* path)
 	if (!pc_netplay_inlog::load_file(path, &sReplay.log, &err)) {
 		printf("[netplay] replay: cannot load %s: %s\n", path, err.c_str());
 		fflush(stdout);
-		std::exit(npx::kInputFile);
+		session_exit(npx::kInputFile);
 	}
 	sReplay.path     = path;
 	sReplay.settings = sReplay.log.meta_get("settings");
@@ -2653,6 +2685,9 @@ void ice_emit_code(const char* kind, const std::string& code)
 	} else if (SDL_SetClipboardText(code.c_str()) == 0) {
 		printf("[netplay] launch: %s code copied to the clipboard (%llu chars)\n", kind,
 		       (unsigned long long)code.size());
+		// Android has no console: say it over the (still black) game.
+		if (std::strcmp(kind, "answer") == 0 && !argv_has(sArgc, sArgv, "--netplay-dialogs"))
+			pc_online_android_toast("Answer code copied. Send it to your friend; the game starts when they paste it.");
 	} else {
 		printf("[netplay] launch: clipboard copy failed (%s); copy the code above\n", SDL_GetError());
 	}
@@ -2672,7 +2707,98 @@ void ice_emit_code(const char* kind, const std::string& code)
 	printf("[netplay] ice: %s\n", err.c_str());
 	fflush(stdout);
 	stop_session();
-	std::exit(npx::kTransport);
+	session_exit(npx::kTransport);
+}
+
+// --netplay-dialogs (the title's Online menu): the code exchange in system
+// dialogs instead of the console. SDL message boxes are native windows on
+// the desktop and AlertDialogs on Android, so they work before the game has
+// drawn anything. Returns the pressed button's index, -1 if none.
+int ice_dialog(const char* title, const std::string& text, std::initializer_list<const char*> buttons)
+{
+	std::vector<SDL_MessageBoxButtonData> data;
+	int id = 0;
+	for (const char* label : buttons) {
+		SDL_MessageBoxButtonData b{};
+		b.buttonid = id;
+		b.text     = label;
+		if (id == 0) b.flags |= SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT;
+		data.push_back(b);
+		++id;
+	}
+	SDL_MessageBoxData box{};
+	box.flags      = SDL_MESSAGEBOX_INFORMATION;
+	box.window     = SDL_GL_GetCurrentWindow();
+	box.title      = title;
+	box.message    = text.c_str();
+	box.numbuttons = (int)data.size();
+	box.buttons    = data.data();
+	int pressed    = -1;
+	if (SDL_ShowMessageBox(&box, &pressed) != 0) {
+		printf("[netplay] dialog failed: %s\n", SDL_GetError());
+		fflush(stdout);
+		return -1;
+	}
+	return pressed;
+}
+
+// The clipboard's text without spaces or line breaks.
+std::string clipboard_code_text()
+{
+	char* text = SDL_GetClipboardText();
+	std::string out;
+	for (const char* c = text; c != nullptr && *c != '\0'; ++c)
+		if (*c != ' ' && *c != '\n' && *c != '\r' && *c != '\t') out += *c;
+	SDL_free(text);
+	return out;
+}
+
+#if defined(__linux__) && !defined(__ANDROID__)
+// Linux desktops: the message box is another process (zenity/kdialog) that
+// holds the focus, and Wayland only lets the focused app read the clipboard,
+// so the answer is pasted into that tool's own text field instead. Empty when
+// neither tool is there or the player cancels.
+// With `prefill` (a code: [A-Za-z0-9_-] only) the field shows it for the
+// player to copy, since the game cannot set the clipboard without the focus.
+std::string linux_entry_dialog(const char* title, const char* text, const std::string& prefill = std::string())
+{
+	const std::string zenity = std::string("zenity --entry --width=560 --title='") + title + "' --text='" + text
+	                         + "' --entry-text='" + prefill + "' 2>/dev/null";
+	const std::string kdialog = std::string("kdialog --title '") + title + "' --inputbox '" + text + "' '" + prefill
+	                          + "' 2>/dev/null";
+	for (const std::string& cmd : { zenity, kdialog }) {
+		const std::string tool = cmd.substr(0, cmd.find(' '));
+		if (std::system(("command -v " + tool + " >/dev/null 2>&1").c_str()) != 0) continue;
+		FILE* p = popen(cmd.c_str(), "r");
+		if (p == nullptr) continue;
+		std::string out;
+		char buf[4096];
+		size_t n;
+		while ((n = fread(buf, 1, sizeof buf, p)) > 0 && out.size() < 65536) out.append(buf, n);
+		pclose(p);
+		std::string code;
+		for (char c : out)
+			if (c != ' ' && c != '\n' && c != '\r' && c != '\t') code += c;
+		return code;
+	}
+	return std::string();
+}
+#endif
+
+// Cancelled from a dialog: back to the game in normal mode.
+[[noreturn]] void ice_dialog_cancel()
+{
+	printf("[netplay] ice: cancelled from the dialog\n");
+	stop_session();
+	std::string err;
+	if (pc_online_relaunch({}, &err)) {
+#if defined(__ANDROID__)
+		for (;;) std::this_thread::sleep_for(std::chrono::seconds(1));
+#else
+		std::_Exit(0);
+#endif
+	}
+	session_exit(0);
 }
 
 // The blocking code exchange on the first turn: the host gathers and prints
@@ -2703,6 +2829,10 @@ void ice_connect(System* sys)
 		bundle.configText = pc_settings_netplay_config_text();
 		bundle.descriptor = pc_netplay_launch_descriptor(pc_coop_captain(0), pc_coop_captain(1), sCfg.mode,
 		                                                 sCfg.mode == xfer::kModeVs ? pc_vs_map_source_text() : std::string());
+		// Co-op with the default captains: the joiner assumes them when the
+		// descriptor is empty, so the code leaves it out.
+		if (bundle.descriptor == pc_netplay_launch_descriptor(0, 1, xfer::kModeCoopDirect, std::string()))
+			bundle.descriptor.clear();
 		if (sCfg.mode == xfer::kModeVs) {
 			const size_t json = pc_vs_map_source_text().size();
 			if (json > kPcNetplayVsMapJsonMax)
@@ -2716,7 +2846,50 @@ void ice_connect(System* sys)
 		if (!sIce->host_create_offer(nic, bundle, &offer, &err, pump)) ice_fail(err);
 		ice_emit_code("offer", offer);
 		bool got = false;
-		if (!L.answerIn.empty()) {
+		if (argv_has(sArgc, sArgv, "--netplay-dialogs")) {
+			std::string note;
+#if defined(__linux__) && !defined(__ANDROID__)
+			linux_entry_dialog("Online - your room code",
+			                   "Your room code: copy it (Ctrl+A, Ctrl+C) and send it to your friend, then OK.", offer);
+#endif
+			for (;;) {
+				const std::string text =
+				    std::string(sCfg.mode == xfer::kModeVs ? "VS" : "Co-op")
+				    + " room open.\n\nYour room code (" + offer.substr(0, 16) + "..., " + std::to_string(offer.size())
+				    + " characters) goes to your friend, who joins from "
+				    + (sCfg.mode == xfer::kModeVs ? "VS" : "Co-op") + " > Online > Join with a code.\n\nTheir game then "
+				    "gives them an answer code (NPIX3-...). When they send it to you, copy it and press Paste answer."
+				    + note;
+				const int pressed = ice_dialog("Online - waiting for your friend", text,
+				                               { "Paste answer", "Copy my code again", "Cancel" });
+				if (pressed == 1) {
+#if defined(__linux__) && !defined(__ANDROID__)
+					linux_entry_dialog("Online - your room code",
+					                   "Your room code: copy it (Ctrl+A, Ctrl+C) and send it to your friend, then OK.", offer);
+					note.clear();
+#else
+					SDL_SetClipboardText(offer.c_str());
+					note = "\n\nYour code was copied again.";
+#endif
+					continue;
+				}
+				if (pressed != 0) ice_dialog_cancel();
+#if defined(__linux__) && !defined(__ANDROID__)
+				answer = linux_entry_dialog("Online - your friend's answer",
+				                            "Paste your friend's answer code (Ctrl+V), then OK:");
+				if (answer.empty()) answer = clipboard_code_text();
+#else
+				answer = clipboard_code_text();
+#endif
+				std::string sdp, why;
+				if (!pc_netplay_ice::ice_decode_any_answer(answer, &sdp, &why)) {
+					note = "\n\nThat is not your friend's answer code (" + why + "). Copy their whole code and try again.";
+					continue;
+				}
+				got = true;
+				break;
+			}
+		} else if (!L.answerIn.empty()) {
 			printf("[netplay] launch: waiting for the answer code in %s (up to %.0f min)\n", L.answerIn.c_str(),
 			       pc_netplay_ice::ice_connect_timeout_ms() / 60000.0);
 			fflush(stdout);
@@ -2731,6 +2904,28 @@ void ice_connect(System* sys)
 		std::string answer;
 		if (!sIce->join_create_answer(nic, L.offerCode, &answer, &err, pump, nullptr)) ice_fail(err);
 		ice_emit_code("answer", answer);
+		if (argv_has(sArgc, sArgv, "--netplay-dialogs")) {
+			std::string note;
+#if defined(__linux__) && !defined(__ANDROID__)
+			// The code in a text field to copy; no second dialog.
+			linux_entry_dialog("Online - your answer code",
+			                   "Your answer code: copy it (Ctrl+A, Ctrl+C) and send it back to your friend. The game "
+			                   "starts once they paste it.",
+			                   answer);
+			while (false) {
+#else
+			for (;;) {
+#endif
+				const int pressed = ice_dialog(
+				    "Online - your answer code",
+				    "Your answer code is in the clipboard (" + answer.substr(0, 16) + "...). Send it back to your friend, "
+				        "who pastes it with Paste answer.\n\nThe game starts by itself once they do." + note,
+				    { "OK", "Copy again" });
+				if (pressed != 1) break;
+				SDL_SetClipboardText(answer.c_str());
+				note = "\n\nCopied again.";
+			}
+		}
 	}
 	if (!sIce->wait_connected(pc_netplay_ice::ice_connect_timeout_ms(), &completedMs, &err, pump)) ice_fail(err);
 	printf("[netplay] ice transport ready (connect %.0fms) local [%s] remote [%s]\n", completedMs,
@@ -2749,7 +2944,7 @@ void start_gekko_session()
 	if (!gekko_create(&sGekko, GekkoGameSession) || sGekko == nullptr) {
 		printf("[netplay] gekko_create failed\n");
 		fflush(stdout);
-		std::exit(npx::kTransport);
+		session_exit(npx::kTransport);
 	}
 	// The lossy test wrapper only when impairments are configured.
 	pc_netplay_transport::LossyParams lp;
@@ -2890,7 +3085,7 @@ void handle_desync(int frame, uint32_t localCk, uint32_t remoteCk, int remoteHan
 	lines.push_back("(this game: " + folder + ").");
 	lines.push_back("Please send both folders with a bug report.");
 	begin_banner(npx::kDesync, "DESYNC - SESSION STOPPED", true, lines);
-	if (!sBannerOn) std::exit(npx::kDesync);
+	if (!sBannerOn) session_exit(npx::kDesync);
 }
 
 void handle_session_events()
@@ -3019,7 +3214,7 @@ bool run_advance(System* sys, BaseApp* app, int frame, const uint8_t* inputs, bo
 		fflush(stdout);
 		pc_state_hash_flush();
 		stop_session();
-		std::exit(npx::kUsage);
+		session_exit(npx::kUsage);
 	}
 	if (sCfg.exitAfter > 0 && sSessionTicks >= sCfg.exitAfter) {
 		const double wallS = sSessionStartMs > 0 ? (now_ms() - sSessionStartMs) / 1000.0 : 0.0;
@@ -3145,6 +3340,12 @@ struct OnlineState {
 	std::vector<nnet::NetInputFrame> sent; // guest: last frames, newest first
 	uint64_t nextTick     = 0;  // next tick this peer simulates
 	double startMs        = 0;  // host: wall time of tick 0
+	int reachability      = 0;  // host: nnet::Reachability of the room
+	uint16_t roomPort     = 0;  // host: the room's local port
+	bool codeCopied       = false; // host: the code went to the clipboard
+	std::string code;              // host, in-game menu: shown while waiting, never logged
+	bool copyKeyDown      = false; // host: Ctrl+C held (copy once per press)
+	bool guestEverJoined  = false; // host: the code banner goes once someone joins
 	bool started          = false;
 	bool hostStartSeen    = false;
 	uint32_t pingId       = 0;
@@ -3303,6 +3504,44 @@ void online_teardown()
 	sOnline = nullptr;
 }
 
+// The guest could not join. Started from the in-game menu, the game comes
+// back in normal mode and the title says why; otherwise it exits (tools).
+[[noreturn]] void online_join_failed(const char* why)
+{
+	printf("[online] %s\n", why);
+	fflush(stdout);
+#if PIKI_NECTAR_ONLINE
+	std::string err;
+	if (sCfg.onlineFromMenu && pc_online_relaunch({ "--online-error", why }, &err)) {
+#if defined(__ANDROID__)
+		// Java restarts the activity and ends this process.
+		for (;;) std::this_thread::sleep_for(std::chrono::seconds(1));
+#else
+		std::_Exit(0);
+#endif
+	}
+#endif
+	session_exit(npx::kRefused);
+}
+
+const char* join_failure_text(nnet::JoinFailure failure)
+{
+	switch (failure) {
+	case nnet::JoinFailure::BadCode: return "The code is wrong or incomplete: copy it again.";
+	case nnet::JoinFailure::Expired: return "The code has expired: ask your friend for a new one.";
+	case nnet::JoinFailure::WrongVersion:
+	case nnet::JoinFailure::Incompatible:
+		return "Your friend's game is a different version. Both need the same disc (USA or Europe) and the same "
+		       "Open Nectar build.";
+	case nnet::JoinFailure::Unreachable:
+		return "Could not reach your friend's game. On the same Wi-Fi, check the host PC's firewall (UDP port 39911). "
+		       "Over the Internet the host's router must open that port (UPnP).";
+	case nnet::JoinFailure::Refused: return "The room refused the code (it was closed or reopened): ask for a new code.";
+	case nnet::JoinFailure::RoomFull: return "Someone else is already in that room.";
+	default: return "The connection to your friend's game was lost.";
+	}
+}
+
 void online_setup()
 {
 	if (sOnline != nullptr) return; // the guest joined early, at settings init
@@ -3350,7 +3589,7 @@ void online_setup()
 		if (error != nnet::RoomError::None) {
 			printf("[online] could not open the room: %s\n", nnet::roomErrorString(error));
 			fflush(stdout);
-			std::exit(npx::kTransport);
+			session_exit(npx::kTransport);
 		}
 		sOnline->link = sOnline->room->transport();
 		// The code is a secret: it goes to the UI or a file, never to the log.
@@ -3366,17 +3605,23 @@ void online_setup()
 			if (f != nullptr) fclose(f);
 			if (!ok) usage_exit("cannot write the online code to %s", sCfg.onlineCodeOut.c_str());
 		}
+		sOnline->reachability = (int)status.reachability;
+		sOnline->roomPort     = status.localPort;
+		if (sCfg.onlineCodeClipboard) {
+			sOnline->code       = status.code;
+			sOnline->codeCopied = SDL_SetClipboardText(status.code.c_str()) == 0;
+			if (!sOnline->codeCopied) printf("[online] clipboard copy failed: %s\n", SDL_GetError());
+		}
 		printf("[online] room open: port=%u reachability=%s method=%s code=%s\n", (unsigned)status.localPort,
 		       nnet::reachabilityString(status.reachability), nnet::mappingMethodString(status.method),
-		       "(written to the code file)");
+		       sCfg.onlineCodeClipboard ? "(copied to the clipboard)" : "(written to the code file)");
 	} else {
 		sOnline->join = std::make_unique<nnet::GuestJoin>();
 		const nnet::JoinFailure failure = sOnline->join->start(sCfg.onlineCode, online_compat(), kOnlineProtocolMajor,
 		                                                       nowUnix, (std::uint64_t)now_ms());
 		if (failure != nnet::JoinFailure::None) {
 			printf("[online] cannot join: %s\n", nnet::joinFailureString(failure));
-			fflush(stdout);
-			std::exit(npx::kRefused);
+			online_join_failed(join_failure_text(failure));
 		}
 		printf("[online] joining\n");
 	}
@@ -3426,6 +3671,7 @@ void online_host_events()
 				continue;
 			}
 			sOnline->receiver      = nnet::InputReceiver(sOnline->receiver.policy());
+			sOnline->guestEverJoined = true;
 			sOnline->spectator     = false;
 			sOnline->rejoinPending = false;
 			online_host_send_welcome();
@@ -3528,18 +3774,27 @@ void online_guest_events()
 			const std::string all(text.begin(), text.end());
 			const size_t newline = all.find('\n');
 			const size_t newline2 = newline == std::string::npos ? std::string::npos : all.find('\n', newline + 1);
-			if (printable && !sOnline->rulesSeen && all.rfind("seed=", 0) == 0 && newline2 != std::string::npos
-			    && all.compare(newline + 1, 5, "save=") == 0) {
+			const size_t newline3 = newline2 == std::string::npos ? std::string::npos : all.find('\n', newline2 + 1);
+			if (printable && !sOnline->rulesSeen && all.rfind("seed=", 0) == 0 && newline3 != std::string::npos
+			    && all.compare(newline + 1, 5, "save=") == 0 && all.compare(newline2 + 1, 5, "mode=") == 0) {
 				char* end            = nullptr;
 				const unsigned long seed = strtoul(all.c_str() + 5, &end, 10);
 				if (end != all.c_str() + newline || seed > 0xffffffffUL) continue;
 				const unsigned long slot = strtoul(all.c_str() + newline + 6, &end, 10);
 				if (end != all.c_str() + newline2 || slot > 3) continue;
+				// Both peers boot the mode before the rules arrive: the guest
+				// must have joined from the same menu (Co-op or VS).
+				const std::string mode = all.substr(newline2 + 6, newline3 - newline2 - 6);
+				const char* mine       = sCfg.mode == xfer::kModeVs ? "vs" : "coop";
+				if (mode != mine) {
+					online_join_failed(mode == "vs" ? "Your friend is playing VS: join from the VS menu."
+					                                : "Your friend is playing Co-op: join from the Co-op menu.");
+				}
 				// A continued file needs the whole card first.
 				if (slot != 0 && !sOnline->cardReady) {
 					printf("[online] the host continues file %lu but its card did not arrive intact\n", slot);
 					fflush(stdout);
-					std::exit(npx::kRefused);
+					session_exit(npx::kRefused);
 				}
 				pc_coop_direct_set_slot((int)slot);
 				// The day reseed reads the seed from the environment.
@@ -3549,7 +3804,7 @@ void online_guest_events()
 #else
 				setenv("PIKMIN_NETPLAY_SEED", std::to_string(seed).c_str(), 1);
 #endif
-				sOnline->rules     = all.substr(newline2 + 1);
+				sOnline->rules     = all.substr(newline3 + 1);
 				sOnline->rulesSeen = true;
 			}
 		} else if (message.header.type == nnet::MessageType::InputBundle) {
@@ -3589,7 +3844,18 @@ bool online_connect_pump()
 	const double now = now_ms();
 	if (sCfg.isHost) {
 		online_host_events();
-		if (sOnline->link->state() != nnet::TransportState::Connected) return false;
+		if (sOnline->link->state() != nnet::TransportState::Connected) {
+			// From the in-game menu the game does not wait in a black window:
+			// it starts, and the guest joins the running session (it gets the
+			// rules and every tick so far, and catches up).
+			if (!sCfg.onlineCodeClipboard) return false;
+			sOnline->startMs  = now;
+			sOnline->nextTick = 0;
+			printf("[online] room open; the game starts and the guest can join at any time\n");
+			fflush(stdout);
+			return true;
+		}
+		sOnline->guestEverJoined = true;
 		sOnline->startMs  = now;
 		sOnline->nextTick = 0;
 		// The session plays by the host's rules (sim settings).
@@ -3600,7 +3866,7 @@ bool online_connect_pump()
 	}
 	online_guest_events();
 	if (sOnline->peerGone) {
-		std::exit(npx::kRefused);
+		session_exit(npx::kRefused);
 	}
 	if (sOnline->guestConnected && now >= sOnline->nextPingMs) {
 		nnet::PingPayload ping;
@@ -3861,9 +4127,10 @@ void online_host_send_welcome()
 		sOnline->link->disconnectPeer(false);
 		return;
 	}
-	// "seed=<n>" and "save=<slot>" lines, then the sim settings text.
+	// "seed=<n>", "save=<slot>" and "mode=coop|vs" lines, then the sim settings text.
 	const std::string rules = "seed=" + std::to_string(sCfg.seed) + "\nsave=" + std::to_string(sCfg.onlineSaveSlot)
-	                        + "\n" + pc_settings_netplay_config_text();
+	                        + "\nmode=" + (sCfg.mode == xfer::kModeVs ? "vs" : "coop") + "\n"
+	                        + pc_settings_netplay_config_text();
 	online_send(nnet::MessageType::SessionRules, 0, std::vector<uint8_t>(rules.begin(), rules.end()),
 	            nnet::Delivery::ReliableOrdered);
 	online_send(nnet::MessageType::SceneStart, 0, nnet::encodeSceneStart({ kOnlineSceneEpoch, 0 }),
@@ -4082,6 +4349,13 @@ bool online_turn(System* sys, BaseApp* app)
 	if (sCfg.isHost) {
 		online_host_events();
 		online_host_backfill();
+		if (!sOnline->guestEverJoined && !sOnline->code.empty()) {
+			// Waiting for the guest: Ctrl+C copies the code again.
+			const Uint8* keys = SDL_GetKeyboardState(nullptr);
+			const bool copy   = keys != nullptr && keys[SDL_SCANCODE_C] && (SDL_GetModState() & KMOD_CTRL);
+			if (copy && !sOnline->copyKeyDown) sOnline->codeCopied = SDL_SetClipboardText(sOnline->code.c_str()) == 0;
+			sOnline->copyKeyDown = copy;
+		}
 		const uint64_t due = (uint64_t)((now - sOnline->startMs) / kOnlineSlotMs);
 		while (sOnline->nextTick <= due && advances < 2) {
 			const uint64_t tick = sOnline->nextTick;
@@ -4122,7 +4396,7 @@ bool online_turn(System* sys, BaseApp* app)
 			pc_state_hash_flush();
 			stop_session();
 			sPhase = kDone;
-			std::exit(npx::kTransport);
+			session_exit(npx::kTransport);
 		}
 		if (now >= sOnline->nextPingMs) {
 			nnet::PingPayload ping;
@@ -4139,7 +4413,7 @@ bool online_turn(System* sys, BaseApp* app)
 			if (sOnline->desync && env_is_one("PIKMIN_ONLINE_EXIT_ON_DESYNC")) {
 				pc_state_hash_flush();
 				stop_session();
-				std::exit(npx::kDesync);
+				session_exit(npx::kDesync);
 			}
 			if (done == 0) sleep_hires_ms(1.0, 0.0);
 			return true;
@@ -4258,7 +4532,7 @@ void session_setup(System* sys)
 	if (!sSock->bind(sCfg.isHost ? sCfg.hostPort : 0)) {
 		printf("[netplay] bind %s failed\n", sCfg.isHost ? "host port" : "ephemeral port");
 		fflush(stdout);
-		std::exit(npx::kTransport);
+		session_exit(npx::kTransport);
 	}
 	if (!sCfg.isHost) sSock->set_peer(sCfg.joinIp, sCfg.joinPort);
 	if (getenv_nonempty("PIKMIN_NETPLAY_UDP_BIND") == nullptr && (sCfg.isHost || (sCfg.joinIp >> 24) != 127)) {
@@ -4294,6 +4568,50 @@ bool pc_netplay_hud_info(PcNetplayHudInfo* out)
 		const double now = now_ms();
 		out->running = true;
 		out->online  = true;
+		if (sCfg.isHost && sCfg.onlineCodeClipboard && !sOnline->guestEverJoined) {
+			// The room is open and nothing runs until the guest joins: a
+			// banner instead of a black window (no countdown: -1).
+			out->banner       = true;
+			out->bannerLeftMs = -1;
+			snprintf(out->bannerTitle, sizeof out->bannerTitle, "Room open - waiting for your friend");
+			auto line = [&](const char* text) {
+				if (out->bannerLines < kBannerMaxLines)
+					snprintf(out->bannerLine[out->bannerLines++], sizeof out->bannerLine[0], "%s", text);
+			};
+			line(sOnline->codeCopied ? "Your code (copied; Ctrl+C copies it again). Send it to your friend, who joins "
+			                           "from the same menu with Join with a code:"
+			                         : "Your code (Ctrl+C copies it). Send it to your friend, who joins from the same "
+			                           "menu with Join with a code:");
+			// The code has no spaces: break it at its dashes for the banner.
+			std::string row;
+			size_t at = 0;
+			const std::string& code = sOnline->code;
+			while (at < code.size() && out->bannerLines < kBannerMaxLines) {
+				size_t dash        = code.find('-', at);
+				const size_t end   = dash == std::string::npos ? code.size() : dash + 1;
+				const std::string group = code.substr(at, end - at);
+				if (!row.empty() && row.size() + group.size() > 44) {
+					line(row.c_str());
+					row.clear();
+				}
+				row += group;
+				at = end;
+			}
+			if (!row.empty()) line(row.c_str());
+			const auto reach = (nnet::Reachability)sOnline->reachability;
+			char buf[256];
+			if (reach == nnet::Reachability::NoAutomaticMapping) {
+				snprintf(buf, sizeof buf,
+				         "On the same network it works as is. Over the Internet your router did not open the port by "
+				         "itself: forward UDP port %u to this PC.",
+				         (unsigned)sOnline->roomPort);
+				line(buf);
+			} else if (reach == nnet::Reachability::BehindCgnat) {
+				line("Your connection is behind CGNAT: a friend on another network may not reach you. On the same "
+				     "network it works as is.");
+			}
+			line("The game is already running: press Start to pause it while you wait.");
+		}
 		nnet::TransportStats stats;
 		nnet::GatedTransport* link = online_link();
 		const bool linked = link != nullptr && link->state() == nnet::TransportState::Connected;
@@ -4319,7 +4637,19 @@ bool pc_netplay_hud_info(PcNetplayHudInfo* out)
 			snprintf(out->status, sizeof(out->status), "%s", text);
 		};
 		if (sCfg.isHost) {
-			if (sOnline->startMs == 0) status(0, "waiting for the guest");
+			if (sOnline->startMs == 0) {
+				char wait[64];
+				const auto reach = (nnet::Reachability)sOnline->reachability;
+				const char* copied = sOnline->codeCopied ? "code copied" : "waiting";
+				if (reach == nnet::Reachability::NoAutomaticMapping)
+					snprintf(wait, sizeof wait, "%s; open UDP port %u on the router", copied, (unsigned)sOnline->roomPort);
+				else if (reach == nnet::Reachability::BehindCgnat)
+					snprintf(wait, sizeof wait, "%s; CGNAT: the guest may not reach you", copied);
+				else
+					snprintf(wait, sizeof wait, "%s - waiting for the guest", copied);
+				status(reach == nnet::Reachability::NoAutomaticMapping || reach == nnet::Reachability::BehindCgnat ? 1 : 0,
+				       wait);
+			}
 			else if (!linked) status(1, "guest left - P2 idle");
 			else if (sOnline->backfillNext < sOnline->backfillEnd) status(0, "guest is catching up");
 			else if (sOnline->spectator) status(0, "guest is watching");
@@ -4434,7 +4764,7 @@ bool pc_netplay_session_drive(System* sys, BaseApp* app)
 		}
 		if (sBannerOn && sBannerExit >= 0) {
 			fflush(stdout);
-			std::exit(sBannerExit); // closed during a desync banner: keep its exit code
+			session_exit(sBannerExit); // closed during a desync banner: keep its exit code
 		}
 		return false;
 	}
@@ -4451,7 +4781,7 @@ bool pc_netplay_session_drive(System* sys, BaseApp* app)
 				sBannerOn = false;
 				printf("[netplay] end banner: closed after %.0f ms (%s)\n", shown, dismissed ? "key" : "timeout");
 				fflush(stdout);
-				if (sBannerExit >= 0) std::exit(sBannerExit);
+				if (sBannerExit >= 0) session_exit(sBannerExit);
 				request_quit();
 				return true;
 			}
@@ -4588,15 +4918,11 @@ const char* pc_netplay_session_online_rules(void)
 			if (sOnline->join->start(sCfg.onlineCode, online_compat(), kOnlineProtocolMajor, (std::uint64_t)time(nullptr),
 			                         (std::uint64_t)now_ms())
 			    != nnet::JoinFailure::None)
-				std::exit(npx::kRefused);
+				online_join_failed(join_failure_text(sOnline->join->failure()));
 			continue;
 		}
-		if (sOnline->peerGone) std::exit(npx::kRefused);
-		if (now_ms() > deadline) {
-			printf("[online] the host sent no rules within 30 s\n");
-			fflush(stdout);
-			std::exit(npx::kRefused);
-		}
+		if (sOnline->peerGone) online_join_failed(join_failure_text(sOnline->join->failure()));
+		if (now_ms() > deadline) online_join_failed("Your friend's game did not answer in time: try again.");
 		std::this_thread::sleep_for(std::chrono::milliseconds(2));
 	}
 	printf("[online] adopting the host's rules (%zu B)\n", sOnline->rules.size());
@@ -4623,6 +4949,14 @@ bool pc_netplay_online_spectating(void)
 #else
 	return false;
 #endif
+}
+
+const char* pc_netplay_online_take_error(void)
+{
+	static std::string taken;
+	taken = sOnlineError;
+	sOnlineError.clear();
+	return taken.empty() ? nullptr : taken.c_str();
 }
 
 bool pc_netplay_online_is_guest(void)

@@ -1391,6 +1391,39 @@ Progreso verificable: `libs/nectar_net/include/nectar_net/connection_code.h` y
   Android ARM64 bajo `qemu-aarch64`; MinGW compila;
 - [ ] **BLOQUEADO** pantallas Crear/Unirse en el launcher: `launcher_gui.cpp`
   y `launcher_main.cpp` tienen cambios locales ajenos sin commit;
+- [x] **Crear/Unirse dentro del juego** (`pc_online_menu.cpp`): Co-op o VS en
+  el título abre «Local / Online»; Online → «Create room» (Co-op: partida
+  nueva o continuar archivo 1-3) o «Join with a code». El juego se reinicia
+  con los parámetros online (`pc_online_relaunch.cpp`, aparte por los tipos
+  Win32 del juego): el host copia el código al portapapeles
+  (`--online-code-clipboard`) y el HUD avisa si hay que abrir el puerto o
+  hay CGNAT; el invitado lo pega y lo pasa en un fichero 0600 que se borra
+  al leerlo (`--online-code-once`). Las reglas llevan `mode=coop|vs` y el
+  invitado debe entrar desde el mismo menú; el VS online usa la arena de
+  serie en ambos. Android reinicia la actividad con los argumentos
+  (`NectarActivity.restartWithArguments`). Un fallo al unirse vuelve al
+  título con el motivo (`--online-error`);
+- [x] **probado con el juego (2026-10-15), PC Linux ↔ Android:** con la capa
+  propia el móvil no llegaba (sin UPnP en el router, ufw activo) y el host
+  iba lento; se probó entonces el **lockstep ICE de 5laric** y funciona
+  PC ↔ móvil en la misma Wi-Fi. Lo que se añadió para ello:
+  - el mismo menú del título, en builds netplay sin `NECTAR_ONLINE`, crea
+    sala (`--netplay-host-ice`) o se une (`--netplay-join-ice`) con
+    `--netplay-dialogs`: el intercambio de códigos en diálogos del sistema
+    (SDL message boxes; en Linux el código va en un campo de zenity/kdialog
+    porque Wayland no deja leer/escribir el portapapeles sin foco);
+  - códigos v3 `NPIX3-` (oferta 145 caracteres, antes 1207; respuesta 64,
+    antes ~300): SDP empaquetado a sus campos y ajustes como valores en el
+    orden de claves de la build (hash de 16 bits); v1/v2 se siguen leyendo;
+  - la sesión fuerza 30 FPS (el tick es 30 Hz: con 60 FPS el juego iba a
+    media velocidad), sin tocar el fichero de ajustes;
+  - Android: `WifiLock` de baja latencia durante la partida (el ahorro de
+    energía de la Wi-Fi retenía paquetes 100-300 ms), carpeta de sesión
+    junto a los datos (`/system/bin` no es escribible), toast/diálogos;
+  - `build.gradle`: `-PnectarNetplay=<source id>` (netplay sin capa propia),
+    `-PnectarOnlineDeps=<prefijo>` (capa propia), `-PnectarOnlyPikmin1`.
+  Pendiente: pantalla de conexión dibujada por el juego (ahora fondo negro
+  detrás de los diálogos); host en Android probado; Internet (STUN opt-in).
 - [x] respuesta automática del invitado por la conexión y cookie
   antiamplificación (desafío sin estado de GNS);
 - [ ] `SessionRules`, `session_id` y `resume_secret` para reanudar;
@@ -1584,12 +1617,10 @@ Progreso de la opción A (Linux, dos procesos reales del juego):
   `sqrtsd`); la capa Java (`NetGateway`) pasa la puerta de enlace al nativo
   (`ACCESS_NETWORK_STATE`). En la `.so` ARM no hay FMA fuera de GNS y de la
   corrección predictiva;
-- [ ] **riesgo Windows**: la puerta FP (`fp_gate.py`) del `.exe` MinGW
-  encuentra dos `fsqrt` x87 en `pumpAudio` (mezcla de audio, sqrt de MinGW
-  integrada por LTO). No ocurre en Linux. Antes del cross-play con Windows
-  hay que confirmar que el audio no alimenta la simulación o eliminarlas;
-- [ ] `iphlpapi.dll` aún no está en la lista blanca de
-  `scripts/release-windows.sh` (necesaria al publicar el online);
+- [x] puerta FP del `.exe` MinGW: los dos `fsqrt` x87 de `pumpAudio` eran
+  la RMS en `long double` de los diagnósticos de audio; ahora es `sqrt` en
+  `double` (SSE) y `fp_gate.py` pasa;
+- [x] `iphlpapi.dll` en la lista blanca de `scripts/release-windows.sh`;
 - [ ] APK completo con Gradle y prueba en dispositivo (necesita al
   mantenedor).
 

@@ -712,7 +712,11 @@ if(PIKMIN_NETPLAY_BUILD)
     endif()
     target_sources(${NECTAR_GAME} PRIVATE
         pc_port/netplay/pc_netplay_session.cpp
-        pc_port/netplay/pc_netplay_udp.cpp)
+        pc_port/netplay/pc_netplay_udp.cpp
+        # Title Local/Online choice: the host-authoritative room with
+        # NECTAR_ONLINE, otherwise the lockstep ICE (NPIX) room.
+        pc_port/netplay/pc_online_menu.cpp
+        pc_port/netplay/pc_online_relaunch.cpp)
     target_link_libraries(${NECTAR_GAME} PRIVATE gekkonet)
     if(WIN32)
         target_link_libraries(${NECTAR_GAME} PRIVATE ws2_32 winmm)

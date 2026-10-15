@@ -7,6 +7,7 @@
 #include "juice/juice.h"
 
 #include <stdlib.h>
+#include <cstdlib>
 #include <string.h>
 
 #include <atomic>
@@ -435,9 +436,526 @@ CodeKind ice_classify_code(const std::string& text)
 {
 	const std::string t = trim(text);
 	if (t.empty()) return kCodeEmpty;
+	if (t.compare(0, 6, "NPIX3-") == 0) return kCodeV3;
 	if (t.compare(0, 6, "NPIX2-") == 0) return kCodeOfferV2;
 	if (t.compare(0, 6, "NPIX1-") == 0) return kCodeV1;
 	return kCodeGarbage;
+}
+
+// ---- v3: the compact codes ----
+namespace {
+
+std::string sLocalConfigText; // ice_set_local_config_text
+
+void put_varint(std::vector<uint8_t>& raw, uint64_t v)
+{
+	while (v >= 0x80) {
+		raw.push_back((uint8_t)(v | 0x80));
+		v >>= 7;
+	}
+	raw.push_back((uint8_t)v);
+}
+
+bool get_varint(const uint8_t* p, size_t n, size_t* at, uint64_t* v)
+{
+	*v = 0;
+	for (int shift = 0; shift < 64; shift += 7) {
+		if (*at >= n) return false;
+		const uint8_t b = p[(*at)++];
+		*v |= (uint64_t)(b & 0x7F) << shift;
+		if ((b & 0x80) == 0) return true;
+	}
+	return false;
+}
+
+void put_bytes(std::vector<uint8_t>& raw, const std::string& s)
+{
+	put_varint(raw, s.size());
+	raw.insert(raw.end(), s.begin(), s.end());
+}
+
+bool get_bytes(const uint8_t* p, size_t n, size_t* at, size_t limit, std::string* s)
+{
+	uint64_t len = 0;
+	if (!get_varint(p, n, at, &len) || len > limit || len > n - *at) return false;
+	s->assign((const char*)p + *at, (size_t)len);
+	*at += (size_t)len;
+	return true;
+}
+
+// Canonical decimal (no sign, no leading zeros) within [0, max].
+bool parse_canonical_u32(const std::string& s, uint32_t max, uint32_t* out)
+{
+	if (s.empty() || s.size() > 10 || (s.size() > 1 && s[0] == '0')) return false;
+	uint64_t v = 0;
+	for (char c : s) {
+		if (c < '0' || c > '9') return false;
+		v = v * 10 + (uint64_t)(c - '0');
+	}
+	if (v > max) return false;
+	*out = (uint32_t)v;
+	return true;
+}
+
+bool parse_ipv4(const std::string& s, uint8_t out[4])
+{
+	size_t pos = 0;
+	for (int i = 0; i < 4; ++i) {
+		const size_t dot = i < 3 ? s.find('.', pos) : s.size();
+		if (dot == std::string::npos) return false;
+		uint32_t v = 0;
+		if (!parse_canonical_u32(s.substr(pos, dot - pos), 255, &v)) return false;
+		out[i] = (uint8_t)v;
+		pos    = dot + 1;
+	}
+	return true;
+}
+
+std::string ipv4_text(const uint8_t* b)
+{
+	return std::to_string(b[0]) + "." + std::to_string(b[1]) + "." + std::to_string(b[2]) + "." + std::to_string(b[3]);
+}
+
+std::vector<std::string> split_tokens(const std::string& s, char sep)
+{
+	std::vector<std::string> out;
+	size_t pos = 0;
+	for (;;) {
+		const size_t at = s.find(sep, pos);
+		out.push_back(s.substr(pos, at == std::string::npos ? std::string::npos : at - pos));
+		if (at == std::string::npos) return out;
+		pos = at + 1;
+	}
+}
+
+// ICE credentials are ice-chars (RFC 8445: ALPHA / DIGIT / "+" / "/"), so
+// they pack at six bits per character.
+const char kIceChars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+bool put_ice_chars(std::vector<uint8_t>& raw, const std::string& s)
+{
+	if (s.empty() || s.size() > 255) return false;
+	raw.push_back((uint8_t)s.size());
+	uint32_t acc = 0;
+	int bits     = 0;
+	for (char c : s) {
+		const char* at = strchr(kIceChars, c);
+		if (c == '\0' || at == nullptr) return false;
+		acc = (acc << 6) | (uint32_t)(at - kIceChars);
+		bits += 6;
+		while (bits >= 8) {
+			bits -= 8;
+			raw.push_back((uint8_t)(acc >> bits));
+		}
+	}
+	if (bits > 0) raw.push_back((uint8_t)(acc << (8 - bits)));
+	return true;
+}
+
+bool get_ice_chars(const uint8_t* p, size_t n, size_t* at, std::string* s)
+{
+	if (*at >= n) return false;
+	const size_t len   = p[(*at)++];
+	const size_t bytes = (len * 6 + 7) / 8;
+	if (len == 0 || bytes > n - *at) return false;
+	s->clear();
+	uint32_t acc = 0;
+	int bits     = 0;
+	size_t used  = 0;
+	while (s->size() < len) {
+		if (bits < 6) {
+			acc = (acc << 8) | p[*at + used++];
+			bits += 8;
+		}
+		bits -= 6;
+		*s += kIceChars[(acc >> bits) & 0x3F];
+	}
+	*at += bytes;
+	return true;
+}
+
+// The SDP libjuice writes, as the fields it carries:
+//   flags u8: 1 end-of-candidates, 2 ice-options:ice2
+//   ufrag, pwd (six-bit ice-chars), candidate count u8, then each candidate
+//     kind u8: bits 0-1 type (host/srflx/prflx/relay), 2 text address (not
+//              IPv4), 3 same port as the previous one, 4 raddr/rport follow
+//     foundation varint, priority (first u32be, then zigzag varint delta),
+//     address (4 bytes, or length + text), port u16be unless bit 3,
+//     raddr (length + text) and rport varint when bit 4
+// Anything else (another line, component, transport) is not packed; the
+// caller then sends the SDP text.
+const char* const kCandidateTypes[] = { "host", "srflx", "prflx", "relay" };
+
+bool sdp_pack(const std::string& sdp, std::vector<uint8_t>* out)
+{
+	std::vector<std::string> lines = split_tokens(sdp, '\n');
+	if (lines.empty() || !lines.back().empty()) return false;
+	lines.pop_back();
+	std::string ufrag, pwd;
+	uint8_t flags = 0;
+	std::vector<std::string> candidates;
+	for (std::string& line : lines) {
+		if (line.empty() || line.back() != '\r') return false;
+		line.pop_back();
+		if (line.compare(0, 12, "a=ice-ufrag:") == 0) ufrag = line.substr(12);
+		else if (line.compare(0, 10, "a=ice-pwd:") == 0) pwd = line.substr(10);
+		else if (line.compare(0, 12, "a=candidate:") == 0) candidates.push_back(line.substr(12));
+		else if (line == "a=end-of-candidates") flags |= 1;
+		else if (line == "a=ice-options:ice2") flags |= 2;
+		else return false;
+	}
+	if (candidates.size() > 32) return false;
+	std::vector<uint8_t> raw;
+	raw.push_back(flags);
+	if (!put_ice_chars(raw, ufrag) || !put_ice_chars(raw, pwd)) return false;
+	raw.push_back((uint8_t)candidates.size());
+	uint32_t lastPriority = 0;
+	uint32_t lastPort     = 0x10000;
+	for (size_t i = 0; i < candidates.size(); ++i) {
+		const std::vector<std::string> t = split_tokens(candidates[i], ' ');
+		if ((t.size() != 8 && t.size() != 12) || t[1] != "1" || t[2] != "UDP" || t[6] != "typ") return false;
+		uint32_t foundation = 0, priority = 0, port = 0;
+		if (!parse_canonical_u32(t[0], 0xFFFFFFFFu, &foundation) || !parse_canonical_u32(t[3], 0xFFFFFFFFu, &priority)
+		    || !parse_canonical_u32(t[5], 65535, &port))
+			return false;
+		int type = -1;
+		for (int k = 0; k < 4; ++k)
+			if (t[7] == kCandidateTypes[k]) type = k;
+		if (type < 0) return false;
+		uint8_t v4[4];
+		const bool isV4 = parse_ipv4(t[4], v4);
+		uint8_t kind    = (uint8_t)type;
+		if (!isV4) kind |= 4;
+		if (port == lastPort) kind |= 8;
+		uint32_t rport = 0;
+		if (t.size() == 12) {
+			if (t[8] != "raddr" || t[10] != "rport" || !parse_canonical_u32(t[11], 65535, &rport)) return false;
+			kind |= 16;
+		}
+		raw.push_back(kind);
+		put_varint(raw, foundation);
+		if (i == 0) {
+			raw.push_back((uint8_t)(priority >> 24));
+			raw.push_back((uint8_t)(priority >> 16));
+			raw.push_back((uint8_t)(priority >> 8));
+			raw.push_back((uint8_t)priority);
+		} else {
+			const int64_t d = (int64_t)priority - (int64_t)lastPriority;
+			put_varint(raw, d < 0 ? ((uint64_t)(-d) << 1) - 1 : (uint64_t)d << 1);
+		}
+		if (isV4) raw.insert(raw.end(), v4, v4 + 4);
+		else put_bytes(raw, t[4]);
+		if (!(kind & 8)) put_u16be(raw, port);
+		if (kind & 16) {
+			put_bytes(raw, t[9]);
+			put_varint(raw, rport);
+		}
+		lastPriority = priority;
+		lastPort     = port;
+	}
+	*out = raw;
+	return true;
+}
+
+bool sdp_unpack(const uint8_t* p, size_t n, size_t* at, std::string* sdp)
+{
+	if (*at >= n) return false;
+	const uint8_t flags = p[(*at)++];
+	std::string ufrag, pwd;
+	if (!get_ice_chars(p, n, at, &ufrag) || !get_ice_chars(p, n, at, &pwd) || *at >= n) return false;
+	const size_t count = p[(*at)++];
+	if (count > 32) return false;
+	std::string out = "a=ice-ufrag:" + ufrag + "\r\na=ice-pwd:" + pwd + "\r\n";
+	uint32_t lastPriority = 0, lastPort = 0;
+	for (size_t i = 0; i < count; ++i) {
+		if (*at >= n) return false;
+		const uint8_t kind = p[(*at)++];
+		if (kind & 0xE0) return false;
+		uint64_t foundation = 0;
+		if (!get_varint(p, n, at, &foundation) || foundation > 0xFFFFFFFFu) return false;
+		uint32_t priority = 0;
+		if (i == 0) {
+			if (n - *at < 4) return false;
+			priority = get_u32be(p + *at);
+			*at += 4;
+		} else {
+			uint64_t z = 0;
+			if (!get_varint(p, n, at, &z)) return false;
+			const int64_t d = (z & 1) ? -(int64_t)((z + 1) >> 1) : (int64_t)(z >> 1);
+			const int64_t v = (int64_t)lastPriority + d;
+			if (v < 0 || v > 0xFFFFFFFFll) return false;
+			priority = (uint32_t)v;
+		}
+		std::string address;
+		if (kind & 4) {
+			if (!get_bytes(p, n, at, 64, &address) || address.empty()) return false;
+			for (char c : address)
+				if (c <= ' ' || c > '~') return false;
+		} else {
+			if (n - *at < 4) return false;
+			address = ipv4_text(p + *at);
+			*at += 4;
+		}
+		uint32_t port = lastPort;
+		if (!(kind & 8)) {
+			if (n - *at < 2) return false;
+			port = ((uint32_t)p[*at] << 8) | p[*at + 1];
+			*at += 2;
+		} else if (i == 0) {
+			return false;
+		}
+		out += "a=candidate:" + std::to_string(foundation) + " 1 UDP " + std::to_string(priority) + " " + address + " "
+		     + std::to_string(port) + " typ " + kCandidateTypes[kind & 3];
+		if (kind & 16) {
+			std::string raddr;
+			uint64_t rport = 0;
+			if (!get_bytes(p, n, at, 64, &raddr) || raddr.empty() || !get_varint(p, n, at, &rport) || rport > 65535)
+				return false;
+			for (char c : raddr)
+				if (c <= ' ' || c > '~') return false;
+			out += " raddr " + raddr + " rport " + std::to_string(rport);
+		}
+		out += "\r\n";
+		lastPriority = priority;
+		lastPort     = port;
+	}
+	if (flags & ~3u) return false;
+	if (flags & 1) out += "a=end-of-candidates\r\n";
+	if (flags & 2) out += "a=ice-options:ice2\r\n";
+	*sdp = out;
+	return true;
+}
+
+// FNV-1a over the keys, folded to 16 bits: a different key list (another
+// build) is refused instead of misread.
+uint16_t keys_hash(const std::vector<std::string>& keys)
+{
+	uint32_t h = 2166136261u;
+	for (const std::string& k : keys) {
+		for (char c : k) h = (h ^ (uint8_t)c) * 16777619u;
+		h = (h ^ ';') * 16777619u;
+	}
+	return (uint16_t)(h ^ (h >> 16));
+}
+
+// "k=v;" pairs (the trailing ';' included) split into keys and values.
+bool split_config(const std::string& text, std::vector<std::string>* keys, std::vector<std::string>* values)
+{
+	if (text.empty() || text.back() != ';') return false;
+	std::vector<std::string> pairs = split_tokens(text.substr(0, text.size() - 1), ';');
+	for (const std::string& pair : pairs) {
+		const size_t eq = pair.find('=');
+		if (eq == std::string::npos || eq == 0) return false;
+		keys->push_back(pair.substr(0, eq));
+		values->push_back(pair.substr(eq + 1));
+	}
+	return true;
+}
+
+// The sim settings as values only, in the order of this build's key list:
+//   keys hash u16be, then per value a varint: zigzag(n) << 1 for a canonical
+//   integer, (length << 1) | 1 and the bytes for anything else.
+bool config_pack(const std::string& text, std::vector<uint8_t>* out)
+{
+	std::vector<std::string> keys, values;
+	if (!split_config(text, &keys, &values)) return false;
+	std::vector<uint8_t> raw;
+	put_u16be(raw, keys_hash(keys));
+	for (const std::string& v : values) {
+		char* end        = nullptr;
+		const long long n = v.empty() ? 0 : std::strtoll(v.c_str(), &end, 10);
+		if (!v.empty() && end != nullptr && *end == '\0' && std::to_string(n) == v && n > -(1ll << 40) && n < (1ll << 40)) {
+			const uint64_t z = n < 0 ? ((uint64_t)(-n) << 1) - 1 : (uint64_t)n << 1;
+			put_varint(raw, z << 1);
+		} else {
+			put_varint(raw, ((uint64_t)v.size() << 1) | 1);
+			raw.insert(raw.end(), v.begin(), v.end());
+		}
+	}
+	*out = raw;
+	return true;
+}
+
+bool config_unpack(const uint8_t* p, size_t n, const std::string& localText, std::string* text, std::string* err)
+{
+	std::vector<std::string> keys, unused;
+	if (!split_config(localText, &keys, &unused) || n < 2) {
+		*err = "this build has no session settings list";
+		return false;
+	}
+	if ((((uint16_t)p[0] << 8) | p[1]) != keys_hash(keys)) {
+		*err = "the host's game is a different build (its settings list differs): both need the same build";
+		return false;
+	}
+	size_t at = 2;
+	std::string out;
+	for (const std::string& key : keys) {
+		uint64_t tag = 0;
+		if (!get_varint(p, n, &at, &tag)) {
+			*err = "truncated session settings";
+			return false;
+		}
+		std::string value;
+		if (tag & 1) {
+			const uint64_t len = tag >> 1;
+			if (len > 1024 || len > n - at) {
+				*err = "bad session setting";
+				return false;
+			}
+			value.assign((const char*)p + at, (size_t)len);
+			at += (size_t)len;
+			for (char c : value)
+				if (c < ' ' || c > '~' || c == ';') {
+					*err = "bad session setting";
+					return false;
+				}
+		} else {
+			const uint64_t z = tag >> 1;
+			const long long v = (z & 1) ? -(long long)((z + 1) >> 1) : (long long)(z >> 1);
+			value = std::to_string(v);
+		}
+		out += key + "=" + value + ";";
+	}
+	if (at != n) {
+		*err = "trailing session settings";
+		return false;
+	}
+	*text = out;
+	return true;
+}
+
+} // namespace
+
+void ice_set_local_config_text(const std::string& text) { sLocalConfigText = text; }
+
+// v3 raw form: version 0x03 | kind 'O'/'A' | sdp block | offer only: seed
+// varint, config block, descriptor bytes | crc32 u32be. The sdp block is
+// mode u8 (0 text bytes, 1 packed) + data; the config block likewise, the
+// packed form needing the joiner's own key list (ice_set_local_config_text).
+bool ice_encode_v3(bool isOffer, const std::string& sdp, const SessionBundle* bundle, std::string* out, std::string* err)
+{
+	auto fail = [&](const char* why) {
+		if (err != nullptr) *err = why;
+		return false;
+	};
+	if (sdp.empty() || sdp.size() > kMaxSdpBytes) return fail("SDP empty or oversized");
+	if (isOffer && bundle == nullptr) return fail("an offer needs the session bundle");
+	std::vector<uint8_t> raw = { 0x03, isOffer ? (uint8_t)'O' : (uint8_t)'A' };
+	std::vector<uint8_t> packed;
+	std::string check;
+	size_t at = 0;
+	if (sdp_pack(sdp, &packed) && sdp_unpack(packed.data(), packed.size(), &at, &check) && check == sdp
+	    && at == packed.size()) {
+		raw.push_back(1);
+		raw.insert(raw.end(), packed.begin(), packed.end());
+	} else {
+		raw.push_back(0);
+		put_bytes(raw, sdp);
+	}
+	if (isOffer) {
+		if (bundle->configText.empty() || bundle->configText.size() > kMaxBundleConfigBytes)
+			return fail("session config block empty or oversized");
+		if (bundle->descriptor.size() > kMaxBundleDescBytes) return fail("session descriptor oversized");
+		put_varint(raw, bundle->seed);
+		std::string unpacked, why;
+		if (config_pack(bundle->configText, &packed)
+		    && config_unpack(packed.data(), packed.size(), bundle->configText, &unpacked, &why)
+		    && unpacked == bundle->configText) {
+			raw.push_back(1);
+			put_varint(raw, packed.size());
+			raw.insert(raw.end(), packed.begin(), packed.end());
+		} else {
+			raw.push_back(0);
+			put_bytes(raw, bundle->configText);
+		}
+		put_bytes(raw, bundle->descriptor);
+	}
+	put_crc(raw);
+	*out = "NPIX3-" + b64url_encode(raw.data(), raw.size());
+	return true;
+}
+
+bool ice_decode_v3(const std::string& text, bool* isOffer, std::string* sdp, SessionBundle* bundle, std::string* err)
+{
+	auto fail = [&](const std::string& why) {
+		if (err != nullptr) *err = "bad ICE code: " + why;
+		return false;
+	};
+	const std::string t = trim(text);
+	if (t.compare(0, 6, "NPIX3-") != 0) return fail("missing NPIX3- version prefix");
+	if (t.size() > kMaxOfferV2Chars) return fail("too long");
+	std::vector<uint8_t> raw;
+	std::string derr;
+	if (!b64url_decode(t.substr(6), &raw, &derr)) return fail(derr);
+	if (raw.size() < 2 + 1 + 4) return fail("too short");
+	const size_t body = raw.size() - 4;
+	if (crc32_of(raw.data(), body) != get_u32be(raw.data() + body)) return fail("CRC mismatch (copy the whole code)");
+	if (raw[0] != 0x03) return fail("unsupported version");
+	if (raw[1] != 'O' && raw[1] != 'A') return fail("bad kind");
+	const uint8_t* p = raw.data();
+	size_t at        = 2;
+	if (p[at] == 1) {
+		++at;
+		if (!sdp_unpack(p, body, &at, sdp)) return fail("bad connection data");
+	} else if (p[at] == 0) {
+		++at;
+		if (!get_bytes(p, body, &at, kMaxSdpBytes, sdp) || sdp->empty()) return fail("bad SDP");
+	} else {
+		return fail("bad SDP mode");
+	}
+	if (!sdp_has_credentials(*sdp)) return fail("SDP missing ice credentials");
+	*isOffer = raw[1] == 'O';
+	if (*isOffer) {
+		SessionBundle b;
+		uint64_t seed = 0;
+		if (!get_varint(p, body, &at, &seed) || seed > 0xFFFFFFFFu || at >= body) return fail("bad seed");
+		b.seed           = (uint32_t)seed;
+		const uint8_t mode = p[at++];
+		if (mode == 1) {
+			uint64_t len = 0;
+			if (!get_varint(p, body, &at, &len) || len > body - at || len > kMaxBundleConfigBytes)
+				return fail("bad session settings");
+			std::string why;
+			if (!config_unpack(p + at, (size_t)len, sLocalConfigText, &b.configText, &why)) return fail(why);
+			at += (size_t)len;
+		} else if (mode == 0) {
+			if (!get_bytes(p, body, &at, kMaxBundleConfigBytes, &b.configText) || b.configText.empty())
+				return fail("bad session settings");
+		} else {
+			return fail("bad session settings mode");
+		}
+		if (!get_bytes(p, body, &at, kMaxBundleDescBytes, &b.descriptor)) return fail("bad session descriptor");
+		if (bundle != nullptr) *bundle = b;
+	}
+	if (at != body) return fail("length mismatch");
+	return true;
+}
+
+bool ice_decode_any_offer(const std::string& text, std::string* sdp, SessionBundle* bundle, std::string* err)
+{
+	if (ice_classify_code(text) != kCodeV3) return ice_decode_offer_v2(text, sdp, bundle, err);
+	bool isOffer = false;
+	if (!ice_decode_v3(text, &isOffer, sdp, bundle, err)) return false;
+	if (!isOffer) {
+		if (err != nullptr) *err = "that is an answer code: it goes to the host, who sent you a room code";
+		return false;
+	}
+	return true;
+}
+
+bool ice_decode_any_answer(const std::string& text, std::string* sdp, std::string* err)
+{
+	bool isOffer = true;
+	if (ice_classify_code(text) == kCodeV3) {
+		if (!ice_decode_v3(text, &isOffer, sdp, nullptr, err)) return false;
+	} else if (!ice_decode_code(text, &isOffer, sdp, err)) {
+		return false;
+	}
+	if (isOffer) {
+		if (err != nullptr) *err = "bad ICE code: expected an answer, got an offer";
+		return false;
+	}
+	return true;
 }
 
 bool ice_read_code_arg(const std::string& arg, std::string* code, std::string* err)
@@ -749,7 +1267,7 @@ bool IceSocket::host_create_offer(const IceNetConfig& cfg, const SessionBundle& 
 	if (!create_agent(cfg, err)) return false;
 	std::string sdp;
 	if (!gather(cfg, &sdp, err, pump)) return false;
-	return ice_encode_offer_v2(sdp, bundle, offerOut, err);
+	return ice_encode_v3(true, sdp, &bundle, offerOut, err);
 }
 
 bool IceSocket::join_create_answer(const IceNetConfig& cfg, const std::string& offer, std::string* answerOut,
@@ -757,7 +1275,7 @@ bool IceSocket::join_create_answer(const IceNetConfig& cfg, const std::string& o
 {
 	std::string offerSdp;
 	SessionBundle bundle;
-	if (!ice_decode_offer_v2(offer, &offerSdp, &bundle, err)) return false;
+	if (!ice_decode_any_offer(offer, &offerSdp, &bundle, err)) return false;
 	if (bundleOut != nullptr) *bundleOut = bundle;
 	// The remote description goes in before gathering, so this side takes the
 	// controlled role (RFC 8445 6.1.1); the host does the reverse.
@@ -765,18 +1283,13 @@ bool IceSocket::join_create_answer(const IceNetConfig& cfg, const std::string& o
 	if (!apply_remote(offerSdp, cfg.turnOnly, err)) return false;
 	std::string sdp;
 	if (!gather(cfg, &sdp, err, pump)) return false;
-	return ice_encode_code(false, sdp, answerOut, err);
+	return ice_encode_v3(false, sdp, nullptr, answerOut, err);
 }
 
 bool IceSocket::host_apply_answer(const std::string& answer, std::string* err)
 {
-	bool isOffer = true;
 	std::string sdp;
-	if (!ice_decode_code(answer, &isOffer, &sdp, err)) return false;
-	if (isOffer) {
-		if (err != nullptr) *err = "bad ICE code: expected an answer, got an offer";
-		return false;
-	}
+	if (!ice_decode_any_answer(answer, &sdp, err)) return false;
 	return apply_remote(sdp, mTurnOnly, err);
 }
 
@@ -1017,13 +1530,11 @@ bool ice_poll_answer_file(const std::string& path, double timeoutMs, std::functi
 			fclose(f);
 			std::string t = trim(raw);
 			if (!t.empty()) {
-				bool isOffer = true;
 				std::string sdp, derr;
-				if (ice_decode_code(t, &isOffer, &sdp, &derr) && !isOffer) {
+				if (ice_decode_any_answer(t, &sdp, &derr)) {
 					*answerOut = t;
 					return true;
 				}
-				if (derr.empty()) derr = "that is an offer code, not an answer";
 				if (t != lastSeen) {
 					lastSeen = t;
 					lastErr  = derr;
@@ -1073,15 +1584,9 @@ bool ice_read_answer_stdin(std::function<void()> pump, std::string* answerOut, s
 			if (overflow) {
 				lastErr = "bad ICE code: pasted line longer than " + std::to_string(kMaxAnswerChars) + " characters";
 			} else if (!line.empty()) {
-				bool isOffer = true;
 				std::string sdp, derr;
-				if (line.compare(0, 6, "NPIX2-") == 0) {
-					lastErr = "bad ICE code: that is an offer code (NPIX2-); paste the joiner's answer code "
-					          "(NPIX1-...) instead";
-				} else if (!ice_decode_code(line, &isOffer, &sdp, &derr)) {
+				if (!ice_decode_any_answer(line, &sdp, &derr)) {
 					lastErr = derr;
-				} else if (isOffer) {
-					lastErr = "bad ICE code: expected an answer, got an offer";
 				} else {
 					answer = line;
 					done   = true;

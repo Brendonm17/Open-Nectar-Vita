@@ -271,7 +271,8 @@ void draw_banner(const PcNetplayHudInfo& info, int W, int H)
 	if (body.size() > 14) body.resize(14); // at most 374 units tall in all
 	char footer[96];
 	const int left = info.bannerLeftMs > 0 ? (int)(info.bannerLeftMs / 1000.0 + 0.999) : 0;
-	snprintf(footer, sizeof footer, "Closing in %d s - press any key or button to close now.", left);
+	if (info.bannerLeftMs < 0) snprintf(footer, sizeof footer, "F4 hides this. It goes away when your friend joins.");
+	else snprintf(footer, sizeof footer, "Closing in %d s - press any key or button to close now.", left);
 	const int lineH = fh + 4;
 	const int bh    = 16 + 24 + 8 + (int)body.size() * lineH + 10 + lineH + 16;
 	const int x     = (W - bw) / 2;
@@ -298,6 +299,7 @@ void pc_netplay_hud_draw(void)
 	if (!pc_netplay_hud_info(&info)) return; // no netplay session: nothing, not even the toggle
 	init_once();
 	poll_toggle(info);
+	if (info.banner && info.bannerLeftMs < 0 && !sVisible) return; // the waiting banner hides with F4
 	if (!info.banner) {
 		if (!info.running || !sVisible) return;
 		if (pc_settings_menu_is_open() || pc_glass_menu_active()) return;

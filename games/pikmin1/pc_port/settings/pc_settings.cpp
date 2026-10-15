@@ -7160,6 +7160,20 @@ void pc_settings_netplay_session_begin(const char* adoptConfigText) {
             printf("[PC Settings] netplay session: host  %s\n", adopted.c_str());
         }
     }
+    // The session ticks at 30 Hz, and each tick advances the game by the
+    // frame clamp's period: 60/120 FPS mode would play at half/quarter speed.
+    // Both peers force 30 FPS for the session; the settings file keeps the
+    // player's own mode (the disk values are restored when saving).
+    if (sConfig.fpsMode != 0) {
+        if (!sNetplayAdopted) {
+            sNetplayDiskConfig = sConfig;
+            sNetplayAdopted    = true;
+        }
+        printf("[PC Settings] netplay session: %d FPS mode -> 30 FPS for the session (the netplay tick is 30 Hz)\n",
+               sConfig.fpsMode == 1 ? 60 : 120);
+        sConfig.fpsMode  = 0;
+        sPending.fpsMode = 0;
+    }
     sNetplaySessionConfig = sConfig;
     sNetplaySessionLocked = true;
     printf("[PC Settings] netplay session: sim-relevant settings locked for the session\n");

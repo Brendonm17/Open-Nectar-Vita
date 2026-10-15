@@ -60,7 +60,7 @@ cp "${p2exe}" "${stripped}/pikmin2_pc.exe"
 x86_64-w64-mingw32-strip "${stripped}"/*.exe
 
 # Nada de DLL propias: cada .exe debe pedir solo DLL del sistema.
-system_dlls='^(advapi32|comdlg32|gdi32|imm32|kernel32|msvcrt|ole32|oleaut32|opengl32|setupapi|shell32|user32|version|winmm|shlwapi|uuid|dwmapi|dinput8|xinput1_4|hid|cfgmgr32|ws2_32|bcrypt|dbghelp)\.dll$'
+system_dlls='^(advapi32|comdlg32|gdi32|imm32|kernel32|msvcrt|ole32|oleaut32|opengl32|setupapi|shell32|user32|version|winmm|shlwapi|uuid|dwmapi|dinput8|xinput1_4|hid|cfgmgr32|ws2_32|bcrypt|iphlpapi|dbghelp)\.dll$'
 for exe in "${stripped}"/*.exe; do
     while read -r dll; do
         if ! printf '%s\n' "${dll,,}" | grep -Eq "${system_dlls}"; then

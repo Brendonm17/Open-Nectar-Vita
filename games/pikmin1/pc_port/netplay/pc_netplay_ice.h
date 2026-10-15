@@ -133,8 +133,23 @@ bool ice_encode_offer_v2(const std::string& sdp, const SessionBundle& bundle, st
                          std::string* err);
 bool ice_decode_offer_v2(const std::string& text, std::string* sdp, SessionBundle* bundle, std::string* err);
 
+// v3 (what this build prints): "NPIX3-" + base64url of a compact binary
+// form, an offer or an answer. libjuice's SDP is packed to its fields (six-
+// bit ICE credentials, binary IPv4 candidates), the sim settings to their
+// values in this build's key order (a 16-bit hash of the keys refuses
+// another build); either falls back to text when it does not round-trip.
+// Decoding a packed offer needs the joiner's own settings text for the key
+// list (ice_set_local_config_text). v1/v2 codes still decode.
+void ice_set_local_config_text(const std::string& text);
+bool ice_encode_v3(bool isOffer, const std::string& sdp, const SessionBundle* bundle, std::string* out,
+                   std::string* err);
+bool ice_decode_v3(const std::string& text, bool* isOffer, std::string* sdp, SessionBundle* bundle, std::string* err);
+// An offer of any version (v2 or v3), or an answer (v1 or v3).
+bool ice_decode_any_offer(const std::string& text, std::string* sdp, SessionBundle* bundle, std::string* err);
+bool ice_decode_any_answer(const std::string& text, std::string* sdp, std::string* err);
+
 // Which code a player pasted.
-enum CodeKind { kCodeEmpty, kCodeGarbage, kCodeV1, kCodeOfferV2 };
+enum CodeKind { kCodeEmpty, kCodeGarbage, kCodeV1, kCodeOfferV2, kCodeV3 };
 CodeKind ice_classify_code(const std::string& text);
 
 // Reads a code from a CLI value: "@file" reads the file (trimmed, bounded:

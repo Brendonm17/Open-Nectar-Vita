@@ -201,7 +201,7 @@ void decode_offer()
 	case pc_netplay_ice::kCodeEmpty:
 		die("the offer code is empty; copy the host's whole offer line");
 	case pc_netplay_ice::kCodeGarbage:
-		die("that is not a connection code (the host's offer starts with NPIX2-); copy the host's whole offer line");
+		die("that is not a connection code (the host's room code starts with NPIX3-); copy the host's whole code");
 	case pc_netplay_ice::kCodeV1: {
 		bool isOffer = false;
 		std::string sdp;
@@ -212,12 +212,16 @@ void decode_offer()
 		die("that offer (NPIX1-) carries no session setup; both players need the same build, whose host prints "
 		    "an NPIX2- offer");
 	}
+	case pc_netplay_ice::kCodeV3:
 	case pc_netplay_ice::kCodeOfferV2:
 		break;
 	}
 	std::string sdp;
 	pc_netplay_ice::SessionBundle bundle;
-	if (!pc_netplay_ice::ice_decode_offer_v2(sSetup.offerCode, &sdp, &bundle, &err)) die("%s", err.c_str());
+	// A compact offer carries the settings' values only; this build's own
+	// settings text gives the key list.
+	pc_netplay_ice::ice_set_local_config_text(pc_settings_netplay_config_text());
+	if (!pc_netplay_ice::ice_decode_any_offer(sSetup.offerCode, &sdp, &bundle, &err)) die("%s", err.c_str());
 	sSetup.seed       = bundle.seed;
 	sSetup.configText = bundle.configText;
 	sSetup.descriptor = bundle.descriptor;
@@ -357,6 +361,8 @@ void pc_netplay_launch_preinit(int argc, char** argv)
 	} else {
 		const char* joinArg = argv_value(argc, argv, "--netplay-join-ice");
 		sSetup.offerCode    = read_offer_arg(joinArg);
+		// The title's Online menu hands the offer over in a file read once.
+		if (argv_present(argc, argv, "--online-code-once") && joinArg[0] == '@') std::remove(joinArg + 1);
 		decode_offer();
 	}
 
