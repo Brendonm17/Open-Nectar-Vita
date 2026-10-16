@@ -2701,8 +2701,10 @@ static void pcDebugKeys()
 		WorldClock& clock = gameflow.mWorldClock;
 		const f32 next    = clock.mTimeOfDay + 1.0f;
 		// Under "Infinite Day" the playable clock stays held (pushing it would
-		// reach sunset and end the day); only the visual clock moves on.
-		const bool clockHeld = pc_settings_get_infinite_day() != 0 && clock.mCurrentDay != 1;
+		// reach sunset and end the day); only the visual clock moves on. The last
+		// day is not held, so its sunset ends the game and plays the ending.
+		const bool clockHeld = pc_settings_get_infinite_day() != 0 && clock.mCurrentDay != 1
+		    && clock.mCurrentDay != MAX_DAYS;
 		const f32 visualBefore = gPcVisualTimeOfDay;
 		if (!clockHeld) {
 			clock.setTime(next >= clock.mHoursInDay ? clock.mHoursInDay - 0.01f : next);

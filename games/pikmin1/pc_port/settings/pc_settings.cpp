@@ -7513,7 +7513,7 @@ const GroupRow kGameplayRows[] = {
 
 // Infinite Day (fila 13) vive dentro de Day Length como su última opción.
 const GroupRow kCheatsRows[] = {
-    { SRC_MODS, 5, "Day Length", "Minutes of daylight per day. 13.5 is the original; Infinite stops the sun." },
+    { SRC_MODS, 5, "Day Length", "Minutes of daylight per day. 13.5 is the original; Infinite stops the sun, except on the last day." },
     { SRC_MODS, 11, "Olimar Health", "Olimar's toughness, as a share of the original. Infinite takes no damage." },
     { SRC_MODS, 12, "Enemy Health", "Enemy toughness, as a share of the original. Insta Kill drops them in one hit." },
     { SRC_MODS, 4, "Pikmin Limit", "Most Pikmin on the field at once. 100 is the original; more costs performance." },
@@ -7530,7 +7530,7 @@ const GroupRow kCheatsRows[] = {
 #if PIKI_DEBUG_KEYS
     { SRC_MODS, 19, "Debug Keys (F5-F8)",
       "F5: add up to 20 red leaf Pikmin to the red Onion (requires an Onion and respects the Pikmin limit).\n"
-      "F6: advance the clock by one in-game hour, capped just before sunset (with Infinite Day it only moves the lighting).\n"
+      "F6: advance the clock by one in-game hour, capped just before sunset (with Infinite Day it only moves the lighting, except on the last day).\n"
       "F7: grant the Main Engine, top red Onion stock up to 20, and trigger the normal end-of-day sequence.\n"
       "F8 (VS only): append both captains' XYZ coordinates to vs_positions.txt." },
 #endif
