@@ -233,6 +233,11 @@ public:
 	Vector3f mPcSwarmGoal;             ///< Destino del swarm: el cursor o el objetivo de la carga.
 	Vector3f mPcAimOffset;             ///< Cursor libre (lo que apunta el jugador) mientras el visible está clavado.
 	Vector3f mPcPinnedOffset;          ///< Último desplazamiento con el que se clavó el cursor.
+	/// Matriz del aro del cursor. El juego la deja en mWorldMtx (la del propio
+	/// capitán) y la usa al momento; en netplay la calcula la pasada de
+	/// simulación y la dibuja la de presentación, y entre medias mWorldMtx ya
+	/// vuelve a ser la del capitán: el aro salía a sus pies.
+	Matrix4f mPcCursorMtx;
 	Texture* mPcGlowTex = nullptr;     ///< Eternal Night: halo de luciérnagas y pellets (va con el heap del nivel).
 #endif
 	int mPendingLowerMotionId;            // _6FC

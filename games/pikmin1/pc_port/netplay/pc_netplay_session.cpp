@@ -100,6 +100,10 @@
 #else
 #define PC_ONLINE 0
 #endif
+#if PIKI_NETPLAY_PORTMAP
+#include "nectar_net/port_publisher.h"
+#include <memory>
+#endif
 
 #include "system.h"
 #include "BaseApp.h"
@@ -2704,10 +2708,50 @@ void ice_emit_code(const char* kind, const std::string& code)
 	fflush(stdout);
 }
 
+[[noreturn]] void ice_dialog_cancel();
+int ice_dialog(const char* title, const std::string& text, std::initializer_list<const char*> buttons);
+
+#if defined(__linux__) && !defined(__ANDROID__)
+// ufw on and blocking: its config is world-readable (no root needed). A friend
+// whose carrier changes the source port can only come in through a rule.
+bool linux_ufw_enabled()
+{
+	FILE* f = std::fopen("/etc/ufw/ufw.conf", "r");
+	if (f == nullptr) return false;
+	char line[256];
+	bool on = false;
+	while (std::fgets(line, sizeof line, f) != nullptr)
+		if (std::strncmp(line, "ENABLED=yes", 11) == 0) on = true;
+	std::fclose(f);
+	return on;
+}
+#endif
+
 [[noreturn]] void ice_fail(const std::string& err)
 {
 	printf("[netplay] ice: %s\n", err.c_str());
 	fflush(stdout);
+	// From the title's Online menu: say why in a dialog and go back to the
+	// game in normal mode instead of closing it.
+	if (argv_has(sArgc, sArgv, "--netplay-dialogs")) {
+		const bool stun = pc_settings_get_online_stun() != 0;
+		ice_dialog("Online - could not connect",
+		           std::string("The connection with your friend could not be made.\n\n")
+		               + (stun ? "If you are on different networks, one of them may block direct connections (this is "
+		                         "common when both use mobile data). Try with the other player creating the room, or "
+		                         "from the same Wi-Fi. Turning on UPnP in the router of whoever creates the room also "
+		                         "helps."
+		                       : "F1 > Data > Online over the Internet is off, so only players on the same network (or "
+		                         "a VPN) can connect. Turn it on to play with a friend elsewhere.")
+#if defined(__linux__) && !defined(__ANDROID__)
+		               + (linux_ufw_enabled() ? "\n\nThis PC's firewall (ufw) is on and may be blocking your friend. Run "
+		                                        "this once in a terminal, then try again:\n  sudo ufw allow 39911:39919/udp"
+		                                      : "")
+#endif
+		               + "\n\n(" + err + ")",
+		           { "OK" });
+		ice_dialog_cancel();
+	}
 	stop_session();
 	session_exit(npx::kTransport);
 }
@@ -2803,6 +2847,87 @@ std::string linux_entry_dialog(const char* title, const char* text, const std::s
 	session_exit(0);
 }
 
+#if PIKI_NETPLAY_PORTMAP
+// Port mapping on this side's router (PCP, NAT-PMP or UPnP, nectar_net): a
+// friend whose carrier NAT changes the source port per destination (mobile
+// data) cannot use the STUN address, but a mapped port takes packets from
+// anyone. The mapped address joins the code as one more candidate.
+std::unique_ptr<nectar::net::PortPublisher> sPortmap;
+
+void portmap_withdraw()
+{
+	if (sPortmap) sPortmap->withdraw();
+}
+
+void portmap_add_candidate(std::string& sdp, const std::function<void()>& pump)
+{
+	// The agent's port: the first IPv4 host candidate.
+	uint32_t port = 0;
+	for (size_t at = sdp.find("a=candidate:"); at != std::string::npos; at = sdp.find("a=candidate:", at + 1)) {
+		const size_t eol        = sdp.find('\n', at);
+		const std::string line  = sdp.substr(at, eol == std::string::npos ? std::string::npos : eol - at);
+		char ip[64]             = {};
+		unsigned p              = 0;
+		char type[16]           = {};
+		if (std::sscanf(line.c_str(), "a=candidate:%*s %*s %*s %*s %63s %u typ %15s", ip, &p, type) == 3
+		    && std::strcmp(type, "host") == 0 && std::strchr(ip, ':') == nullptr && p > 0 && p < 65536) {
+			port = p;
+			break;
+		}
+	}
+	if (port == 0) return;
+	if (!sPortmap) {
+		// Routers answer PCP/NAT-PMP within milliseconds and SSDP within a few
+		// hundred on the LAN; one that answers nothing would hold the code
+		// ~12 s with the default schedule (miniupnpc waits the discovery time
+		// once per device type). 150+300+600 ms and 600 ms of discovery.
+		nectar::net::PublisherBackends backends = nectar::net::PublisherBackends::system();
+		backends.retry.initialTimeoutMs        = 150;
+		backends.retry.attempts                = 3;
+		backends.upnpDiscoveryMs               = 600;
+		sPortmap = std::make_unique<nectar::net::PortPublisher>(backends);
+		std::atexit(portmap_withdraw);
+	}
+	printf("[netplay] port mapping: asking the router to open UDP %u\n", (unsigned)port);
+	fflush(stdout);
+	// Blocking (router discovery takes a few seconds when nothing answers):
+	// a worker thread, the window kept alive meanwhile.
+	std::atomic<bool> done{ false };
+	nectar::net::PublishResult result;
+	std::thread worker([&]() {
+		result = sPortmap->publish((uint16_t)port, 7200, false);
+		done   = true;
+	});
+	while (!done) {
+		if (pump) pump();
+		std::this_thread::sleep_for(std::chrono::milliseconds(20));
+	}
+	worker.join();
+	if (result.reachability != nectar::net::Reachability::Public || result.mapping.externalPort == 0) {
+		printf("[netplay] port mapping: the router opened no port (%s; pcp=%s nat-pmp=%s upnp=%s)\n",
+		       nectar::net::reachabilityString(result.reachability), nectar::net::mappingErrorString(result.pcpError),
+		       nectar::net::mappingErrorString(result.natPmpError), nectar::net::mappingErrorString(result.upnpError));
+		fflush(stdout);
+		return;
+	}
+	const auto& a          = result.mapping.externalAddress;
+	const std::string addr = std::to_string(a[0]) + "." + std::to_string(a[1]) + "." + std::to_string(a[2]) + "."
+	                       + std::to_string(a[3]) + " " + std::to_string(result.mapping.externalPort);
+	if (sdp.find(" " + addr + " typ ") != std::string::npos) {
+		printf("[netplay] port mapping: %s opened the port (already the STUN address)\n",
+		       nectar::net::mappingMethodString(result.method));
+		fflush(stdout);
+		return;
+	}
+	const std::string line = "a=candidate:9 1 UDP 1694498815 " + addr + " typ srflx raddr 0.0.0.0 rport 0\r\n";
+	const size_t end       = sdp.find("a=end-of-candidates");
+	sdp.insert(end == std::string::npos ? sdp.size() : end, line);
+	printf("[netplay] port mapping: %s opened the port; its address is in the code\n",
+	       nectar::net::mappingMethodString(result.method));
+	fflush(stdout);
+}
+#endif
+
 // The blocking code exchange on the first turn: the host gathers and prints
 // its offer (the session bundle: seed, sim settings, captains), waits for the
 // answer (--netplay-answer-in, else the console); the joiner gathers and
@@ -2810,7 +2935,29 @@ std::string linux_entry_dialog(const char* title, const char* text, const std::s
 // pumping; closing it ends the game.
 void ice_connect(System* sys)
 {
-	const PcNetplayLaunch& L                 = pc_netplay_launch_setup();
+	const PcNetplayLaunch& L = pc_netplay_launch_setup();
+	// F1 > Data > Online over the Internet: public STUN, unless the
+	// environment already chose (PIKMIN_NETPLAY_STUN, tools and tests).
+	if (getenv_nonempty("PIKMIN_NETPLAY_STUN") == nullptr && pc_settings_get_online_stun()) {
+#ifdef _WIN32
+		_putenv_s("PIKMIN_NETPLAY_STUN", "public");
+#else
+		setenv("PIKMIN_NETPLAY_STUN", "public", 1);
+#endif
+	}
+	// From the title's Online menu the agent takes a port in a small fixed
+	// range, so one firewall rule or router forward (UDP 39911-39919) lets a
+	// friend's packets in from any port (carrier NATs change the source port
+	// per destination). The environment still wins (tools and tests).
+	if (argv_has(sArgc, sArgv, "--netplay-dialogs") && getenv_nonempty("PIKMIN_NETPLAY_ICE_PORT_BEGIN") == nullptr) {
+#ifdef _WIN32
+		_putenv_s("PIKMIN_NETPLAY_ICE_PORT_BEGIN", "39911");
+		_putenv_s("PIKMIN_NETPLAY_ICE_PORT_END", "39919");
+#else
+		setenv("PIKMIN_NETPLAY_ICE_PORT_BEGIN", "39911", 1);
+		setenv("PIKMIN_NETPLAY_ICE_PORT_END", "39919", 1);
+#endif
+	}
 	const pc_netplay_ice::IceNetConfig nic = pc_netplay_ice::ice_net_config_from_env();
 	printf("[netplay] ice: %s\n", pc_netplay_ice::ice_net_config_text(nic).c_str());
 	fflush(stdout);
@@ -2823,20 +2970,49 @@ void ice_connect(System* sys)
 		}
 	};
 	sIce = new pc_netplay_ice::IceSocket();
+#if PIKI_NETPLAY_PORTMAP
+	// Goes with public STUN (F1 > Data > Online over the Internet, or
+	// PIKMIN_NETPLAY_STUN=public); tools and tests that pick none skip it.
+	const char* stunMode = getenv_nonempty("PIKMIN_NETPLAY_STUN");
+	if (stunMode != nullptr && std::strcmp(stunMode, "public") == 0)
+		sIce->set_local_sdp_hook([pump](std::string& sdp) { portmap_add_candidate(sdp, pump); });
+#endif
 	std::string err;
 	double completedMs = -1;
 	if (sCfg.isHost) {
 		pc_netplay_ice::SessionBundle bundle;
 		bundle.seed       = sCfg.seed;
 		bundle.configText = pc_settings_netplay_config_text();
-		bundle.descriptor = pc_netplay_launch_descriptor(pc_coop_captain(0), pc_coop_captain(1), sCfg.mode,
-		                                                 sCfg.mode == xfer::kModeVs ? pc_vs_map_source_text() : std::string());
+		// VS: the built-in arena (no map selected, no --vs-map file) is in
+		// every build, and the joiner adopts the host's map setting with the
+		// sim settings, so only another map travels, minified: whitespace
+		// outside strings is most of a hand-written map.json.
+		const bool builtInArena = sCfg.mode == xfer::kModeVs && !sCfg.vsMapFile && pc_vs_map_selected().empty();
+		std::string vsMapJson;
+		if (sCfg.mode == xfer::kModeVs && !builtInArena) {
+			bool inString = false, escaped = false;
+			for (char c : pc_vs_map_source_text()) {
+				if (inString) {
+					if (escaped) escaped = false;
+					else if (c == '\\') escaped = true;
+					else if (c == '"') inString = false;
+				} else if (c == '"') {
+					inString = true;
+				} else if (c == ' ' || c == '\n' || c == '\r' || c == '\t') {
+					continue;
+				}
+				vsMapJson += c;
+			}
+		}
+		bundle.descriptor = pc_netplay_launch_descriptor(pc_coop_captain(0), pc_coop_captain(1), sCfg.mode, vsMapJson);
 		// Co-op with the default captains: the joiner assumes them when the
 		// descriptor is empty, so the code leaves it out.
 		if (bundle.descriptor == pc_netplay_launch_descriptor(0, 1, xfer::kModeCoopDirect, std::string()))
 			bundle.descriptor.clear();
-		if (sCfg.mode == xfer::kModeVs) {
-			const size_t json = pc_vs_map_source_text().size();
+		if (builtInArena) {
+			printf("[netplay] vs map: the built-in arena (not in the offer: every build has it)\n");
+		} else if (sCfg.mode == xfer::kModeVs) {
+			const size_t json = vsMapJson.size();
 			if (json > kPcNetplayVsMapJsonMax)
 				printf("[netplay] vs map: map.json is %llu B, more than the offer carries (%llu B); the joiner needs "
 				       "the same map\n",
@@ -2858,7 +3034,11 @@ void ice_connect(System* sys)
 				const std::string text =
 				    std::string(sCfg.mode == xfer::kModeVs ? "VS" : "Co-op")
 				    + " room open.\n\nYour room code (" + offer.substr(0, 16) + "..., " + std::to_string(offer.size())
+#if defined(__linux__) && !defined(__ANDROID__)
 				    + " characters) goes to your friend, who joins from "
+#else
+				    + " characters) is in the clipboard: send it to your friend, who joins from "
+#endif
 				    + (sCfg.mode == xfer::kModeVs ? "VS" : "Co-op") + " > Online > Join with a code.\n\nTheir game then "
 				    "gives them an answer code (NPIX3-...). When they send it to you, copy it and press Paste answer."
 				    + note;

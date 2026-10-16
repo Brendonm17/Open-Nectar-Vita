@@ -44,11 +44,15 @@ printf '[3/4] Pikmin 2...\n'
 cmake -S "${p2}" -B "${build_dir}/p2" "${common[@]}" -DBUILD_TESTING=OFF \
     -DCMAKE_TOOLCHAIN_FILE="${p2}/cmake/toolchain-mingw64.cmake"
 cmake --build "${build_dir}/p2" --target pikmin2_pc -j"${jobs}"
+cmake -S "${p2}" -B "${build_dir}/p2-usa" "${common[@]}" -DBUILD_TESTING=OFF \
+    -DCMAKE_TOOLCHAIN_FILE="${p2}/cmake/toolchain-mingw64.cmake" -DPIKMIN_GAME_VERSION=VERSION_GPVE01
+cmake --build "${build_dir}/p2-usa" --target pikmin2_pc -j"${jobs}"
 
 launcher="${build_dir}/p1-usa/bin/nectar-launcher.exe"
 usa="${build_dir}/p1-usa/bin/nectar.exe"
 pal="${build_dir}/p1-pal/bin/nectar.exe"
 p2exe="${build_dir}/p2/pikmin2_pc.exe"
+p2usa="${build_dir}/p2-usa/pikmin2_pc.exe"
 
 printf '[4/4] Montando los archivos de la release...\n'
 stripped="${build_dir}/stripped"
@@ -57,6 +61,7 @@ cp "${launcher}" "${stripped}/nectar-launcher.exe"
 cp "${usa}" "${stripped}/nectar.exe"
 cp "${pal}" "${stripped}/nectar-pal.exe"
 cp "${p2exe}" "${stripped}/pikmin2_pc.exe"
+cp "${p2usa}" "${stripped}/pikmin2_pc-usa.exe"
 x86_64-w64-mingw32-strip "${stripped}"/*.exe
 
 # Nada de DLL propias: cada .exe debe pedir solo DLL del sistema.
@@ -72,5 +77,5 @@ done
 
 python3 "${root}/scripts/release/make_release.py" --os windows --out "${out_dir}" \
     --launcher "${stripped}/nectar-launcher.exe" --p1-usa "${stripped}/nectar.exe" \
-    --p1-pal "${stripped}/nectar-pal.exe" --p2 "${stripped}/pikmin2_pc.exe" \
+    --p1-pal "${stripped}/nectar-pal.exe" --p2 "${stripped}/pikmin2_pc.exe" --p2-usa "${stripped}/pikmin2_pc-usa.exe" \
     --extra "${p1}/packaging/windows/README.txt"

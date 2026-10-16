@@ -686,11 +686,25 @@ UpdateOutcome runUpdate(pikmin::launcher::HubWindow& hub, const fs::path& source
 
 #ifdef _WIN32
 constexpr const char* kPikmin2Executable = "pikmin2_pc.exe";
+constexpr const char* kPikmin2UsaExecutable = "pikmin2_pc-usa.exe";
 #else
 constexpr const char* kPikmin2Executable = "pikmin2_pc";
+constexpr const char* kPikmin2UsaExecutable = "pikmin2_pc-usa";
 #endif
-// El port de Pikmin 2 se compila para el disco europeo (VERSION_GPVP01).
+// El paquete trae dos builds de Pikmin 2: Europa (GPVP01, pikmin2_pc) y USA
+// (GPVE01, pikmin2_pc-usa). Al instalar se copia la del disco como pikmin2_pc.
 constexpr const char* kPikmin2DiscId = "GPVP01";
+constexpr const char* kPikmin2UsaDiscId = "GPVE01";
+
+// Región de los datos instalados: primera línea de assets/.pikmin2-assets.
+std::string installedPikmin2DiscId(const fs::path& gameDirectory)
+{
+    std::ifstream in(gameDirectory / "assets" / ".pikmin2-assets");
+    std::string line;
+    if (!in || !std::getline(in, line)) return kPikmin2DiscId;
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+    return line == kPikmin2UsaDiscId ? kPikmin2UsaDiscId : kPikmin2DiscId;
+}
 
 // Pikmin 2 vive en <instalación>/pikmin2: su ejecutable y su carpeta assets,
 // aparte de los de Pikmin 1, que ocupan la raíz.
@@ -750,10 +764,10 @@ bool installPikmin2Assets(const fs::path& image, const fs::path& gameDirectory, 
         failure = error;
         return false;
     }
-    if (identity.gameId != kPikmin2DiscId) {
+    if (identity.gameId != kPikmin2DiscId && identity.gameId != kPikmin2UsaDiscId) {
         failure = identity.gameId.rfind("GPV", 0) == 0
-                    ? "This build of Pikmin 2 needs the European disc (GPVP01); this one is " + identity.gameId + "."
-                    : "This is not a Pikmin 2 disc (" + identity.gameId + "). Choose Pikmin 2 Europe (GPVP01).";
+                    ? "Pikmin 2 needs the USA (GPVE01) or European (GPVP01) disc; this one is " + identity.gameId + "."
+                    : "This is not a Pikmin 2 disc (" + identity.gameId + "). Choose Pikmin 2 USA (GPVE01) or Europe (GPVP01).";
         return false;
     }
 
@@ -798,7 +812,7 @@ bool installPikmin2Assets(const fs::path& image, const fs::path& gameDirectory, 
     }
     {
         std::ofstream marker(partialAssets / ".pikmin2-assets", std::ios::trunc);
-        marker << kPikmin2DiscId << "\nextracted_from=" << image.filename().string() << '\n';
+        marker << identity.gameId << "\nextracted_from=" << image.filename().string() << '\n';
     }
     if (progressCallback) progressCallback(100, "Finishing installation...");
     ec = pikmin::launcher::finalizeAssets(partialAssets, finalAssets);
@@ -817,10 +831,12 @@ bool installPikmin2Executables(const fs::path& sourceDirectory, const fs::path& 
                                std::string& failure)
 {
     const fs::path gameDirectory = pikmin2GameDirectory(installDirectory);
-    fs::path game = sourceDirectory / kPikmin2Executable;
-    if (!fs::is_regular_file(game)) game = pikmin2GameDirectory(sourceDirectory) / kPikmin2Executable;
+    const bool usa = installedPikmin2DiscId(gameDirectory) == kPikmin2UsaDiscId;
+    const char* sourceName = usa ? kPikmin2UsaExecutable : kPikmin2Executable;
+    fs::path game = sourceDirectory / sourceName;
+    if (!fs::is_regular_file(game)) game = pikmin2GameDirectory(sourceDirectory) / sourceName;
     if (!fs::is_regular_file(game)) {
-        failure = "The package is incomplete: missing " + std::string(kPikmin2Executable) + ".";
+        failure = "The package is incomplete: missing " + std::string(sourceName) + ".";
         return false;
     }
     const std::pair<fs::path, fs::path> copies[] = {

@@ -750,7 +750,8 @@ void MoviePlayer::skipScene(int sceneSkipFlag)
 		// vez que aterrizan nave y cebollas, y startMovie lo deja seguir. Al
 		// saltar, esa salida (espera, paseo y animación de mirar) seguía
 		// reproduciéndose: se da por terminada y recupera el control ya.
-		for (int i = 0; i < naviMgr->getNaviCount(); i++) {
+		// En la intro (el meteorito de la partida nueva) aún no hay capitanes.
+		for (int i = 0; naviMgr && i < naviMgr->getNaviCount(); i++) {
 			Navi* navi = naviMgr->getNavi(i);
 			if (navi && navi->mStateMachine->getCurrID(navi) == NAVISTATE_Starting) {
 				navi->mStateMachine->transit(navi, NAVISTATE_Walk);

@@ -362,8 +362,9 @@ void pc_state_hash_print_navi_positions(uint64_t tick)
 	{
 		Navi* n = static_cast<Navi*>(*it);
 		if (n == nullptr) continue;
-		std::printf("[netplay-navi] tick=%llu navi=%d pos=(%.2f %.2f %.2f)\n", (unsigned long long)tick, n->mNaviID,
-		            n->mSRT.t.x, n->mSRT.t.y, n->mSRT.t.z);
+		std::printf("[netplay-navi] tick=%llu navi=%d pos=(%.2f %.2f %.2f) cursor=(%.2f %.2f)\n",
+		            (unsigned long long)tick, n->mNaviID, n->mSRT.t.x, n->mSRT.t.y, n->mSRT.t.z, n->mCursorPosition.x,
+		            n->mCursorPosition.z);
 	}
 	std::fflush(stdout);
 }

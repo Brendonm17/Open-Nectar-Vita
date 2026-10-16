@@ -1802,7 +1802,7 @@ struct HubWindow::Impl {
         title(at, pikmin2 ? "Install Pikmin 2" : "Install Pikmin");
         ImDrawList* dl = ImGui::GetWindowDrawList();
         dl->AddText(hub->fonts.caption, 16.0f, ImVec2(at.x, at.y + 42.0f), col(kOrange, 0.75f),
-                    pikmin2 ? "Use your own disc: Pikmin 2 Europe (GPVP01). ISO or GCM; RVZ, WIA and GCZ need Dolphin."
+                    pikmin2 ? "Use your own disc: Pikmin 2 USA or Europe. ISO or GCM; RVZ, WIA and GCZ need Dolphin."
                             : "Use your own disc: Pikmin USA (Rev 1) or Europe. ISO or GCM; RVZ, WIA and GCZ need Dolphin.");
         if (pathField(ImVec2(at.x, at.y + 80.0f), width, "Disc image", rom, "No disc image chosen", "rom")) pathsAction = 1;
         if (pathField(ImVec2(at.x, at.y + 170.0f), width, "Install to", installDirectory, "No folder chosen", "dir")) pathsAction = 2;

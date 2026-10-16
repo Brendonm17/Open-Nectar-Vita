@@ -6,14 +6,14 @@
 
 #include <cstdint>
 
-#if PIKI_NECTAR_ONLINE
+#if PIKI_NECTAR_ONLINE || PIKI_NETPLAY_PORTMAP
 #include "nectar_net/net_platform.h"
 #endif
 
 extern "C" JNIEXPORT void JNICALL Java_org_opennectar_NetGateway_nativeSetGateway(JNIEnv* env, jclass /*clazz*/,
                                                                                     jbyteArray address)
 {
-#if PIKI_NECTAR_ONLINE
+#if PIKI_NECTAR_ONLINE || PIKI_NETPLAY_PORTMAP
 	if (env == nullptr || address == nullptr || env->GetArrayLength(address) != 4) return;
 	jbyte bytes[4];
 	env->GetByteArrayRegion(address, 0, 4, bytes);

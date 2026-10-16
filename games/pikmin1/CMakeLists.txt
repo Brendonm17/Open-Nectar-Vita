@@ -268,6 +268,7 @@ set(PC_PORT_SOURCES
     pc_port/pc_pad_axis.cpp
     pc_port/pc_menu_repeat.cpp
     pc_port/pc_photo_mode.cpp
+    pc_port/pc_record.cpp
     pc_port/pc_permadeath.cpp
     pc_port/randomizer/pc_randomizer.cpp
     pc_port/randomizer/pc_randomizer_catalog.cpp
@@ -752,6 +753,19 @@ if(PIKMIN_NETPLAY_BUILD)
         pc_port/netplay/pc_netplay_diag.cpp
         pc_port/netplay/pc_netplay_diag_bt.cpp)
     target_link_libraries(${NECTAR_GAME} PRIVATE juice)
+    # Router port mapping for ICE rooms (nectar_net's PortPublisher: PCP and
+    # NAT-PMP always, UPnP when miniupnpc is found, e.g. with CMAKE_PREFIX_PATH
+    # at the scripts/netplay-deps.sh prefix). Created once: Android adds this
+    # directory twice, and NECTAR_ONLINE may have added it already.
+    if(NOT TARGET nectar_net)
+        find_package(miniupnpc CONFIG QUIET)
+        if(miniupnpc_FOUND)
+            set(NECTAR_NET_ENABLE_UPNP ON)
+        endif()
+        add_subdirectory("${NECTAR_LIBS_DIR}/nectar_net" "${CMAKE_BINARY_DIR}/nectar_net")
+    endif()
+    target_link_libraries(${NECTAR_GAME} PRIVATE nectar_net)
+    target_compile_definitions(${NECTAR_GAME} PRIVATE PIKI_NETPLAY_PORTMAP=1)
 endif()
 
 option(PIKMIN_ENABLE_IPO "Enable portable interprocedural/link-time optimization" ON)
@@ -966,8 +980,10 @@ if(PIKMIN_BUILD_LAUNCHER)
     if (WIN32)
         target_sources(pikmin_launcher PRIVATE packaging/windows/nectar.rc)
     endif()
-    # Host Co-op / Join Co-op, for netplay builds of the game only.
-    if(PIKMIN_NETPLAY_BUILD)
+    # Host Co-op / Join Co-op en el launcher: apagado por defecto, el online se
+    # abre desde el propio juego (Co-op / VS -> Online).
+    option(PIKMIN_LAUNCHER_NETPLAY_BUTTONS "Show the Host/Join Co-op buttons in the launcher" OFF)
+    if(PIKMIN_NETPLAY_BUILD AND PIKMIN_LAUNCHER_NETPLAY_BUTTONS)
         target_sources(pikmin_launcher PRIVATE pc_port/launcher/launcher_coop.cpp)
         target_compile_definitions(pikmin_launcher PRIVATE PIKMIN_LAUNCHER_NETPLAY=1)
     endif()

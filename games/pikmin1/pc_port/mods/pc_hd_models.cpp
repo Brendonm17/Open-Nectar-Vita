@@ -362,6 +362,15 @@ void drawModel(Graphics& gfx, const Model& model, const Entry& entry, const std:
 	}
 	GXSetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
 	GXSetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_COPY);
+	// El alpha compare también se hereda del último material del motor (hojas y
+	// flores de los Pikmin lo dejan en "alfa > umbral"). Con él, el cristal del
+	// casco, de alfa baja, se descartaba entero o no según qué se hubiera dibujado
+	// justo antes: el casco aparecía y desaparecía al azar.
+	GXCompare prevComp0, prevComp1;
+	GXAlphaOp prevAlphaOp;
+	u8 prevRef0, prevRef1;
+	pc_gfx_get_alpha_compare(&prevComp0, &prevRef0, &prevAlphaOp, &prevComp1, &prevRef1);
+	GXSetAlphaCompare(GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0);
 	static const GXColor kWhite = { 255, 255, 255, 255 };
 	// Primero lo opaco y luego lo translúcido sin escribir profundidad: si el
 	// visor se pintaba antes que la cabeza, su profundidad la tapaba y el cristal
@@ -379,6 +388,7 @@ void drawModel(Graphics& gfx, const Model& model, const Entry& entry, const std:
 	// not restate every mode, so a leaked GX_CULL_FRONT or blend mode hit the
 	// next mesh drawn (transparent Onion, missing helmet, cursor ring).
 	pc_gfx_set_pipeline_state(prevPipeline);
+	GXSetAlphaCompare(prevComp0, prevRef0, prevAlphaOp, prevComp1, prevRef1);
 	GXSetNumTevStages(1);
 	GXSetTevOp(GX_TEVSTAGE0, GX_MODULATE);
 }

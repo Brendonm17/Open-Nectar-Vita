@@ -1257,6 +1257,8 @@ bool IceSocket::gather(const IceNetConfig& cfg, std::string* sdpOut, std::string
 		*sdpOut = ice_filter_relay_candidates(*sdpOut);
 		printf("[netplay] ice: TURN-only mode, host candidates filtered out\n");
 		fflush(stdout);
+	} else if (mSdpHook) {
+		mSdpHook(*sdpOut);
 	}
 	return true;
 }

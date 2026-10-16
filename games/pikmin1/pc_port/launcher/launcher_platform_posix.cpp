@@ -126,7 +126,12 @@ unsigned long currentProcessId()
 
 bool hasGraphicalDialogs()
 {
+#if defined(__APPLE__)
+    // osascript ships with macOS, so the native choosers are always available.
+    return true;
+#else
     return commandExists("zenity") || commandExists("kdialog");
+#endif
 }
 
 bool stdinIsTerminal()
@@ -167,6 +172,15 @@ fs::path askForInstallDirectory(const std::string& title)
         });
         if (!selected.empty()) return selected;
     }
+#if defined(__APPLE__)
+    else {
+        // POSIX path returns a trailing slash. Drop it, but keep a bare "/".
+        std::string selected = runDialog("osascript", { "-e",
+            "POSIX path of (choose folder with prompt \"Open Nectar - " + title + "\")" });
+        while (selected.size() > 1 && selected.back() == '/') selected.pop_back();
+        if (!selected.empty()) return selected;
+    }
+#endif
     return {};
 }
 
@@ -186,6 +200,15 @@ fs::path askForImage()
         });
         if (!selected.empty()) return selected;
     }
+#if defined(__APPLE__)
+    else {
+        // No type filter: osascript's "of type" needs file-type identifiers, not
+        // extensions. The launcher checks the image format after selection.
+        const std::string selected = runDialog("osascript", { "-e",
+            "POSIX path of (choose file with prompt \"Open Nectar - Choose your disc image\")" });
+        if (!selected.empty()) return selected;
+    }
+#endif
     return {};
 }
 

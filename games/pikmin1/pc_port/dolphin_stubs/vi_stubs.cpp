@@ -15,6 +15,7 @@
 #include "settings/pc_settings.h"
 #include "settings/pc_glass_menu.h"
 #include "pc_speedrun.h"
+#include "pc_record.h"
 #if PIKI_PC_TOUCH
 #include "touch/pc_touch.h"
 #endif
@@ -47,9 +48,12 @@ void VIWaitForRetrace(void)    {
 #if defined(PIKI_PC_PORT) && defined(PIKI_PC_SETTINGS_MENU)
     // Draw the settings overlay through the game GX stack before the native
     // framebuffer is blitted to the window, so it appears on top.
-    pc_settings_draw_idle_counter();
+    // Ctrl+1 (atajo de grabación) también quita los contadores del port.
+    if (!pc_record_hud_hidden()) {
+        pc_settings_draw_idle_counter();
+        pc_settings_draw_vs_hud();
+    }
     pc_speedrun_draw();
-    pc_settings_draw_vs_hud();
     if (pc_netplay_hud_draw != nullptr) pc_netplay_hud_draw();
     pc_settings_draw_achievement_toast();
     pc_settings_draw();

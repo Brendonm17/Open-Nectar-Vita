@@ -46,7 +46,13 @@ public:
             mValid = false;
         }
         int error = 0;
-        UPNPDev* devices = upnpDiscover(static_cast<int>(timeoutMs), nullptr, nullptr, 0, 0, 2, &error);
+        // One search, one wait: upnpDiscover() tries several device and
+        // service types in turn and waits timeoutMs for each, which multiplies
+        // the delay when no router answers. IGD:2 devices answer a search for
+        // IGD:1 too (UDA: a device answers searches for lower versions).
+        static const char* const kTypes[] = { "urn:schemas-upnp-org:device:InternetGatewayDevice:1", nullptr };
+        UPNPDev* devices =
+            upnpDiscoverDevices(kTypes, static_cast<int>(timeoutMs), nullptr, nullptr, 0, 0, 2, &error, 0);
         if (devices == nullptr) return MappingError::Timeout;
         char wan[64] = {};
         const int found = UPNP_GetValidIGD(devices, &mUrls, &mData, mLan, sizeof(mLan), wan, sizeof(wan));

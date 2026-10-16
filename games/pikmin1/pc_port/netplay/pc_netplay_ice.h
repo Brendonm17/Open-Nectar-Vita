@@ -206,6 +206,10 @@ public:
 
 	void close();
 
+	// Runs on this side's gathered SDP before it is encoded (not in TURN-only
+	// mode): the session adds the router's mapped address as a candidate.
+	void set_local_sdp_hook(std::function<void(std::string&)> hook) { mSdpHook = std::move(hook); }
+
 	std::string selected_local() const;
 	std::string selected_remote() const;
 	std::string state_str() const;
@@ -220,6 +224,7 @@ private:
 
 	bool create_agent(const IceNetConfig& cfg, std::string* err);
 	bool gather(const IceNetConfig& cfg, std::string* sdpOut, std::string* err, std::function<void()> pump);
+	std::function<void(std::string&)> mSdpHook;
 	bool wait_gathering_done(double timeoutMs, std::string* err, std::function<void()> pump);
 	bool local_description(std::string* out, std::string* err);
 	bool apply_remote(const std::string& sdp, bool turnOnly, std::string* err);

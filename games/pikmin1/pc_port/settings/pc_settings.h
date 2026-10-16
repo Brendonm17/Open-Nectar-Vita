@@ -197,6 +197,8 @@ int  pc_settings_get_speedrun_livesplit(void);
 int  pc_settings_get_speedrun_ls_hide_clock(void);
 const char* pc_settings_get_speedrun_ls_host(void);
 int  pc_settings_get_speedrun_ls_port(void);
+/// Online rooms may use a public STUN server (F1 > Data > Online over the Internet).
+int  pc_settings_get_online_stun(void);
 // Explicación del modo Randomizer al elegirlo en el título. CONTINUE = seguir
 // a capitán y slots, BACK = volver al título.
 enum { PC_RANDOMIZER_INTRO_PENDING = 0, PC_RANDOMIZER_INTRO_CONTINUE = 1, PC_RANDOMIZER_INTRO_BACK = 2 };
@@ -269,6 +271,11 @@ int  pc_devassign_prompt_result(void);
 
 /// Debug shortcuts F5 and F6, off by default.
 int pc_settings_get_debug_keys(void);
+/// Atajo de grabación (Ctrl+2): 1 = aspecto del juego original (sin sombras,
+/// AO, bloom, desenfoque, FXAA, luz por píxel, anisotrópico, gradación ni
+/// modelos HD); 0 = vuelve a lo que había. En vivo y sin guardar el .conf.
+/// El pack de texturas no cambia: se aplica al reiniciar.
+void pc_settings_record_original_look(int original);
 /// Modelo HD de esa fila del selector (0 Olimar, 1 Louie, 2 Louie HD,
 /// 3 Pikmin, 4 Bulborb, 5 Dwarf Bulborb): 0 = apagado, se usa el original.
 int pc_settings_get_hd_model_enabled(int row);

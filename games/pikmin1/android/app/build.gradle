@@ -65,6 +65,12 @@ android {
                 def netplayId = project.findProperty('nectarNetplay')
                 if (netplayId && !onlineDeps) {
                     arguments '-DPIKMIN_NETPLAY_BUILD=ON', '-DNECTAR_ONLINE=OFF', "-DPIKMIN_NETPLAY_SOURCE_ID=${netplayId}"
+                    // -PnectarNetplayDeps=<prefijo android-arm64>: miniupnpc para
+                    // abrir el puerto por UPnP (PCP y NAT-PMP no lo necesitan).
+                    def netplayDeps = project.findProperty('nectarNetplayDeps')
+                    if (netplayDeps) {
+                        arguments "-DCMAKE_PREFIX_PATH=${netplayDeps}", "-DCMAKE_FIND_ROOT_PATH=${netplayDeps}"
+                    }
                 }
                 // -PnectarOnlyPikmin1: APK de prueba sin Pikmin 2.
                 if (!project.hasProperty('nectarOnlyPikmin1')) targets 'pikmin2_pc', 'pikmin2_pc_pal'

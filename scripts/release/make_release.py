@@ -89,6 +89,7 @@ def main():
     ap.add_argument("--p1-usa", required=True)
     ap.add_argument("--p1-pal", required=True)
     ap.add_argument("--p2", required=True)
+    ap.add_argument("--p2-usa", help="build USA (GPVE01) de Pikmin 2; --p2 es la europea")
     ap.add_argument("--extra", action="append", default=[], help="archivo que va junto al launcher (README, icono)")
     args = ap.parse_args()
 
@@ -108,6 +109,10 @@ def main():
     launcher_files += [(f, os.path.basename(f), False) for f in args.extra]
     p1_files = [(args.p1_usa, "nectar" + exe, True), (args.p1_pal, "nectar-pal" + exe, True)]
     p2_files = [(args.p2, "pikmin2_pc" + exe, True)]
+    if args.p2_usa:
+        if open(args.p2, "rb").read() == open(args.p2_usa, "rb").read():
+            sys.exit("pikmin2_pc y pikmin2_pc-usa son el mismo archivo: la build USA no se hizo.")
+        p2_files.append((args.p2_usa, "pikmin2_pc-usa" + exe, True))
 
     if open(args.p1_usa, "rb").read() == open(args.p1_pal, "rb").read():
         sys.exit("nectar y nectar-pal son el mismo archivo: la build PAL no se hizo.")

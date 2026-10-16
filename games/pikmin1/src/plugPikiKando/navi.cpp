@@ -5,6 +5,7 @@
 #if defined(PIKI_PC_PORT)
 #include "GameStat.h"
 #include "pc_permadeath.h"
+#include "pc_record.h"
 #include "pc_coop.h"
 #include "pc_window.h"
 #include "pc_gyro.h"
@@ -687,6 +688,7 @@ void Navi::reset()
 	mPcLockIgnore = nullptr;
 	mPcChargeTime = 0.0f;
 	mPcAimOffset.set(0.0f, 0.0f, 0.0f);
+	mPcCursorMtx.makeIdentity();
 	mPcPinnedOffset.set(0.0f, 0.0f, 0.0f);
 #endif
 	mWalkAnimPrevDir = mFaceDirection;
@@ -3873,6 +3875,7 @@ void Navi::refresh(Graphics& gfx)
 		mWorldMtx = orientMatrix;
 		mWorldMtx.setTranslation(mCursorWorldPos);
 #if defined(PIKI_PC_PORT)
+		mPcCursorMtx = mWorldMtx;
 		}
 #endif
 #if defined(PIKI_PC_PORT)
@@ -3887,7 +3890,8 @@ void Navi::refresh(Graphics& gfx)
 		if (simSide)
 #endif
 		{
-			const bool cursorShown = mIsCursorVisible && getCurrState()->getID() != NAVISTATE_DemoSunset;
+			// Ctrl+1 (atajo de grabación) oculta el cursor con el HUD.
+			const bool cursorShown = mIsCursorVisible && getCurrState()->getID() != NAVISTATE_DemoSunset && !pc_record_hud_hidden();
 			Vector3f trailPos(mCursorWorldPos.x, mCursorWorldPos.y + 2.0f, mCursorWorldPos.z);
 			Vector3f moved = trailPos - mCursorTrailLastPos;
 			const bool moving = cursorShown && moved.length() > 0.5f;
@@ -3909,9 +3913,17 @@ void Navi::refresh(Graphics& gfx)
 			if (cursorShown) mCursorTrailLastPos = trailPos;
 		}
 
+#if defined(PIKI_PC_PORT)
+		if (mIsCursorVisible && getCurrState()->getID() != NAVISTATE_DemoSunset && !pc_record_hud_hidden()) {
+#else
 		if (mIsCursorVisible && getCurrState()->getID() != NAVISTATE_DemoSunset) {
+#endif
 			gfx.useMatrix(Matrix4f::ident, 0);
+#if defined(PIKI_PC_PORT)
+			gfx.mCamera->mLookAtMtx.multiplyTo(mPcCursorMtx, viewMtx);
+#else
 			gfx.mCamera->mLookAtMtx.multiplyTo(mWorldMtx, viewMtx);
+#endif
 
 			gfx.useMatrix(viewMtx, 0);
 

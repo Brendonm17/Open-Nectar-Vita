@@ -221,41 +221,39 @@ std::vector<std::string> wrap(const std::string& text, int maxW, int fontW)
 
 void draw_box(const PcNetplayHudInfo& info, int W, int H)
 {
-	char l1[64], l2[64], l3[80];
-	pc_netplay_hud::format_lines(info.numbers, l1, sizeof l1, l2, sizeof l2, l3, sizeof l3);
+	(void)W;
+	// A small tag in the top-left corner, the one corner the game's HUD leaves
+	// free (sun and day at the top right, captain and counters at the bottom):
+	// the link quality and the ping in the quality's colour, the stalls only
+	// when there are any, and a second line only for a state worth reading.
+	const pc_netplay_hud::Quality q = pc_netplay_hud::classify(info.numbers.havePing, info.numbers.pingMs,
+	                                                           info.numbers.jitterMs, info.numbers.stalls10s);
 	uint8_t qc[4];
-	pc_netplay_hud::quality_rgba(pc_netplay_hud::classify(info.numbers.havePing, info.numbers.pingMs,
-	                                                      info.numbers.jitterMs, info.numbers.stalls10s),
-	                             qc);
-	// Compact: 9x13 body text, 10x14 title, inside the plate's 16-unit
-	// content margins (pc_settings_p2d_plate style 0) with room to spare.
-	const int fw = 9, fh = 13, pad = 16, lh = fh + 3;
-	int tw = pc_settings_p2d_text_width(l1, 10);
-	tw     = std::max(tw, pc_settings_p2d_text_width(l2, fw));
-	tw     = std::max(tw, pc_settings_p2d_text_width(l3, fw));
-	const bool hasStatus = info.status[0] != '\0';
-	if (hasStatus) tw = std::max(tw, pc_settings_p2d_text_width(info.status, fw));
-	if (info.online) {
-		snprintf(l1, sizeof l1, "ONLINE  %s",
-		         pc_netplay_hud::quality_name(pc_netplay_hud::classify(info.numbers.havePing, info.numbers.pingMs,
-		                                                               info.numbers.jitterMs, info.numbers.stalls10s)));
+	pc_netplay_hud::quality_rgba(q, qc);
+	char line[96];
+	if (info.numbers.havePing)
+		snprintf(line, sizeof line, "%s  %d ms", pc_netplay_hud::quality_name(q), (int)(info.numbers.pingMs + 0.5f));
+	else
+		snprintf(line, sizeof line, "%s", pc_netplay_hud::quality_name(q));
+	if (info.numbers.stalls10s > 0) {
+		const size_t len = strlen(line);
+		snprintf(line + len, sizeof line - len, "  %u stalls", info.numbers.stalls10s);
 	}
-	const int bw = tw + 2 * pad + 10;
-	const int bh = (hasStatus ? 4 : 3) * lh + 24;
-	const int x  = W - bw - 6;
-	// Right edge, just below the game's "day N" badge in the top-right corner
-	// (which ends about a fifth of the way down), clear of the sun meter.
-	const int y  = (int)(H * 0.235f);
+	const int fw = 8, fh = 12, pad = 8;
+	const bool hasStatus = info.status[0] != '\0';
+	int tw = pc_settings_p2d_text_width(line, fw);
+	if (hasStatus) tw = std::max(tw, pc_settings_p2d_text_width(info.status, 6));
+	const int bw = tw + 2 * pad + 6;
+	const int bh = hasStatus ? 38 : 25;
+	const int x  = 6;
+	const int y  = (int)(H * 0.03f);
 	pc_settings_p2d_plate(x, y, bw, bh, 0);
-	pc_settings_p2d_text(x + pad + 2, y + 10, l1, rgba(qc), 10, 14);
-	const Colour body(235, 235, 235, 255);
-	pc_settings_p2d_text(x + pad + 2, y + 10 + lh, l2, body, fw, fh);
-	pc_settings_p2d_text(x + pad + 2, y + 10 + 2 * lh, l3, body, fw, fh);
+	pc_settings_p2d_text(x + pad + 1, y + 6, line, rgba(qc), fw, fh);
 	if (hasStatus) {
 		const Colour tone = info.statusTone == 2 ? Colour(255, 90, 80, 255)
 		                  : info.statusTone == 1 ? Colour(255, 210, 90, 255)
 		                                         : Colour(170, 220, 255, 255);
-		pc_settings_p2d_text(x + pad + 2, y + 10 + 3 * lh, info.status, tone, fw, fh);
+		pc_settings_p2d_text(x + pad + 1, y + 6 + fh + 3, info.status, tone, 6, 9);
 	}
 }
 

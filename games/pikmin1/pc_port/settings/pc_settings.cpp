@@ -165,6 +165,7 @@ struct PcConfig {
     int speedrunLsHideClock = 0; // con LiveSplit conectado, sin reloj ni splits propios
     char speedrunLsHost[64] = "127.0.0.1";
     int speedrunLsPort = 16834; // splits visibles bajo el reloj del modo Speedrun (1-10)
+    int onlineStun = 1;         // online: servidor STUN público para jugar entre redes distintas
     int onionStep10 = 0;        // Y + arriba/abajo en la cebolla mueve de 10 en 10
     int instantWhistle = 0;     // los Pikmin silbados se unen sin la reacción de girarse
     // Cheats.
@@ -1209,6 +1210,7 @@ void saveConfig() {
     out << "speedrunLsHideClock = " << sConfig.speedrunLsHideClock << "\n";
     out << "speedrunLsHost = " << sConfig.speedrunLsHost << "\n";
     out << "speedrunLsPort = " << sConfig.speedrunLsPort << "\n";
+    out << "onlineStun = " << sConfig.onlineStun << "\n";
     out << "onionStep10 = " << sConfig.onionStep10 << "\n";
     out << "instantWhistle = " << sConfig.instantWhistle << "\n";
     out << "pikiInvincible = " << sConfig.pikiInvincible << "\n";
@@ -1414,6 +1416,9 @@ void loadConfig() {
         }
         else if (key == "speedrunLsPort") {
             sConfig.speedrunLsPort = std::clamp(atoi(val.c_str()), 1, 65535);
+        }
+        else if (key == "onlineStun") {
+            sConfig.onlineStun = atoi(val.c_str()) != 0 ? 1 : 0;
         }
         else if (key == "speedrunSplitsShown") {
             sConfig.speedrunSplitsShown = std::clamp(atoi(val.c_str()), 1, 10);
@@ -6919,6 +6924,7 @@ int pc_settings_get_speedrun_livesplit(void) { return sConfig.speedrunLiveSplit;
 int pc_settings_get_speedrun_ls_hide_clock(void) { return sConfig.speedrunLsHideClock; }
 const char* pc_settings_get_speedrun_ls_host(void) { return sConfig.speedrunLsHost; }
 int pc_settings_get_speedrun_ls_port(void) { return sConfig.speedrunLsPort; }
+int pc_settings_get_online_stun(void) { return sConfig.onlineStun; }
 int pc_settings_get_fps_mode(void) { if (pc_speedrun_active()) return 0;
     return sConfig.fpsMode;
 }
@@ -7127,6 +7133,41 @@ int pc_settings_get_hd_model_enabled(int row) {
 
 int pc_settings_get_debug_keys(void) { if (pc_speedrun_active()) return 0;
     return sConfig.debugKeys;
+}
+
+void pc_settings_record_original_look(int original) {
+    // Copia de lo que había antes de pasar al aspecto original; se repone tal cual.
+    static PcConfig sBefore;
+    static bool sInOriginal = false;
+    if (original && !sInOriginal) {
+        sBefore = sConfig;
+        sConfig.shadows = 0;
+        sConfig.ssao = 0;
+        sConfig.bloom = 0;
+        sConfig.dof = 0;
+        sConfig.antialiasing = 0;
+        sConfig.perPixelLighting = 0;
+        sConfig.anisotropy = 0;
+        sConfig.colourGrading = 0;
+        sConfig.fog = 1;
+        sConfig.hdModelsDisabled = 0x3F; // las seis filas del selector de modelos HD
+        sInOriginal = true;
+    } else if (!original && sInOriginal) {
+        sConfig.shadows = sBefore.shadows;
+        sConfig.ssao = sBefore.ssao;
+        sConfig.bloom = sBefore.bloom;
+        sConfig.dof = sBefore.dof;
+        sConfig.antialiasing = sBefore.antialiasing;
+        sConfig.perPixelLighting = sBefore.perPixelLighting;
+        sConfig.anisotropy = sBefore.anisotropy;
+        sConfig.colourGrading = sBefore.colourGrading;
+        sConfig.fog = sBefore.fog;
+        sConfig.hdModelsDisabled = sBefore.hdModelsDisabled;
+        sInOriginal = false;
+    }
+    applyGraphics(sConfig);
+    fprintf(stderr, "[RECORD] graphics: %s\n", sInOriginal ? "original" : "Open Nectar");
+    fflush(stderr);
 }
 
 #if PIKI_NETPLAY_BUILD
@@ -7504,6 +7545,7 @@ const GroupRow kDataRows[] = {
 #endif
     { SRC_DATA, 2, "Reset all settings to defaults", "Puts every setting back to its default. Saves are not touched." },
     { SRC_DATA, 3, "Online co-op: leave / rejoin", "As an online guest: stop playing and watch the host's captain while keeping your place. Choose it again, or press Start, to ask to rejoin; the host lets you back in outside menus and cutscenes." },
+    { SRC_DATA, 4, "Online over the Internet", "On: when you create or join an online room, the game asks a free public server (Google or Cloudflare STUN) for this connection's Internet address, so a friend on another network can connect. Only that address is exchanged; the game itself goes directly between the two players. Some networks still block it (often mobile data on both sides). Off: no outside server is contacted, and only players on the same network or a VPN can connect." },
 };
 
 template <size_t N> constexpr int countOf(const GroupRow (&)[N]) { return (int)N; }
@@ -7756,7 +7798,7 @@ bool pc_settings_row_enabled(int group, int row) {
 bool pc_settings_row_is_action(int group, int row) {
     if (group == PC_SET_PICKER_TEXPACKS || group == PC_SET_PICKER_HDMODELS) return true;
     const GroupRow* r = groupRow(group, row);
-    return r && (r->src == SRC_DATA || (r->src == SRC_ADV && r->idx == 7));
+    return r && ((r->src == SRC_DATA && r->idx != 4) || (r->src == SRC_ADV && r->idx == 7));
 }
 
 const char* pc_settings_row_help(int group, int row) {
@@ -7850,6 +7892,7 @@ void pc_settings_row_value(int group, int row, char* out, unsigned long n) {
             if (r->idx < 2) snprintf(out, n, "A: open");
 #endif
             else if (r->idx == 2) snprintf(out, n, "A: reset");
+            else if (r->idx == 4) snprintf(out, n, "%s", sPending.onlineStun ? "On" : "Off");
             else snprintf(out, n, "%s", online_guest() ? (online_spectating() ? "A: rejoin" : "A: leave") : "-");
             break;
         case SRC_ACH: snprintf(out, n, "%d pts", pc_achievement_info(r->idx).points); break;
@@ -7920,6 +7963,10 @@ void pc_settings_row_change(int group, int row, int dir, bool ok) {
             break;
         case SRC_MODS: modsRowChange(r->idx, left, right); break;
         case SRC_DATA:
+            if (r->idx == 4) {
+                if (ok || left || right) sPending.onlineStun = !sPending.onlineStun;
+                return;
+            }
             if (!ok) return;
             if (r->idx < 2) saveDataRowAction(r->idx);
             else if (r->idx == 2) resetToDefaults();

@@ -14,6 +14,7 @@
 #include "netplay/pc_state_hash.h"
 #if defined(PIKI_PC_PORT)
 #include "pc_photo_mode.h"
+#include "pc_record.h"
 #include "pc_coop.h"
 #include "randomizer/pc_randomizer_catalog.h"
 #include "mods/pc_vs_arena.h"
@@ -2587,6 +2588,57 @@ static void pcVsMarkKey()
 	wasDown = isDown;
 }
 
+// Atajos de grabación (pc_record.h): la luz de una hora del día, sin mover el
+// reloj de juego. La luz, el sol y el cielo leen el reloj visual, que avanza
+// por su cuenta, así que basta con fijarlo: el día ni avanza ni se acaba.
+static void pcRecordSetLight(f32 hour)
+{
+	gPcVisualTimeOfDay = hour;
+	fprintf(stderr, "[RECORD] light -> %.1f h\n", hour);
+	fflush(stderr);
+}
+
+// Ctrl+6: Pikmin nuevos, ya en el grupo del capitán, repartidos en espiral a
+// su alrededor y alternando colores. Como en la preparación del modo VS. No
+// pasa del límite de Pikmin: los pools se dimensionan con él al cargar el
+// nivel, así que para 999 hay que subir el límite y volver a entrar.
+static void pcRecordSpawnPikis(int count)
+{
+	Navi* navi = naviMgr ? naviMgr->getNavi() : nullptr;
+	if (navi == nullptr || pikiMgr == nullptr || mapMgr == nullptr) {
+		return;
+	}
+	const int limit = pc_settings_get_piki_limit();
+	const int room  = limit - int(GameStat::allPikis);
+	if (count > room) {
+		count = room;
+	}
+	int born = 0;
+	for (int i = 0; i < count; i++) {
+		Piki* piki = static_cast<Piki*>(pikiMgr->birth());
+		if (piki == nullptr) {
+			break;
+		}
+		const int color = Blue + (i % 3);
+		GameStat::workPikis.inc(color);
+		piki->init(navi);
+		const int k     = int(GameStat::allPikis) + i;
+		const f32 angle = f32(k) * 2.3999632f; // ángulo áureo: sin filas ni huecos
+		const f32 dist  = 25.0f + 7.0f * sqrtf(f32(k));
+		Vector3f at     = navi->mSRT.t;
+		at.x += dist * sinf(angle);
+		at.z += dist * cosf(angle);
+		at.y = mapMgr->getMinY(at.x, at.z, true);
+		piki->Creature::init(at);
+		piki->initColor(color);
+		piki->changeMode(PikiMode::FormationMode, navi);
+		born++;
+	}
+	GameStat::update();
+	fprintf(stderr, "[RECORD] +%d Pikmin (limit %d)\n", born, limit);
+	fflush(stderr);
+}
+
 static void pcDebugKeys()
 {
 	// Off unless asked for: a stray F5 would otherwise fill someone's Onion
@@ -2594,6 +2646,11 @@ static void pcDebugKeys()
 	// frame, so the switch takes effect at once.
 	if (!pc_settings_get_debug_keys()) {
 		return;
+	}
+
+	// Ctrl+1..5 y 7/8 se leen en updateAI, que sigue corriendo con el modo foto.
+	if (pc_record_ctrl_pressed(6)) {
+		pcRecordSpawnPikis(100);
 	}
 
 	const Uint8* keys = SDL_GetKeyboardState(nullptr);
@@ -2960,6 +3017,37 @@ void GameCoreSection::updateAI()
 			pc_photo_mode_enter(eye.x, eye.y, eye.z, pitch, yaw);
 		}
 	}
+
+#if PIKI_DEBUG_KEYS
+	// Atajos de grabación (pc_record.h). Aquí y no en pcDebugKeys porque update()
+	// no corre con el mundo congelado, y el antes/después se graba justo así: con
+	// el modo foto, desde exactamente el mismo sitio.
+	if (pc_settings_get_debug_keys() && !pc_netplay_deterministic()) {
+		if (pc_record_ctrl_pressed(1)) {
+			pc_record_toggle_hud();
+		}
+		if (pc_record_ctrl_pressed(2)) {
+			static bool original = false;
+			original             = !original;
+			pc_settings_record_original_look(original ? 1 : 0);
+		}
+		if (pc_record_ctrl_pressed(3)) {
+			pcRecordSetLight(gameflow.mParameters->mStartHour()); // amanecer, 7:00
+		}
+		if (pc_record_ctrl_pressed(4)) {
+			pcRecordSetLight(12.0f);
+		}
+		if (pc_record_ctrl_pressed(5)) {
+			pcRecordSetLight(gameflow.mParameters->mEndHour() - 0.6f); // atardecer, ~18:25
+		}
+		if (pc_record_ctrl_pressed(7) && pc_photo_mode_active()) {
+			pc_record_save_camera();
+		}
+		if (pc_record_ctrl_pressed(8) && pc_photo_mode_active()) {
+			pc_record_load_camera();
+		}
+	}
+#endif
 
 	if (pc_photo_mode_active()) {
 		PcamCamera* pcam = cameraMgr->mCamera;
@@ -3752,23 +3840,31 @@ void GameCoreSection::draw2D(Graphics& gfx)
 		Navi* navi      = naviMgr->getNavi();
 		AState<Navi>* s = navi->getCurrState();
 		int state       = s->getID();
-		if (state != NAVISTATE_DemoSunset) {
 #if defined(PIKI_PC_PORT)
+		// Atajo de grabación Ctrl+1: nada de HUD encima del juego.
+		const bool hudShown = !pc_record_hud_hidden();
+		if (state != NAVISTATE_DemoSunset && hudShown) {
 			drawGameInfoHud(gfx);
-#else
-			mDrawGameInfo->draw(gfx);
-#endif
 		}
 		gfx.setOrthogonal(orthoMtx.mMtx, AREA_FULL_SCREEN(gfx));
-#if defined(PIKI_PC_PORT)
-		drawContainerWindows(gfx);
+		if (hudShown) {
+			drawContainerWindows(gfx);
+			if (!gameflow.mMoviePlayer->mIsActive && !gameflow.mIsUIOverlayActive) {
+				hurryupWindow->draw(gfx);
+			}
+			accountWindow->draw(gfx);
+		}
 #else
+		if (state != NAVISTATE_DemoSunset) {
+			mDrawGameInfo->draw(gfx);
+		}
+		gfx.setOrthogonal(orthoMtx.mMtx, AREA_FULL_SCREEN(gfx));
 		containerWindow->draw(gfx);
-#endif
 		if (!gameflow.mMoviePlayer->mIsActive && !gameflow.mIsUIOverlayActive) {
 			hurryupWindow->draw(gfx);
 		}
 		accountWindow->draw(gfx);
+#endif
 	}
 
 	// this function requires an UNGODLY amount of stack from inlines, plus some

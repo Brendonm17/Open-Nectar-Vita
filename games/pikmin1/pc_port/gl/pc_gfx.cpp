@@ -5009,6 +5009,14 @@ void pc_gfx_set_alpha_compare(GXCompare comp0, u8 ref0, GXAlphaOp op, GXCompare 
     sAlphaRef1 = ref1 / 255.0f;
 }
 
+void pc_gfx_get_alpha_compare(GXCompare* comp0, u8* ref0, GXAlphaOp* op, GXCompare* comp1, u8* ref1) {
+    if (comp0) *comp0 = sAlphaComp0;
+    if (ref0) *ref0 = static_cast<u8>(sAlphaRef0 * 255.0f + 0.5f);
+    if (op) *op = sAlphaOp;
+    if (comp1) *comp1 = sAlphaComp1;
+    if (ref1) *ref1 = static_cast<u8>(sAlphaRef1 * 255.0f + 0.5f);
+}
+
 void pc_gfx_set_chan_ctrl(GXChannelID chan, GXBool enable, GXColorSrc ambSrc, GXColorSrc matSrc,
                           u32 lightMask, GXDiffuseFn diffFn, GXAttnFn attnFn) {
     state_touched();
