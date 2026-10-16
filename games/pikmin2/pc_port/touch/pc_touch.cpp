@@ -16,6 +16,7 @@ static void pc_photo_mode_add_touch_look(float, float) { }
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <algorithm>
 #include <vector>
 
 #include "Dolphin/pad.h"
@@ -292,6 +293,9 @@ u16 sPreviousMenuButtons = 0;
 u16 sQueuedGameButtons = 0;
 int sLayoutW = 0, sLayoutH = 0;
 int sGameMenuClaimFrames = 0;
+// Menú que usa el stick táctil (radar: mover el mapa): un arrastre del stick
+// no cuenta como deslizar para pasar de página.
+int sMenuStickFrames = 0;
 int sPortMenuClaimFrames = 0;
 // Arrastre vertical sobre los menús del port (listas con scroll): se manda
 // como desplazamiento normalizado y, si se movió, el toque no cuenta.
@@ -866,7 +870,7 @@ void pc_touch_on_finger(long long fingerId, PcTouchPhase phase, float x, float y
 			if (s.finger != fingerId) continue;
 			s.finger = -1;
 			const float dx = x - s.x0, dy = y - s.y0;
-			if (sGameMenuClaimFrames > 0 && button_at(s.x0, s.y0) < 0
+			if (sGameMenuClaimFrames > 0 && button_at(s.x0, s.y0) < 0 && !(sMenuStickFrames > 0 && fingerId == sStick.finger)
 			    && std::fabs(dx) > kSwipeMinFraction * float(sLayoutW) && std::fabs(dx) > 2.0f * std::fabs(dy)) {
 				// Deslizar hacia la izquierda avanza (R), hacia la derecha
 				// retrocede (L), como pasar páginas.
@@ -1023,6 +1027,7 @@ bool pc_touch_merge_pad(u16* button, s8* stickX, s8* stickY, s8* substickX, s8* 
 	const bool touched = sTouchedThisFrame;
 	sTouchedThisFrame = false;
 	if (sGameMenuClaimFrames > 0) --sGameMenuClaimFrames;
+	if (sMenuStickFrames > 0) --sMenuStickFrames;
 	if (sPortMenuClaimFrames > 0) --sPortMenuClaimFrames;
 	if (sGameMenuTapPending && ++sGameMenuTapAge > 12) sGameMenuTapPending = false;
 	if (sColorIcon.age < 999) ++sColorIcon.age;
@@ -1126,6 +1131,7 @@ void pc_touch_set_visible(bool visible) { sVisible = visible; }
 bool pc_touch_visible(void) { return sVisible; }
 
 void pc_touch_claim_game_menu(void) { sGameMenuClaimFrames = 3; }
+void pc_touch_menu_uses_stick(void) { sMenuStickFrames = 3; }
 
 void pc_touch_claim_port_menu(void)
 {
@@ -1144,11 +1150,88 @@ bool pc_touch_take_game_menu_tap(float* x, float* y)
 
 void pc_touch_queue_game_button(u16 button) { sQueuedGameButtons |= button; }
 
+namespace {
+struct TrackedPane {
+	const void* pane;
+	float x0, y0, x1, y1; // píxeles de ventana
+	int drawnFrame;
+	int askedFrame;
+};
+std::vector<TrackedPane> sTrackedPanes;
+int sTouchFrame = 0;
+
+TrackedPane* find_tracked(const void* pane)
+{
+	for (TrackedPane& t : sTrackedPanes)
+		if (t.pane == pane) return &t;
+	return nullptr;
+}
+} // namespace
+
+bool pc_touch_panes_active(void) { return !sTrackedPanes.empty(); }
+bool pc_touch_pane_tracked(const void* pane) { return !sTrackedPanes.empty() && find_tracked(pane); }
+
+void pc_touch_pane_drawn(const void* pane, float x0, float y0, float x1, float y1)
+{
+	TrackedPane* t = find_tracked(pane);
+	if (!t) return;
+	// Lo que dibujan el panel y sus hijos en este frame, unido.
+	if (t->drawnFrame != sTouchFrame) {
+		t->x0 = t->y0 = 1.0e9f;
+		t->x1 = t->y1 = -1.0e9f;
+		t->drawnFrame = sTouchFrame;
+	}
+	t->x0 = std::min(t->x0, std::min(x0, x1));
+	t->x1 = std::max(t->x1, std::max(x0, x1));
+	t->y0 = std::min(t->y0, std::min(y0, y1));
+	t->y1 = std::max(t->y1, std::max(y0, y1));
+}
+
+bool pc_touch_pane_rect(const void* pane, float* x0, float* y0, float* x1, float* y1)
+{
+	if (!pane) return false;
+	TrackedPane* t = find_tracked(pane);
+	if (!t) {
+		sTrackedPanes.push_back({ pane, 0, 0, 0, 0, -100, sTouchFrame });
+		return false;
+	}
+	t->askedFrame = sTouchFrame;
+	if (sTouchFrame - t->drawnFrame > 2) return false;
+	*x0 = t->x0;
+	*y0 = t->y0;
+	*x1 = t->x1;
+	*y1 = t->y1;
+	return true;
+}
+
+bool pc_touch_pane_hit(const void* pane, float nx, float ny, float margin)
+{
+	if (!pane) return false;
+	TrackedPane* t = find_tracked(pane);
+	if (!t) {
+		// Primera pregunta: aún no se sabe dónde está; se sabrá al dibujarlo.
+		sTrackedPanes.push_back({ pane, 0, 0, 0, 0, -100, sTouchFrame });
+		return false;
+	}
+	t->askedFrame = sTouchFrame;
+	if (sTouchFrame - t->drawnFrame > 2) return false; // no se dibujó (oculto)
+	int w = 0, h = 0;
+	pc_gfx_get_drawable_size(&w, &h);
+	if (w <= 0 || h <= 0) return false;
+	const float x = nx * float(w), y = ny * float(h), m = margin * float(h);
+	return x >= t->x0 - m && x <= t->x1 + m && y >= t->y0 - m && y <= t->y1 + m;
+}
+
 void pc_touch_init(void) { }
 
 // ── Dibujo ───────────────────────────────────────────────────────────────────
 void pc_touch_draw(void)
 {
+	++sTouchFrame;
+	// Los paneles por los que ningún menú pregunta ya se dejan de seguir.
+	sTrackedPanes.erase(std::remove_if(sTrackedPanes.begin(), sTrackedPanes.end(),
+	                                   [](const TrackedPane& t) { return sTouchFrame - t.askedFrame > 120; }),
+	                    sTrackedPanes.end());
 	// En juego la capa depende del último dispositivo usado. En un menú real
 	// siempre se dibuja el único control permitido: B/atrás.
 	if (!sVisible && sGameMenuClaimFrames <= 0) {

@@ -2,6 +2,8 @@
 
 #include "pc_p2_rules.h"
 #include "pc_speedrun.h"
+#include "randomizer/pc_randomizer.h"
+#include "randomizer/pc_randomizer_audit.h"
 
 #include <SDL2/SDL.h>
 #include <cstdio>
@@ -47,6 +49,9 @@ void pc_p2_rules_begin_new_run(void)
 	sPendingPermadeath = false;
 	sPendingHard       = false;
 	std::printf("[P2 rules] new run: %s%s\n", sActivePermadeath ? "PERMADEATH" : "standard", sActiveHard ? " HARD" : "");
+	// Randomizer solo si la partida se crea desde su entrada del título.
+	pc_randomizer_begin_new_run();
+	pc_p2_rnd_sync_debt();
 }
 
 int pc_p2_rules_save_bits(void)
@@ -95,8 +100,9 @@ void pc_p2_rules_erase_current_save(void)
 
 void pc_p2_rules_note_slot(int slot, int headerByte)
 {
+	// headerByte < 0: ranura vacía o rota.
 	if (slot >= 0 && slot < 3)
-		sSlotBits[slot] = headerByte & PC_P2_RULE_MASK;
+		sSlotBits[slot] = headerByte < 0 ? 0 : (headerByte & PC_P2_RULE_MASK) | PC_P2_SLOT_USED;
 }
 
 int pc_p2_rules_slot_bits(int slot) { return (slot >= 0 && slot < 3) ? sSlotBits[slot] : 0; }

@@ -16,6 +16,7 @@ extern bool gPcBgStretch;
 #include "JSystem/J2D/J2DTextBox.h"
 #include "P2JME/P2JME.h"
 extern "C" int pc_p2_rules_slot_bits(int slot);
+bool pc_randomizer_menu_pending(void);
 
 namespace {
 // Etiqueta HARD / PERMADEATH de una partida, como la de Pikmin 1. Es hija de
@@ -55,20 +56,27 @@ public:
 	virtual void drawSelf(f32 x, f32 y, Mtx* mtx)
 	{
 		const int bits = pc_p2_rules_slot_bits(mSlot);
+		// En la tarjeta del Randomizer todas las partidas lo son.
+		const bool rnd  = pc_randomizer_menu_pending() && (bits & 0x100);
+		const bool show = (bits & 0x30) || rnd;
 		if (mText) {
-			if (bits & 0x30) {
+			if (show) {
 				const char* label = "HARD";
 				if ((bits & 0x10) && (bits & 0x20))
-					label = "HARD + PERMA";
+					label = rnd ? "RND HARD+PERMA" : "HARD + PERMA";
 				else if (bits & 0x10)
-					label = "PERMADEATH";
+					label = rnd ? "RND PERMADEATH" : "PERMADEATH";
+				else if (bits & 0x20)
+					label = rnd ? "RND HARD" : "HARD";
+				else
+					label = "RANDOMIZER";
 				mText->setString(label);
 				mText->show();
 			} else {
 				mText->hide();
 			}
 		}
-		if (!(bits & 0x30)) {
+		if (!show) {
 			return;
 		}
 		J2DPicture::drawSelf(x, y, mtx);

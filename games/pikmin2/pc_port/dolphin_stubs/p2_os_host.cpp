@@ -199,7 +199,7 @@ static pthread_mutex_t* pc_native_mutex(OSMutex* key, bool create, bool reinit =
 // Called when memory that may hold OSMutex/OSCond/OSThreadQueue objects is
 // freed (JKRHeap::free / dispose), so slots are reusable and never point at
 // dead objects.
-extern "C" void pc_os_release_sync_range(const void* begin, const void* end)
+static void pc_os_release_range(const void* begin, const void* end, bool mutexesOnly)
 {
 	const uintptr_t lo = (uintptr_t)begin, hi = (uintptr_t)end;
 	pthread_mutex_lock(&sMutexRegistry.registryLock);
@@ -220,6 +220,8 @@ extern "C" void pc_os_release_sync_range(const void* begin, const void* end)
 		}
 	}
 	pthread_mutex_unlock(&sMutexRegistry.registryLock);
+	if (mutexesOnly)
+		return;
 	pthread_mutex_lock(&sCondRegistry.registryLock);
 	for (size_t i = 0; i < 1024; ++i) {
 		const uintptr_t k = (uintptr_t)sCondRegistry.keys[i];
@@ -239,6 +241,19 @@ extern "C" void pc_os_release_sync_range(const void* begin, const void* end)
 		}
 	}
 	pthread_mutex_unlock(&sQueueRegistry.registryLock);
+}
+
+extern "C" void pc_os_release_sync_range(const void* begin, const void* end)
+{
+	pc_os_release_range(begin, end, false);
+}
+
+// JKRHeap::freeAll: solo los mutex (el registro que se agotaba). Una cola o
+// condición de ese montón puede tener aún un hilo esperando (cargador en
+// segundo plano) y pthread_cond_destroy aborta en ese caso.
+extern "C" void pc_os_release_mutex_range(const void* begin, const void* end)
+{
+	pc_os_release_range(begin, end, true);
 }
 
 static pthread_cond_t* pc_native_cond(OSCond* key, bool create)
@@ -1064,6 +1079,8 @@ void VIWaitForRetrace()
 	pc_settings_p2_begin_frame();
 	pc_settings_draw_idle_counter();
 	pc_speedrun_draw();
+	pc_randomizer_pause_draw();
+	pc_randomizer_debug_draw();
 	pc_newgame_prompt_draw();
 	pc_devassign_prompt_draw();
 	pc_captain_select_draw();

@@ -694,6 +694,67 @@ static void pcDrawSwarmArrowsFor(Game::Navi* navi, const Vector3f& goal)
 	}
 }
 
+// Atajos de grabación del tráiler (pc_port/pc_record.h), con Debug Keys.
+extern "C" int pc_record_ctrl_pressed(int digit);
+extern "C" void pc_record_toggle_hud(void);
+extern "C" void pc_settings_record_original_look(int original);
+
+// Ctrl+6: Pikmin nuevos ya en el grupo del capitán, en espiral a su alrededor y
+// de los cinco colores. pikiMgr->birth() devuelve nullptr cuando ya no caben.
+static void pcRecordSpawnPikis(Navi* navi, int count)
+{
+	static int sSpiral = 0; // sigue la espiral entre pulsaciones
+	static const int kColors[5] = { Red, Yellow, Blue, Purple, White };
+	const Vector3f center       = navi->getPosition();
+	for (int i = 0; i < count; i++) {
+		Piki* piki = pikiMgr->birth();
+		if (!piki) {
+			break;
+		}
+		PikiInitArg arg(PIKISTATE_Walk);
+		piki->init(&arg);
+		piki->changeShape(kColors[i % 5]);
+		piki->changeHappa(Leaf);
+		const f32 angle = f32(sSpiral) * 2.3999632f; // ángulo áureo: sin filas ni huecos
+		const f32 dist  = 20.0f + 6.0f * sqrtf(f32(sSpiral % 400));
+		sSpiral++;
+		Vector3f pos(center.x + dist * sinf(angle), center.y, center.z + dist * cosf(angle));
+		pos.y = mapMgr->getMinY(pos);
+		piki->setPosition(pos, false);
+		piki->mNavi = navi;
+		PikiAI::ActFormationInitArg formationArg(navi, false);
+		piki->mBrain->start(PikiAI::ACT_Formation, &formationArg);
+	}
+}
+
+static void pcRecordKeys(Navi* navi)
+{
+	if (!pc_settings_get_debug_keys()) {
+		return;
+	}
+	if (pc_record_ctrl_pressed(1)) {
+		pc_record_toggle_hud();
+	}
+	if (pc_record_ctrl_pressed(2)) {
+		static bool original = false;
+		original             = !original;
+		pc_settings_record_original_look(original ? 1 : 0);
+	}
+	TimeMgr* time = (gameSystem && !gameSystem->mIsInCave) ? gameSystem->mTimeMgr : nullptr;
+	if (pc_record_ctrl_pressed(3) && time) {
+		time->pcRecordSetLight(time->pcDayStartTime()); // amanecer
+	}
+	if (pc_record_ctrl_pressed(4) && time) {
+		time->pcRecordSetLight(12.0f);
+	}
+	if (pc_record_ctrl_pressed(5) && time) {
+		time->pcRecordSetLight(time->pcDayEndTime() - 0.6f); // atardecer
+	}
+	if (pc_record_ctrl_pressed(6)) {
+		pcRecordSpawnPikis(navi, 50);
+	}
+}
+
 static void pcUpdateCameraMods(Navi* navi)
 {
 	if (!navi->mController1 || gameSystem->isVersusMode()) {
@@ -702,6 +763,7 @@ static void pcUpdateCameraMods(Navi* navi)
 	pc_settings_note_gameplay_frame();
 	pcDiscordNoteGameplay();
 	pcDebugKeys();
+	pcRecordKeys(navi);
 
 	// Lock-On (modos, objetos, carga): ver pcUpdateLockOn.
 	pcUpdateLockOn(navi);

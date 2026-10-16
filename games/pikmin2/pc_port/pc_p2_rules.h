@@ -14,6 +14,8 @@
 #define PC_P2_RULE_PERMADEATH (0x10)
 #define PC_P2_RULE_HARD       (0x20)
 #define PC_P2_RULE_MASK       (PC_P2_RULE_PERMADEATH | PC_P2_RULE_HARD)
+/// En pc_p2_rules_slot_bits: la ranura tiene partida.
+#define PC_P2_SLOT_USED       (0x100)
 
 #ifdef __cplusplus
 extern "C" {

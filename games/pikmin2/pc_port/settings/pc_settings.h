@@ -175,6 +175,10 @@ void pc_erased_notice_draw(void);
 void pc_newgame_prompt_open(void);
 bool pc_newgame_prompt_active(void);
 void pc_newgame_prompt_draw(void);
+/// Randomizer: código RND2 de la partida mientras el juego está en pausa.
+void pc_randomizer_pause_draw(void);
+/// Randomizer: línea de los atajos de prueba (PIKI_RND_DEBUG=1).
+void pc_randomizer_debug_draw(void);
 int  pc_newgame_prompt_result(void);
 /// True after accept on the second prompt if Hard was chosen.
 bool pc_newgame_prompt_chose_hard(void);
@@ -244,6 +248,10 @@ int  pc_devassign_prompt_result(void);
 
 /// Debug shortcuts F5 and F6, off by default.
 int pc_settings_get_debug_keys(void);
+/// Atajo de grabación (Ctrl+2): 1 = aspecto del juego original (sin sombras,
+/// AO, bloom, desenfoque, FXAA, luz por píxel, anisotrópico, gradación ni
+/// modelos HD); 0 = vuelve a lo que había. En vivo y sin guardar el .conf.
+void pc_settings_record_original_look(int original);
 /// Modelo HD de esa fila del selector (0 Olimar, 1 Louie, 2 Louie HD,
 /// 3 Pikmin, 4 Bulborb, 5 Dwarf Bulborb): 0 = apagado, se usa el original.
 int pc_settings_get_hd_model_enabled(int row);

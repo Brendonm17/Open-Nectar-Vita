@@ -15,6 +15,7 @@
 
 #include "Game/BaseGameSection.h"
 #include "Game/GameSystem.h"
+#include "Game/MapMgr.h"
 #include "Sys/DrawBuffers.h"
 #include "JSystem/J3D/J3DModel.h"
 #include "JSystem/J3D/J3DSys.h"
@@ -192,9 +193,24 @@ extern "C" void pc_movie_interp_note_clear(void)
 	}
 }
 
+// Mapa con el que empezó y acabó el último tick: si el tick lo cambió (bajar
+// de subnivel en cueva durante la escena del agujero), las cámaras del mapa
+// anterior pueden estar liberadas y los viewports aún apuntarles. Ese frame no
+// se interpola: se repite la imagen exacta.
+static void* sTickMapBefore = nullptr;
+static void* sTickMapAfter  = nullptr;
+// pc_heap_freeall_serial (JKRHeap::freeAll) al empezar y acabar el tick: si
+// cambió, el tick vació un montón (cambio de subnivel) y los viewports o
+// cámaras pueden estar en memoria liberada.
+extern "C" unsigned pc_heap_freeall_serial;
+static unsigned sTickFreeBefore = 0;
+static unsigned sTickFreeAfter  = 0;
+
 extern "C" void pc_movie_interp_begin_tick(void)
 {
 	PcHostAlloc pcHostAlloc;
+	sTickMapBefore  = Game::mapMgr;
+	sTickFreeBefore = pc_heap_freeall_serial;
 	sRecording = true;
 	sEntered.clear();
 	sEnteredSet.clear();
@@ -203,6 +219,8 @@ extern "C" void pc_movie_interp_begin_tick(void)
 extern "C" void pc_movie_interp_end_tick(void)
 {
 	PcHostAlloc pcHostAlloc;
+	sTickMapAfter  = Game::mapMgr;
+	sTickFreeAfter = pc_heap_freeall_serial;
 	sRecording = false;
 	sPrev.swap(sCur);
 	sCur.clear();
@@ -256,6 +274,11 @@ extern "C" bool pc_movie_interp_begin_frame(float alpha)
 	Game::BaseGameSection* section = Game::gameSystem ? Game::gameSystem->mSection : nullptr;
 	Graphics* gfx                  = sys ? sys->mGfx : nullptr;
 	if (!section || !gfx) {
+		return false;
+	}
+	if (!Game::mapMgr || sTickMapBefore != sTickMapAfter || Game::mapMgr != sTickMapAfter
+	    || sTickFreeBefore != sTickFreeAfter || pc_heap_freeall_serial != sTickFreeAfter) {
+		noteResult(kNoView, 0, 0);
 		return false;
 	}
 	// El juego registra siempre dos viewports (Olimar y Louie); en un jugador

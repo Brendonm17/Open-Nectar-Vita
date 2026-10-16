@@ -17,6 +17,9 @@
 extern "C" float pc_window_free_camera_sub_y(void);
 extern "C" float pc_window_free_camera_sub_y_for(int player);
 #endif
+#if PIKI_PC_TOUCH
+extern "C" void pc_touch_menu_uses_stick(void);
+#endif
 
 static const u32 padding[] = { 0, 0, 0 };
 
@@ -878,6 +881,10 @@ void ObjSMenuMap::updateMap()
 void ObjSMenuMap::commonUpdate()
 {
 	commonUpdateBase();
+#if PIKI_PC_TOUCH
+	// El stick táctil mueve el mapa; deslizar fuera de él pasa de página.
+	pc_touch_menu_uses_stick();
+#endif
 	setSMenuScale(msVal.mMapScreenScale.x, msVal.mMapScreenScale.y);
 	mAnimGroup->update();
 	updateMap();
@@ -987,7 +994,7 @@ void ObjSMenuMap::doDraw(Graphics& gfx)
 	pcMapDbgDone:;
 	}
 	const bool pcNoCounter = sPcMapDbg && (!strcmp(sPcMapDbg, "nocounter") || !strcmp(sPcMapDbg, "mapafter"));
-	P2DScreen::Mgr_tuning* pcCounter = mMapCounter;
+	og::Screen::MapCounter* pcCounter = mMapCounter;
 	if (pcNoCounter) {
 		mMapCounter = nullptr; // drawMap no lo dibuja
 	}

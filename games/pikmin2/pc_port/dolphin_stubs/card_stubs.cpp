@@ -2,6 +2,7 @@
 #include "Dolphin/card.h"
 #include "Dolphin/dvd.h"
 #include "JSystem/JKernel/JKRHeap.h"
+#include "randomizer/pc_randomizer.h"
 
 #include <algorithm>
 #include <atomic>
@@ -171,7 +172,13 @@ fs::path saveRoot()
 	return resolved;
 }
 
-fs::path root(s32 channel) { return saveRoot() / (channel == 0 ? "card0" : "card1"); }
+// El Randomizer tiene su propia tarjeta (save/randomizer/card0): sus tres
+// ranuras son independientes de las del juego normal, como en P1.
+fs::path root(s32 channel)
+{
+	const fs::path base = pc_randomizer_menu_pending() ? saveRoot() / "randomizer" : saveRoot();
+	return base / (channel == 0 ? "card0" : "card1");
+}
 fs::path dataPath(s32 channel, const std::string& name) { return root(channel) / name; }
 fs::path metaPath(s32 channel, const std::string& name) { return root(channel) / (".meta_" + name); }
 

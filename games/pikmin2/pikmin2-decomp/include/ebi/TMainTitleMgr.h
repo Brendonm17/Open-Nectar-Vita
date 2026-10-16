@@ -30,6 +30,7 @@ struct TMainTitleMgr {
 #ifdef PIKI_PC_PORT
 		Select_Speedrun, // opciones del port (TTitleMenu::pcAddWordEntry)
 		Select_Coop,
+		Select_Randomizer,
 #endif
 	};
 

@@ -1,8 +1,12 @@
+#ifdef PIKI_PC_PORT
+#include "randomizer/pc_randomizer_audit.h"
+#endif
 #include "Game/Navi.h"
 #include "Game/pcCoop.h"
 #include "Game/NaviState.h"
 #ifdef PIKI_PC_PORT
 extern "C" void pc_gfx_world_done(void);
+extern "C" int pc_record_hud_hidden(void);
 extern "C" unsigned gPcSectionTicks;
 static unsigned gPcSectionTicksForFade() { return gPcSectionTicks; }
 #endif
@@ -691,6 +695,9 @@ void BaseGameSection::initGenerators()
 		if (file) {
 			RamStream defaultGenTxt(file, -1);
 			defaultGenTxt.setMode(STREAM_MODE_TEXT, 1);
+#ifdef PIKI_PC_PORT
+			pc_p2_rnd_gen_file(filenameCharArr);
+#endif
 			generatorMgr->read(defaultGenTxt, false);
 			generatorMgr->updateUseList();
 
@@ -711,6 +718,9 @@ void BaseGameSection::initGenerators()
 			if (file) {
 				RamStream plantsGenTxt(file, -1);
 				plantsGenTxt.setMode(STREAM_MODE_TEXT, 1);
+#ifdef PIKI_PC_PORT
+				pc_p2_rnd_gen_file(filenameCharArr);
+#endif
 				plantsGeneratorMgr->read(plantsGenTxt, false);
 				plantsGeneratorMgr->updateUseList();
 				generatorFiles[fileIdx]    = file;
@@ -734,6 +744,9 @@ void BaseGameSection::initGenerators()
 			if (file) {
 				RamStream initgenTxt(file, -1);
 				initgenTxt.setMode(STREAM_MODE_TEXT, 1);
+#ifdef PIKI_PC_PORT
+				pc_p2_rnd_gen_file(filenameCharArr);
+#endif
 				onceGeneratorMgr->read(initgenTxt, false);
 				onceGeneratorMgr->updateUseList();
 				generatorFiles[fileIdx]    = file;
@@ -769,6 +782,9 @@ void BaseGameSection::initGenerators()
 					GeneratorMgr* currentNonloopMgr = new GeneratorMgr;
 					currentNonloopMgr->mUnusedFlag  = true; // is nonrepeating?
 
+#ifdef PIKI_PC_PORT
+					pc_p2_rnd_gen_file(filenameCharArr);
+#endif
 					currentNonloopMgr->read(noonloopTxt, false);
 					currentNonloopMgr->setDayLimit(currentGen->mDayLimit);
 					currentNonloopMgr->updateUseList();
@@ -822,6 +838,9 @@ void BaseGameSection::initGenerators()
 						GeneratorMgr* currentLoopMgr = new GeneratorMgr;
 						currentLoopMgr->mUnusedFlag  = true; // is nonrepeating?
 
+#ifdef PIKI_PC_PORT
+						pc_p2_rnd_gen_file(filenameCharArr);
+#endif
 						currentLoopMgr->read(loopTxt, false);
 						u32 dayLimit = currentGen->mDayLimit - 30;
 						dayLimit += floorDay;
@@ -848,6 +867,9 @@ void BaseGameSection::initGenerators()
 				if (file) {
 					RamStream dayTxt(file, -1);
 					dayTxt.setMode(STREAM_MODE_TEXT, 1);
+#ifdef PIKI_PC_PORT
+					pc_p2_rnd_gen_file(filenameCharArr);
+#endif
 					dayGeneratorMgr->read(dayTxt, false);
 					dayGeneratorMgr->updateUseList();
 					generatorFiles[fileIdx]    = file;
@@ -1905,7 +1927,11 @@ void BaseGameSection::draw_Ogawa2D(Graphics& gfx)
 	gfx.mPerspGraph.setPort();
 	particle2dMgr->draw(true, 0);
 	sys->mTimers->_start("2ddraw", true);
-	Screen::gGame2DMgr->draw(gfx);
+#if defined(PIKI_PC_PORT)
+	// Atajo de grabación Ctrl+1 (pc_record.h): sin HUD encima del juego.
+	if (!pc_record_hud_hidden())
+#endif
+		Screen::gGame2DMgr->draw(gfx);
 	sys->mTimers->_stop("2ddraw");
 	gfx.mPerspGraph.setPort();
 	particle2dMgr->draw(false, 0);
@@ -2765,6 +2791,9 @@ void BaseGameSection::setupFloatMemory()
 		sprintf(path, "user/Mukki/mapunits/caveinfo/%s", getCaveFilename());
 		getCaveFilename();
 		Cave::CaveInfo* info       = Cave::CaveInfo::load(path);
+#ifdef PIKI_PC_PORT
+		pc_p2_rnd_cave_loaded(getCaveFilename(), info, getCurrFloor());
+#endif
 		Cave::EditMapUnit* mapunit = nullptr;
 		if (gameSystem->isVersusMode()) {
 			if (strcmp("random", getEditorFilename())) {
@@ -2779,7 +2808,17 @@ void BaseGameSection::setupFloatMemory()
 		}
 		mapMgr = new RoomMapMgr(info);
 		sys->heapStatusStart("mapMgr", nullptr);
+#ifdef PIKI_PC_PORT
+		// Randomizer, cuevas fijas por semilla: misma semilla, mismas salas. El
+		// generador del juego sigue después con una semilla sacada de sí mismo.
+		const unsigned rndLayoutSeed = pc_p2_rnd_cave_layout_seed(getCaveFilename(), getCurrFloor());
+		const unsigned rndResumeSeed = rndLayoutSeed ? (unsigned(rand()) << 15) ^ unsigned(rand()) : 0;
+		if (rndLayoutSeed) srand(rndLayoutSeed);
+#endif
 		static_cast<RoomMapMgr*>(mapMgr)->createRandomMap(getCurrFloor(), mapunit);
+#ifdef PIKI_PC_PORT
+		if (rndLayoutSeed) srand(rndResumeSeed);
+#endif
 		sys->heapStatusEnd("mapMgr");
 		gameSystem->addObjectMgr(mapMgr);
 

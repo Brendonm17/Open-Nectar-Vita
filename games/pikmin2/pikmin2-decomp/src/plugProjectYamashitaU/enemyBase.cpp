@@ -2176,7 +2176,14 @@ void EnemyBase::collisionMapAndPlat(f32 frameRate)
 		collSphere.mPosition = pos;
 		collSphere.mRadius   = yOffsetFromMap;
 
-		f32 bounceAmount = isEarthQuakeOrDropping() ? 0.0f : static_cast<CreatureProperty*>(mParms)->mProps.mWallReflection.mValue;
+		f32 bounceAmount = isEarthQuakeOrDropping() ? 0.0f : 
+#ifdef PIKI_PC_PORT
+		    // En PC la vtable de CreatureParms va delante (en GC detrás, _D8):
+		    // el cast directo desde void* leía basura (-12.38) y el enemigo salía disparado.
+		    static_cast<CreatureParms*>(mParms)->mCreatureProps.mProps.mWallReflection.mValue;
+#else
+		    static_cast<CreatureProperty*>(mParms)->mProps.mWallReflection.mValue;
+#endif
 
 		mAcceleration.y = 0.0f;
 

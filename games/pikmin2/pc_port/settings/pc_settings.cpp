@@ -58,6 +58,8 @@
 #include "pc_p2_captains.h"
 #include "pc_p2_coop.h"
 #include "pc_p2_captain_preview.h"
+#include "randomizer/pc_randomizer.h"
+#include "randomizer/pc_randomizer_catalog.h"
 #endif
 #include "pc_livesplit.h"
 #if PIKI_PC_TOUCH
@@ -4689,6 +4691,242 @@ void ngScreen(int* w, int* h)
     }
 }
 
+// ─── Randomizer: la misma ventana con sus ajustes (docs/PLAN_RANDOMIZER.md §11) ───
+//
+// Entrando por la opción Randomizer del título, la ventana añade la semilla
+// (con su código RND2 para compartir: Ctrl+C lo copia, Ctrl+V pega uno) y los
+// ajustes de la partida, en una lista compacta: Arriba/Abajo eligen fila,
+// Izquierda/Derecha cambian el valor y Start empieza (si la semilla da un
+// mundo completable).
+enum {
+    NGR_Difficulty, NGR_Mode, NGR_Seed, NGR_Treasures, NGR_Enemies, NGR_Bosses, NGR_Mix, NGR_Globes,
+    NGR_Candypops, NGR_Layout, NGR_Plants, NGR_Debt, NGR_Spoiler, NGR_Start, NGR_Count
+};
+const char* const kNgrTitles[NGR_Count] = { "Difficulty", "Game mode", "Seed", "Treasures", "Enemies", "Bosses",
+                                            "Bosses <-> enemies", "Globes", "Candypops", "Cave layout", "Plants",
+                                            "Debt", "Spoiler log", "Start" };
+int  sNgrRow = 0;
+char sNgrMessage[96] = "";
+
+int ngrCount(int row)
+{
+    switch (row) {
+    case NGR_Enemies: case NGR_Bosses: return 3;
+    case NGR_Debt: return 4;
+    case NGR_Seed: case NGR_Start: return 0;
+    default: return 2;
+    }
+}
+
+int ngrValue(int row)
+{
+    const uint32_t f = pc_randomizer_pending_flags();
+    switch (row) {
+    case NGR_Difficulty: return sNewGamePromptHard ? 1 : 0;
+    case NGR_Mode:       return sNewGamePromptRules;
+    case NGR_Treasures:  return (f & PC_RND_ShuffleTreasures) ? 1 : 0;
+    case NGR_Enemies:    return int(pc_rnd_enemy_mode(f));
+    case NGR_Bosses:     return int(pc_rnd_boss_mode(f));
+    case NGR_Mix:        return (f & PC_RND_BossEnemyMix) ? 1 : 0;
+    case NGR_Globes:     return (f & PC_RND_ShuffleGlobes) ? 1 : 0;
+    case NGR_Candypops:  return (f & PC_RND_ShuffleCandypops) ? 1 : 0;
+    case NGR_Layout:     return (f & PC_RND_FixedCaveLayout) ? 1 : 0;
+    case NGR_Plants:     return (f & PC_RND_ShufflePlants) ? 1 : 0;
+    case NGR_Debt:       return int(pc_rnd_debt_preset(f));
+    case NGR_Spoiler:    return (f & PC_RND_WriteSpoilerLog) ? 1 : 0;
+    default:             return 0;
+    }
+}
+
+void ngrSetValue(int row, int v)
+{
+    uint32_t f = pc_randomizer_pending_flags();
+    auto bit = [&](uint32_t b) { f = v ? (f | b) : (f & ~b); };
+    switch (row) {
+    case NGR_Difficulty: sNewGamePromptHard = v != 0; return;
+    case NGR_Mode:       sNewGamePromptRules = v; return;
+    case NGR_Treasures:  bit(PC_RND_ShuffleTreasures); break;
+    case NGR_Enemies:    f = pc_rnd_with_enemy_mode(f, uint32_t(v)); break;
+    case NGR_Bosses:     f = pc_rnd_with_boss_mode(f, uint32_t(v)); break;
+    case NGR_Mix:        bit(PC_RND_BossEnemyMix); break;
+    case NGR_Globes:     bit(PC_RND_ShuffleGlobes); break;
+    case NGR_Candypops:  bit(PC_RND_ShuffleCandypops); break;
+    case NGR_Layout:     bit(PC_RND_FixedCaveLayout); break;
+    case NGR_Plants:     bit(PC_RND_ShufflePlants); break;
+    case NGR_Debt:       f = pc_rnd_with_debt_preset(f, uint32_t(v)); break;
+    case NGR_Spoiler:    bit(PC_RND_WriteSpoilerLog); break;
+    default: return;
+    }
+    pc_randomizer_set_pending_flags(f);
+}
+
+const char* ngrValueText(int row, int v)
+{
+    static const char* const kModes[3] = { "Vanilla", "Shuffled", "Chaos" };
+    static const char* const kDebt[4]  = { "10,000 (original)", "5,000", "15,000", "20,000" };
+    switch (row) {
+    case NGR_Difficulty: return v ? "Hard" : "Normal";
+    case NGR_Mode:       return v ? "Permadeath" : "Standard";
+    case NGR_Treasures:  return v ? "Shuffled" : "Vanilla";
+    case NGR_Enemies:
+    case NGR_Bosses:     return kModes[v % 3];
+    case NGR_Globes:
+    case NGR_Candypops:
+    case NGR_Plants:     return v ? "Shuffled" : "Fixed";
+    case NGR_Layout:     return v ? "Fixed by seed" : "Random";
+    case NGR_Debt:       return kDebt[v % 4];
+    default:             return v ? "On" : "Off";
+    }
+}
+
+const char* ngrDetail(int row)
+{
+    switch (row) {
+    case NGR_Difficulty: return "Hard: tougher enemies, 8-minute days, 80 Pikmin.";
+    case NGR_Mode:       return "Permadeath: if both captains go down, the file is erased.";
+    case NGR_Seed:       return "A: new seed.  Ctrl+C: copy code.  Ctrl+V: paste a friend's code.";
+    case NGR_Treasures:  return "Treasures trade places. Each cave keeps its count. Louie stays put.";
+    case NGR_Enemies:    return "Shuffled: same kind of creature. Chaos: any creature that fits the spot.";
+    case NGR_Bosses:     return "Bosses trade arenas. The Waterwraith and Titan Dweevil stay put.";
+    case NGR_Mix:        return "Bosses may appear where creatures were, and the other way round.";
+    case NGR_Globes:     return "The two globes that open new areas can move too (always reachable).";
+    case NGR_Candypops:  return "Candypop colours trade places outside the Valley of Repose caves.";
+    case NGR_Layout:     return "Fixed by seed: the same seed always builds the same cave rooms.";
+    case NGR_Plants:     return "Plants and flora trade places with each other.";
+    case NGR_Debt:       return "Pokos the company owes. The world is always payable without Wistful Wild.";
+    case NGR_Spoiler:    return "Writes randomizer_spoiler.txt with where everything went.";
+    default:             return "Begin the expedition with these settings.";
+    }
+}
+
+void ngrStart()
+{
+    if (!pc_randomizer_seed_is_valid(pc_randomizer_pending_seed(), pc_randomizer_pending_flags())) {
+        std::snprintf(sNgrMessage, sizeof(sNgrMessage), "No completable world for this seed. Try another.");
+        return;
+    }
+    sNewGamePromptResult = sNewGamePromptRules ? PC_NEWGAME_PERMADEATH : PC_NEWGAME_NORMAL;
+    sNewGamePromptOpen   = false;
+}
+
+void ngrInput()
+{
+    bool left   = keyWentDown(SDL_SCANCODE_LEFT)  || keyWentDown(SDL_SCANCODE_A);
+    bool right  = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D);
+    bool up     = keyWentDown(SDL_SCANCODE_UP)    || keyWentDown(SDL_SCANCODE_W);
+    bool down   = keyWentDown(SDL_SCANCODE_DOWN)  || keyWentDown(SDL_SCANCODE_S);
+    bool accept = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
+    bool cancel = keyWentDown(SDL_SCANCODE_ESCAPE);
+    const bool ctrl = (SDL_GetModState() & KMOD_CTRL) != 0;
+    const bool copy  = ctrl && keyWentDown(SDL_SCANCODE_C);
+    const bool paste = ctrl && keyWentDown(SDL_SCANCODE_V);
+    if (ctrl) { left = right = false; } // Ctrl+A/Ctrl+D no mueven
+
+    left   |= (sTouchFrameButtons & PAD_BUTTON_LEFT) != 0;
+    right  |= (sTouchFrameButtons & PAD_BUTTON_RIGHT) != 0;
+    up     |= (sTouchFrameButtons & PAD_BUTTON_UP) != 0;
+    down   |= (sTouchFrameButtons & PAD_BUTTON_DOWN) != 0;
+    accept |= (sTouchFrameButtons & PAD_BUTTON_A) != 0;
+    cancel |= (sTouchFrameButtons & PAD_BUTTON_B) != 0;
+    sTouchTapPending = false;
+
+    SDL_GameController* ctl = pc_window_get_controller();
+    if (ctl) {
+        if (padNavLeft(ctl))  left   = true;
+        if (padNavRight(ctl)) right  = true;
+        if (padNavUp(ctl))    up     = true;
+        if (padNavDown(ctl))  down   = true;
+        if (promptPadA(ctl))  accept = true;
+        if (promptPadB(ctl))  cancel = true;
+    }
+
+    if (copy) {
+        char code[PC_RANDOMIZER_SHARE_CODE_LEN];
+        pc_randomizer_format_share_code(pc_randomizer_pending_seed(), pc_randomizer_pending_flags(), code, sizeof(code));
+        SDL_SetClipboardText(code);
+        std::snprintf(sNgrMessage, sizeof(sNgrMessage), "Copied %s", code);
+    }
+    if (paste) {
+        char* text = SDL_GetClipboardText();
+        uint64_t seed = 0;
+        uint32_t flags = 0;
+        if (text && pc_randomizer_parse_share_code(text, &seed, &flags)) {
+            pc_randomizer_set_pending_seed(seed);
+            pc_randomizer_set_pending_flags(flags);
+            std::snprintf(sNgrMessage, sizeof(sNgrMessage), "Code pasted: same world as your friend.");
+        } else {
+            std::snprintf(sNgrMessage, sizeof(sNgrMessage), "The clipboard has no valid RND2 code.");
+        }
+        if (text) SDL_free(text);
+    }
+
+    if (up || down) {
+        sNgrRow = (sNgrRow + (up ? NGR_Count - 1 : 1)) % NGR_Count;
+        sNgrMessage[0] = '\0';
+    }
+    const int n = ngrCount(sNgrRow);
+    if ((left || right) && n > 0) {
+        ngrSetValue(sNgrRow, (ngrValue(sNgrRow) + (left ? n - 1 : 1)) % n);
+        sNgrMessage[0] = '\0';
+    }
+    if (accept) {
+        if (sNgrRow == NGR_Start) {
+            ngrStart();
+        } else if (sNgrRow == NGR_Seed) {
+            pc_randomizer_reroll_pending_seed();
+            sNgrMessage[0] = '\0';
+        } else if (n > 0) {
+            ngrSetValue(sNgrRow, (ngrValue(sNgrRow) + 1) % n);
+        }
+    } else if (cancel) {
+        sNewGamePromptResult = PC_NEWGAME_CANCELLED;
+        sNewGamePromptOpen   = false;
+    }
+}
+
+void ngrDraw(DGXGraphics* gfx, int screenW, int screenH)
+{
+    const int panelW = 600, panelH = 466;
+    const int panelX = screenW / 2 - panelW / 2;
+    const int panelY = screenH / 2 - panelH / 2;
+    drawPikminPanel(gfx, panelX, panelY, panelW, panelH, 22);
+    drawPikminHeader(gfx, panelX, panelY, panelW, "Randomizer");
+
+    const Colour gold(255, 207, 75, 255);
+    const Colour pale(205, 239, 250, 255);
+    const Colour dim(150, 170, 190, 255);
+    const int rowH = 24;
+    const int top  = panelY + 52;
+    const int labelX = panelX + 44;
+    const int valueX = panelX + 290;
+    for (int row = 0; row < NGR_Count; row++) {
+        const bool focus = row == sNgrRow;
+        const int y = top + row * rowH + (row == NGR_Start ? 8 : 0);
+        if (focus) f1Text(labelX - 18, y, ">", gold, 13, 18);
+        if (row == NGR_Start) {
+            const char* t = "Start";
+            f1Text(panelX + panelW / 2 - f1TextW(t, 14) / 2, y, t, focus ? Colour(255, 255, 255, 255) : dim, 14, 20);
+            continue;
+        }
+        f1Text(labelX, y, kNgrTitles[row], focus ? gold : dim, 12, 18);
+        char value[48];
+        if (row == NGR_Seed) {
+            pc_randomizer_format_share_code(pc_randomizer_pending_seed(), pc_randomizer_pending_flags(), value,
+                                            sizeof(value));
+        } else {
+            std::snprintf(value, sizeof(value), "%s%s%s", focus ? "< " : "", ngrValueText(row, ngrValue(row)),
+                          focus ? " >" : "");
+        }
+        f1Text(valueX, y, value, focus ? Colour(255, 255, 255, 255) : pale, 12, 18);
+    }
+
+    const char* detail = sNgrMessage[0] ? sNgrMessage : ngrDetail(sNgrRow);
+    const int detailY = top + NGR_Count * rowH + 16;
+    f1Text(panelX + panelW / 2 - f1TextW(detail, 11) / 2, detailY, detail, sNgrMessage[0] ? gold : pale, 11, 16);
+    drawHelpLine(panelX + panelW / 2, panelY + panelH - 34, "Up/Down: row    Left/Right: change    A: select    B: back",
+                 dim, panelW - 40);
+}
+
 void pcNewGamePromptInput()
 {
     if (!sNewGamePromptOpen) return;
@@ -4702,6 +4940,10 @@ void pcNewGamePromptInput()
         if (padHeld || keyHeld || sTouchFrameButtons != 0) return;
         sNewGamePromptArmed = true;
         pc_menu_edge_reset();
+        return;
+    }
+    if (pc_randomizer_menu_pending()) {
+        ngrInput();
         return;
     }
 
@@ -4788,6 +5030,8 @@ void pc_newgame_prompt_open(void)
     sNewGamePromptRules  = 0;
     sNewGamePromptResult = PC_NEWGAME_PENDING;
     sNewGamePromptHard   = false;
+    sNgrRow              = NGR_Seed;
+    sNgrMessage[0]       = '\0';
     pc_menu_edge_reset();
 }
 
@@ -4811,6 +5055,11 @@ void pc_newgame_prompt_draw(void)
     PcSettingsP2DFrame nativeFrame(screenW, screenH);
     Matrix4f ortho;
     gfx->setOrthogonal(ortho.mMtx, RectArea(0, 0, screenW, screenH));
+
+    if (pc_randomizer_menu_pending()) {
+        ngrDraw(gfx, screenW, screenH);
+        return;
+    }
 
     const int panelW = kNgPanelW;
     const int panelH = kNgPanelH;
@@ -4897,6 +5146,58 @@ void pc_newgame_prompt_draw(void)
     }
 
     drawHelpLine(panelX + panelW / 2, panelY + panelH - 46, "Arrows: move    A: select    B: back", dim, panelW - 60);
+}
+
+// ─── Randomizer: código de la partida en la pausa (PLAN_RANDOMIZER.md §11.4) ───
+extern "C" bool pc_p2_rnd_pause_code(char* out, int outSize);
+
+void pc_randomizer_pause_draw(void)
+{
+    PC_SETTINGS_HOST_ALLOC();
+    char code[PC_RANDOMIZER_SHARE_CODE_LEN];
+    if (!gsys || !gsys->mDGXGfx || !pc_p2_rnd_pause_code(code, sizeof(code))) return;
+    // Ctrl+C lo copia (flanco propio: el F1 puede estar cerrado).
+    static bool sWasCopy = false;
+    const Uint8* keys = SDL_GetKeyboardState(nullptr);
+    const bool copyNow = keys && keys[SDL_SCANCODE_C] && (SDL_GetModState() & KMOD_CTRL);
+    static Uint32 sCopiedAt = 0;
+    if (copyNow && !sWasCopy) {
+        SDL_SetClipboardText(code);
+        sCopiedAt = SDL_GetTicks();
+    }
+    sWasCopy = copyNow;
+
+    DGXGraphics* gfx = static_cast<DGXGraphics*>(gsys->mDGXGfx);
+    ensureFont();
+    if (!sFont) return;
+    int screenW, screenH;
+    ngScreen(&screenW, &screenH);
+    PcSettingsP2DFrame nativeFrame(screenW, screenH);
+    Matrix4f ortho;
+    gfx->setOrthogonal(ortho.mMtx, RectArea(0, 0, screenW, screenH));
+    char line[64];
+    const bool copied = sCopiedAt && SDL_GetTicks() - sCopiedAt < 2000;
+    std::snprintf(line, sizeof(line), "%s  %s", code, copied ? "(copied)" : "Ctrl+C: copy");
+    f1Text(16, screenH - 30, line, copied ? Colour(255, 207, 75, 255) : Colour(205, 239, 250, 255), 11, 16);
+}
+
+// Atajos de prueba del Randomizer (PIKI_RND_DEBUG=1): ayuda o último resultado.
+extern "C" const char* pc_p2_rnd_debug_status(void);
+
+void pc_randomizer_debug_draw(void)
+{
+    PC_SETTINGS_HOST_ALLOC();
+    const char* line = pc_p2_rnd_debug_status();
+    if (!line || !gsys || !gsys->mDGXGfx || !pc_settings_in_gameplay()) return;
+    DGXGraphics* gfx = static_cast<DGXGraphics*>(gsys->mDGXGfx);
+    ensureFont();
+    if (!sFont) return;
+    int screenW, screenH;
+    ngScreen(&screenW, &screenH);
+    PcSettingsP2DFrame nativeFrame(screenW, screenH);
+    Matrix4f ortho;
+    gfx->setOrthogonal(ortho.mMtx, RectArea(0, 0, screenW, screenH));
+    f1Text(16, 64, line, Colour(255, 207, 75, 255), 10, 15);
 }
 
 // ─── Co-op de Pikmin 2: asignación de mandos ───
@@ -5362,8 +5663,15 @@ void pcCaptainSelectInput()
         sTouchTapPending = false;
         int sw, sh;
         ngScreen(&sw, &sh);
-        const float x = sTouchTapX * sw;
-        const float y = sTouchTapY * sh;
+        float x = sTouchTapX * sw;
+        float y = sTouchTapY * sh;
+        {
+            // La pantalla es un 4:3 centrado (ver pc_settings_p2_begin_frame):
+            // en ventanas más anchas, bandas a los lados.
+            const float window  = pc_gfx_get_window_aspect_ratio();
+            const float uiWidth = window > float(sw) / float(sh) ? (float(sw) / float(sh)) / window : 1.0f;
+            x = (sTouchTapX - (0.5f - uiWidth * 0.5f)) / uiWidth * sw;
+        }
         const int panelX = sw / 2 - kCsPanelW / 2;
         const int panelY = sh / 2 - kCsPanelH / 2;
         // Un toque en una tarjeta la asigna al capitán activo; en un panel de
@@ -5606,6 +5914,9 @@ void pc_captain_select_draw(void)
 
     drawHelpLine(panelX + kCsPanelW / 2, panelY + kCsPanelH - 46,
                  sCsCoop ? "Each player: A: pick    B: change    Both ready: A / Start"
+#if PIKI_PC_TOUCH
+                 : pc_touch_visible() ? "Tap a card: pick    Tap a captain: switch    Start: go"
+#endif
                          : "A: pick    L/R: switch captain    Start: go    B: back",
                  dim, kCsPanelW - 60);
 }
@@ -6081,8 +6392,10 @@ void pc_settings_draw_idle_counter(void) {
     ensureFont();
     if (!sFont) return;
 
-    const int screenW = gfx->mScreenWidth;
-    const int screenH = gfx->mScreenHeight;
+    // Tamaño real de la ventana, como el resto de capas (mScreenWidth es el
+    // del render y deformaba/encogía el texto).
+    int screenW, screenH;
+    ngScreen(&screenW, &screenH);
     PcSettingsP2DFrame nativeFrame(screenW, screenH);
 
     Matrix4f ortho;
@@ -6095,9 +6408,11 @@ void pc_settings_draw_idle_counter(void) {
 #if PIKI_P2_HOST
     // Pikmin 2: con la fuente del juego (atlas de P2), no la de consola de P1.
     // Pegado al borde derecho (alineado por la derecha, con un margen).
-    const int x = (int)(screenW * 0.975f) - f1TextW(buf, 15);
-    const int y = (int)(screenH * 0.775f);
-    f1Text(x, y, buf, Colour(255, 207, 75, 255), 15, 21);
+    const int fw = screenH / 40 > 15 ? screenH / 40 : 15;
+    const int fh = fw * 4 / 3;
+    const int x  = (int)(screenW * 0.975f) - f1TextW(buf, fw);
+    const int y  = (int)(screenH * 0.775f);
+    f1Text(x, y, buf, Colour(255, 207, 75, 255), fw, fh);
 #else
     const int x = (int)(screenW * 0.917f) - menuTextWidth(buf) / 2;
     const int y = (int)(screenH * 0.790f);
@@ -6655,8 +6970,12 @@ void pc_settings_p2_begin_frame(void) {
     f1Layout();
     if (gsys && gsys->mDGXGfx) {
         DGXGraphics* gfx = static_cast<DGXGraphics*>(gsys->mDGXGfx);
-        gfx->mScreenWidth  = kF1CanvasW;
-        gfx->mScreenHeight = kF1CanvasH;
+        // El selector de capitanes va siempre en 4:3 (640x480 centrado): su
+        // panel no cabe en el lienzo bajo del móvil y los modelos 3D de las
+        // tarjetas se colocan suponiendo ese 4:3.
+        const bool force43 = pc_captain_select_active();
+        gfx->mScreenWidth  = force43 ? 640 : kF1CanvasW;
+        gfx->mScreenHeight = force43 ? 480 : kF1CanvasH;
     }
 #endif
 }
@@ -7322,6 +7641,41 @@ int pc_settings_get_debug_keys(void) {
     return sConfig.debugKeys;
 }
 
+void pc_settings_record_original_look(int original) {
+    // Copia de lo que había antes de pasar al aspecto original; se repone tal cual.
+    static PcConfig sBefore;
+    static bool sInOriginal = false;
+    if (original && !sInOriginal) {
+        sBefore = sConfig;
+        sConfig.shadows = 0;
+        sConfig.ssao = 0;
+        sConfig.bloom = 0;
+        sConfig.dof = 0;
+        sConfig.antialiasing = 0;
+        sConfig.perPixelLighting = 0;
+        sConfig.anisotropy = 0;
+        sConfig.colourGrading = 0;
+        sConfig.fog = 1;
+        sConfig.hdModelsDisabled = 0x3F; // todas las filas del selector de modelos HD
+        sInOriginal = true;
+    } else if (!original && sInOriginal) {
+        sConfig.shadows = sBefore.shadows;
+        sConfig.ssao = sBefore.ssao;
+        sConfig.bloom = sBefore.bloom;
+        sConfig.dof = sBefore.dof;
+        sConfig.antialiasing = sBefore.antialiasing;
+        sConfig.perPixelLighting = sBefore.perPixelLighting;
+        sConfig.anisotropy = sBefore.anisotropy;
+        sConfig.colourGrading = sBefore.colourGrading;
+        sConfig.fog = sBefore.fog;
+        sConfig.hdModelsDisabled = sBefore.hdModelsDisabled;
+        sInOriginal = false;
+    }
+    applyGraphics(sConfig);
+    fprintf(stderr, "[RECORD] graphics: %s\n", sInOriginal ? "original" : "Open Nectar");
+    fflush(stderr);
+}
+
 // ---------------------------------------------------------------------------
 // Modelo de filas para otras interfaces (pc_settings_rows.h)
 // ---------------------------------------------------------------------------
@@ -7642,7 +7996,7 @@ const GroupRow kCameraRows[] = {
 const GroupRow kGameplayRows[] = {
 #if PIKI_P2_HOST
     { SRC_MODS, 34, "Whistle Pluck", "Hold the whistle over sprouts to pluck them one after another." },
-    { SRC_MODS, 36, "Hide Drake Texts", "The ship's tutorial and notice texts are skipped without showing up. Story texts stay." },
+    { SRC_MODS, 36, "Hide Drake Texts", "Cutscene texts in story mode fly by and advance on their own." },
     { SRC_MODS, 25, "Instant Whistle Response", "Whistled Pikmin join the squad at once, without stopping to turn and look first." },
     { SRC_MODS, 23, "No Tripping", "Pikmin running in the squad never trip and fall behind." },
     { SRC_MODS, 40, "Eternal Night", "Always night above ground, whatever the day length." },

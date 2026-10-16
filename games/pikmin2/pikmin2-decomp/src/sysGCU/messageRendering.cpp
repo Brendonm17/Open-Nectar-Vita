@@ -8,6 +8,9 @@
 #include "P2Macros.h"
 #include "stl/ctype.h"
 #include "System.h"
+#ifdef PIKI_PC_PORT
+#include <stdio.h>
+#endif
 
 namespace P2JME {
 
@@ -30,6 +33,11 @@ doubleColorStruct cBtnIconColor[11] = {
 
 #ifdef PIKI_PC_PORT
 extern "C" void pc_window_key_prompt_label(char tag, char* buf, unsigned bufSize);
+#if PIKI_PC_TOUCH
+extern "C" bool pc_touch_visible(void);
+extern "C" bool pc_touch_has_icon_for_tag(char tag);
+extern "C" void pc_touch_mark_inline_icon(char tag, float x, float y, float size);
+#endif
 #endif
 
 // Los argumentos de las etiquetas del mensaje van en big-endian (datos de
@@ -667,7 +675,36 @@ bool TRenderingProcessor::tagImage(u16 p1, const void* p2, u32 p3)
 			JUtility::TColor(225, 225, 225, 255), JUtility::TColor(225, 225, 225, 255),
 		};
 		char label[48];
+#if PIKI_PC_TOUCH
+		// Táctil: el botón de la capa táctil que hace eso, en su burbuja (se
+		// puede pulsar), como en Pikmin 1. Mover al grupo: disolver + arrastrar;
+		// zoom: pellizcar. Lo que no tiene botón táctil deja el icono original.
+		bool pcTouchIcon = false;
+		label[0]         = '\0';
+		if (pc_touch_visible()) {
+			const char tag = kTags[firstByte];
+			if (pc_touch_has_icon_for_tag(tag) || tag == 'c') {
+				pcTouchIcon = true;
+				if (!mFlags.isSet(TProcFlag_Unk0)) {
+					pc_touch_mark_inline_icon(tag == 'c' ? 'x' : tag, mLocate.i.x + mXOffset,
+					                          mLocate.i.y + mYOffset + mFontHeightAdjusted * f32(mMainFont->getDescent()), width);
+				}
+				mLocate.i.x += width;
+				if (tag == 'c') snprintf(label, sizeof(label), "+drag");
+			} else if (tag == 'r') {
+				snprintf(label, sizeof(label), "pinch");
+			}
+			if (pcTouchIcon && !label[0]) {
+				mInfoIndex++;
+				mMainFont->setGX(mDefaultBlack, mDefaultWhite);
+				return true;
+			}
+		} else {
+			pc_window_key_prompt_label(kTags[firstByte], label, sizeof(label));
+		}
+#else
 		pc_window_key_prompt_label(kTags[firstByte], label, sizeof(label));
+#endif
 		if (label[0]) {
 			const JUtility::TColor keep1 = mColorData1, keep2 = mColorData2;
 			mColorData1   = kKeyColor[firstByte];

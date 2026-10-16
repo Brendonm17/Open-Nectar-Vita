@@ -778,6 +778,12 @@ bool pc_window_init(const char* title, int width, int height) {
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+#elif defined(__APPLE__)
+        // macOS no ofrece perfil de compatibilidad 3.x: o GL 2.1 o core 3.2+.
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
 #else
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
@@ -833,12 +839,15 @@ bool pc_window_init(const char* title, int width, int height) {
     pc_icon_apply(sWindow);
     sGLContext = SDL_GL_CreateContext(sWindow);
     if (!sGLContext) {
-#if !PIKI_USE_GLES
+#if !PIKI_USE_GLES && !defined(__APPLE__)
         printf("[PC Port Warning] SDL_GL_CreateContext Compatibility Profile failed: %s. Retrying with default profile...\n", SDL_GetError());
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, 0);
         sGLContext = SDL_GL_CreateContext(sWindow);
+#elif defined(__APPLE__) && !PIKI_USE_GLES
+        // GL 2.1 no puede con el render, así que en macOS no se reintenta.
+        printf("[PC Port Error] SDL_GL_CreateContext GL 4.1 core failed: %s\n", SDL_GetError());
 #else
         printf("[PC Port Error] SDL_GL_CreateContext ES 3.0 failed: %s\n", SDL_GetError());
 #endif
@@ -1466,9 +1475,19 @@ void pc_window_poll_events(PADStatus* pad) {
 #endif
 }
 
+unsigned int pc_gfx_begin_swap_framebuffer(void);
+void pc_gfx_end_swap_framebuffer(unsigned int bound);
+
 void pc_window_swap_buffers(void) {
     if (sWindow) {
+#if defined(__APPLE__)
+        // macOS solo muestra el frame si aquí está enlazado el framebuffer por defecto.
+        const unsigned int renderTarget = pc_gfx_begin_swap_framebuffer();
+#endif
         SDL_GL_SwapWindow(sWindow);
+#if defined(__APPLE__)
+        pc_gfx_end_swap_framebuffer(renderTarget);
+#endif
         // VSync Off must not retain the software presentation limiter. Game
         // simulation uses the fixed-step scheduler independently.
         if (sVsyncEnabled) {

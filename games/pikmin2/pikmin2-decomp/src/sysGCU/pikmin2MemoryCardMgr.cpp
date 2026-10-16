@@ -13,6 +13,9 @@
 extern "C" int pc_p2_rules_save_bits(void);
 extern "C" void pc_p2_rules_adopt(int headerByte);
 extern "C" void pc_p2_rules_note_slot(int slot, int headerByte);
+extern "C" void pc_p2_randomizer_write_block(unsigned char* block, int size);
+extern "C" void pc_p2_randomizer_adopt_block(const unsigned char* block, int size);
+extern "C" void pc_p2_rnd_sync_debt(void);
 #endif
 
 namespace Game {
@@ -610,7 +613,7 @@ bool Mgr::commandUpdatePlayerHeader(PlayerFileInfo* playerInfo)
 	// Etiquetas HARD / PERMADEATH del selector (una rota no lleva ninguna).
 	for (s8 i = 0; i < 3; i++) {
 		Player* player = playerInfo->getPlayer(i);
-		pc_p2_rules_note_slot(i, player->mFlag ? 0 : player->_01);
+		pc_p2_rules_note_slot(i, player->mFlag ? -1 : player->_01);
 	}
 #endif
 
@@ -1166,6 +1169,11 @@ bool Mgr::commandSavePlayerNoCheckSerialNo(s8 fileIndex, bool param_2)
 
 		RamStream ramStream(&playerInfo->mFileBuffer, PLAYER_FILE_SIZE);
 		writePlayer(ramStream);
+#ifdef PIKI_PC_PORT
+		// Bloque NRN2 del Randomizer en los 60 bytes libres antes del checksum.
+		pc_p2_randomizer_write_block(playerInfo->mFileBuffer + PLAYER_FILE_SIZE,
+		                             PLAYER_BLOCK_SIZE - 0x4 - 0x40 - PLAYER_FILE_SIZE);
+#endif
 		result = savePlayerProc(fileIndex, buffer, true);
 
 		delete (buffer);
@@ -1316,6 +1324,9 @@ bool Mgr::commandLoadPlayer(s8 fileIndex)
 				saveMgr->_22                 = info->mPlayer._02; // hmm.
 #ifdef PIKI_PC_PORT
 				pc_p2_rules_adopt(info->mPlayer._01);
+				pc_p2_randomizer_adopt_block(info->mFileBuffer + PLAYER_FILE_SIZE,
+				                             PLAYER_BLOCK_SIZE - 0x4 - 0x40 - PLAYER_FILE_SIZE);
+				pc_p2_rnd_sync_debt();
 #endif
 			}
 

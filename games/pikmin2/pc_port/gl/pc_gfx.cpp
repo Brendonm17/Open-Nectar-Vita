@@ -1403,7 +1403,7 @@ static u64 sTexVariantClock = 0;
 constexpr size_t kTexVariantsPerObj = 16;
 constexpr u16 kTexVariantMaxSide = 256;
 // GXCopyTex: direccion de destino -> textura GL con la copia del framebuffer.
-struct PcEfbCopy { GLuint tex = 0; int w = 0, h = 0; };
+struct PcEfbCopy { GLuint tex = 0; int w = 0, h = 0; unsigned hits = 0; };
 static PcGfxHostMap<uintptr_t, PcEfbCopy> sEfbCopies;
 static PcGfxHostMap<uintptr_t, PcTlut> sTlutObjects;
 static PcGfxHostMap<u32, PcTlut> sLoadedTluts;
@@ -2433,7 +2433,10 @@ static const char* vShaderTail =
     // la normal ya vienen transformadas por la matriz de su hueso, que es la
     // que J3D carga como matriz de textura del reflejo (sTexMtxLoadType 0x2000).
     "    if (vIdx >= 30 && vIdx <= 57) {\n"
-    "        if (uUsePalette == 0 && (mode == 1 || mode == 2)) r = vec4(src.xyz, 1.0);\n"
+    // Excepto la proyección a pantalla (STQ desde la posición, el cuerpo del
+    // Waterwraith): su matriz no es la del hueso sino la de la cámara, y la
+    // posición ya está en espacio de cámara, así que se aplica tal cual.
+    "        if (uUsePalette == 0 && (mode == 1 || mode == 2)) { if (((uTcProj >> slot) & 1) == 0) r = vec4(src.xyz, 1.0); }\n"
     "#ifdef PC_TEX_PALETTE\n"
     "        else { int b = vIdx - 30; r = vec4(dot(uTexPalette[b], src), dot(uTexPalette[b + 1], src), dot(uTexPalette[b + 2], src), 1.0); }\n"
     "#endif\n"
@@ -5047,6 +5050,18 @@ bool pc_gfx_held_frame_restore(void)
     return true;
 }
 
+unsigned int pc_gfx_begin_swap_framebuffer(void) {
+    GLint bound = 0;
+    if (!glBindFramebuffer_ptr) return 0;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &bound);
+    glBindFramebuffer_ptr(GL_FRAMEBUFFER, 0);
+    return static_cast<unsigned int>(bound);
+}
+
+void pc_gfx_end_swap_framebuffer(unsigned int bound) {
+    if (glBindFramebuffer_ptr) glBindFramebuffer_ptr(GL_FRAMEBUFFER, GLuint(bound));
+}
+
 void pc_gfx_present(void) {
     // El post-proceso crea shaders con std::string: que no tire del heap JKR
     // actual (la Piklopedia lo deja sin memoria libre -> Memory Alloc Error).
@@ -5417,6 +5432,27 @@ bool pc_gfx_project_current(float x, float y, float z, float* winX, float* winY)
     const float wyUp = outY + rtY / float(sRenderHeight) * outH;
     if (winX) *winX = wx;
     if (winY) *winY = float(sDrawableHeight) - wyUp; // ventana: origen arriba
+    return true;
+}
+
+// Como pc_gfx_project_current, con una matriz 3x4 de GX (filas) en vez de la
+// cargada: la capa táctil sabe dónde cae en la ventana un panel 2D aunque no
+// haya dibujado nada propio (cajas de texto, paneles contenedor).
+bool pc_gfx_project_mtx34(const float (*m)[4], float x, float y, float* winX, float* winY)
+{
+    const float mx = m[0][0] * x + m[0][1] * y + m[0][3];
+    const float my = m[1][0] * x + m[1][1] * y + m[1][3];
+    const float mz = m[2][0] * x + m[2][1] * y + m[2][3];
+    const float cx = sProjMatrix[0] * mx + sProjMatrix[4] * my + sProjMatrix[8] * mz + sProjMatrix[12];
+    const float cy = sProjMatrix[1] * mx + sProjMatrix[5] * my + sProjMatrix[9] * mz + sProjMatrix[13];
+    const float cw = sProjMatrix[3] * mx + sProjMatrix[7] * my + sProjMatrix[11] * mz + sProjMatrix[15];
+    if (fabsf(cw) < 1.0e-8f || sLastViewportW <= 0 || sLastViewportH <= 0 || sRenderWidth <= 0 || sRenderHeight <= 0) return false;
+    const float rtX = sLastViewportX + (cx / cw * 0.5f + 0.5f) * sLastViewportW;
+    const float rtY = sLastViewportY + (cy / cw * 0.5f + 0.5f) * sLastViewportH; // origen abajo
+    GLint outX, outY, outW, outH;
+    calculate_output_area(sDrawableWidth, sDrawableHeight, sCurrentAspectRatio, outX, outY, outW, outH);
+    if (winX) *winX = outX + rtX / float(sRenderWidth) * outW;
+    if (winY) *winY = float(sDrawableHeight) - (outY + rtY / float(sRenderHeight) * outH); // ventana: origen arriba
     return true;
 }
 
@@ -7099,6 +7135,7 @@ void pc_gfx_load_tex_obj(GXTexObj* obj, GXTexMapID id) {
                 }
             }
             if (copy != sEfbCopies.end() && copy->second.tex) {
+                ++copy->second.hits;
                 sActiveGLTextures[id] = copy->second.tex;
                 sHasActiveTextures[id] = true;
                 return;
@@ -9621,6 +9658,19 @@ static void apply_draw_state(bool profilingSubmit, double stateT0) {
         }
     }
     if (sLoc.tcProj >= 0) glUniform1i_ptr(sLoc.tcProj, tcProj);
+    // Diagnóstico (PIKMIN_WRAITH_DEBUG=1): texgen proyectiva desde la posición
+    // (cuerpo del Waterwraith, agua): matriz y ruta de vértices al dibujar.
+    {
+        static const bool dbg = getenv("PIKMIN_WRAITH_DEBUG") != nullptr;
+        static unsigned n = 0;
+        if (dbg && (tcProj & 1) && sTexCoordGen[0].src == GX_TG_POS && (n++ % 600) == 0) {
+            const u32 mi = sTexCoordGen[0].mtxIdx < 64 ? sTexCoordGen[0].mtxIdx : 0;
+            const float* m = sTexMatrices[mi];
+            fprintf(stderr, "[WRAITH-GL] mtx=%u palette=%d baked=%X stages=%d | S %.3f %.3f %.3f %.3f | T %.3f %.3f %.3f %.3f | Q %.3f %.3f %.3f %.3f\n",
+                    mi, (int)sVertexUsesPalette, (unsigned)sTexBakedMask, (int)sNumTevStages,
+                    m[0], m[4], m[8], m[12], m[1], m[5], m[9], m[13], m[2], m[6], m[10], m[14]);
+        }
+    }
     if (sLoc.tcPostOn >= 0) {
         // Dual tex de las generaciones 0-3 (las que lleva el shader).
         int postOn = 0, norm = 0, is2x4 = 0;
@@ -11688,6 +11738,19 @@ void pc_gfx_copy_tex(void* dest, GXBool clear) {
         pc_gfx_set_scissor(sGxSc[0], sGxSc[1], sGxSc[2], sGxSc[3]);
     }
     if (scissorWasEnabled) glEnable(GL_SCISSOR_TEST); else glDisable(GL_SCISSOR_TEST);
+}
+
+// Diagnóstico (PIKMIN_WRAITH_DEBUG): ¿hay copia de GXCopyTex para esta
+// dirección, y cuántas veces se ha enlazado al dibujar?
+extern "C" int pc_gfx_efb_copy_info(const void* addr, unsigned* hits) {
+    std::lock_guard<std::mutex> lock(sTextureRegistryMutex);
+    auto it = sEfbCopies.find(reinterpret_cast<uintptr_t>(addr));
+    if (it == sEfbCopies.end() || !it->second.tex) {
+        if (hits) *hits = 0;
+        return 0;
+    }
+    if (hits) *hits = it->second.hits;
+    return 1;
 }
 
 void pc_gfx_set_copy_clear(GXColor color, u32 clearZ) {

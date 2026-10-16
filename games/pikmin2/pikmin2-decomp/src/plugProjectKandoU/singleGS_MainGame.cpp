@@ -6,6 +6,7 @@ void pc_p2_rules_erase_current_save(void);
 #include "pc_p2_captains.h"
 #include "Game/pcCoop.h"
 #include "pc_speedrun.h"
+#include "randomizer/pc_randomizer_audit.h"
 #endif
 #include "Game/DeathMgr.h"
 #include "Game/GameConfig.h"
@@ -522,6 +523,7 @@ void GameState::exec(SingleGameSection* game)
 			pikiMgr->moveAllPikmins(pos, 50.0f, nullptr);
 		}
 	}
+	pc_p2_rnd_debug_exec(0); // atajos de prueba del Randomizer (PIKI_RND_DEBUG)
 	if (pc_speedrun_debug_take_day_end()) {
 		gameSystem->resetFlag(GAMESYS_IsGameWorldActive);
 		DayEndArg arg(DayEndState::DETYPE_Normal);

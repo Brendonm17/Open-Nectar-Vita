@@ -47,10 +47,27 @@ void pc_touch_last_pad(u16* buttons, s8* stickX, s8* stickY, s8* substickX, s8* 
  * oculta y pueden consumir el último toque como coordenadas normalizadas.
  */
 void pc_touch_claim_game_menu(void);
+/** El menú usa el stick táctil (radar): sus arrastres no pasan de página. */
+void pc_touch_menu_uses_stick(void);
 /** Menú F1: muestra B/atrás y una burbuja A/confirmar vacía. */
 void pc_touch_claim_port_menu(void);
 bool pc_touch_take_game_menu_tap(float* x, float* y);
 void pc_touch_queue_game_button(u16 button);
+
+/**
+ * Menús de Pikmin 2 (J2D): tocar lo que dibuja el menú. El menú pregunta por
+ * un panel con pc_touch_pane_hit; desde entonces J2DPane::draw anota cada
+ * frame dónde cae en la ventana lo que dibujan ese panel y sus hijos.
+ * nx/ny: toque normalizado de pc_touch_take_game_menu_tap. margin: holgura en
+ * fracción del alto de la ventana.
+ */
+bool pc_touch_pane_hit(const void* pane, float nx, float ny, float margin);
+/** Rectángulo en píxeles de ventana de lo que dibujó el panel (y lo sigue). */
+bool pc_touch_pane_rect(const void* pane, float* x0, float* y0, float* x1, float* y1);
+bool pc_touch_panes_active(void);
+bool pc_touch_pane_tracked(const void* pane);
+/** Une al panel seguido lo que dibuja él o un hijo suyo este frame. */
+void pc_touch_pane_drawn(const void* pane, float x0, float y0, float x1, float y1);
 
 /**
  * Iconos en línea dentro del texto del juego (tutoriales). El texto usa la

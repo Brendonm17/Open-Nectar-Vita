@@ -410,6 +410,9 @@ void pc_settings_p2_flush(void)
         sVertCount += sGlassCount;
     }
     sGlassCount = 0;
+    // La zona de contenido es de la placa de este frame: si se arrastra, el
+    // texto suelto del siguiente (contador IDLE) se estrecha hasta no leerse.
+    sContentLeft = sContentRight = 0;
     if (sVertCount > 0)
         pc_gfx_ui_draw(sVerts, sVertCount, sGfx.mScreenWidth, sGfx.mScreenHeight, kPcUiFont, kPcUiFontW, kPcUiFontH);
     sVertCount = 0;

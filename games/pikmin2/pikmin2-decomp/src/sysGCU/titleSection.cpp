@@ -1,6 +1,8 @@
 #ifdef PIKI_PC_PORT
 #include "pc_speedrun.h"
 #include "pc_p2_coop.h"
+#include "randomizer/pc_randomizer.h"
+#include "randomizer/pc_randomizer_audit.h"
 #endif
 #include "Title.h"
 #include "ebi/title/TTitle.h"
@@ -178,6 +180,10 @@ void Section::init()
 	pc_speedrun_challenge_progress_restore();
 	pc_speedrun_set_active(0);
 	pc_p2_coop_set_pending(0);
+	// Sin partida: Randomizer apagado y la deuda del juego, la original.
+	pc_randomizer_set_menu_pending(false);
+	pc_randomizer_clear_active();
+	pc_p2_rnd_sync_debt();
 #endif
 
 	sys->heapStatusStart("JMANewSinTable", nullptr);
@@ -412,6 +418,10 @@ void Section::doUpdateMainTitle()
 #ifdef PIKI_PC_PORT
 		printf("[PC Port] Title menu selected id=%d (Story=%d Challenge=%d)\n", id, (int)ebi::TMainTitleMgr::Select_Story,
 		       (int)ebi::TMainTitleMgr::Select_Challenge);
+		// La tarjeta del Randomizer solo se usa entrando por su opción (o por
+		// Story con PIKI_RANDOMIZER, para pruebas).
+		pc_randomizer_set_menu_pending(id == ebi::TMainTitleMgr::Select_Randomizer
+		                               || (id == ebi::TMainTitleMgr::Select_Story && pc_randomizer_env_forced()));
 #endif
 		switch (id) {
 		case ebi::TMainTitleMgr::Select_Story:
@@ -470,6 +480,11 @@ void Section::doUpdateMainTitle()
 			// Co-op: la historia, con la asignación de mandos antes de la
 			// selección de partida (docs/PLAN_COOP.md §5).
 			pc_p2_coop_set_pending(1);
+			GameFlow::mActiveSectionFlag = GameFlow::SN_SingleGame;
+			break;
+		case ebi::TMainTitleMgr::Select_Randomizer:
+			// Randomizer: la historia con su propia tarjeta
+			// (save/randomizer/card0) y sus ajustes al crear partida.
 			GameFlow::mActiveSectionFlag = GameFlow::SN_SingleGame;
 			break;
 #endif

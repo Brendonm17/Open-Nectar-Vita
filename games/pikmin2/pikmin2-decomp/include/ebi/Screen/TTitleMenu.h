@@ -8,13 +8,14 @@
 struct Controller;
 
 // Opciones del menú del título. El port añade "Speedrun" (índice 6, debajo de
-// Extras) y "Coop" (índice 7, justo debajo de Story), que se montan en tiempo
-// de ejecución a partir de la de Challenge Mode (ver TTitleMenu::pcAddWordEntry
-// en ebiScreenTitleMenu.cpp).
+// Extras), "Coop" (índice 7, justo debajo de Story) y "Randomizer" (índice 8,
+// debajo de Speedrun), que se montan en tiempo de ejecución a partir de la de
+// Challenge Mode (ver TTitleMenu::pcAddWordEntry en ebiScreenTitleMenu.cpp).
 #ifdef PIKI_PC_PORT
-#define EBI_TITLE_MENU_NUM (8)
-#define PC_TITLE_SPEEDRUN  (6)
-#define PC_TITLE_COOP      (7)
+#define EBI_TITLE_MENU_NUM  (9)
+#define PC_TITLE_SPEEDRUN   (6)
+#define PC_TITLE_COOP       (7)
+#define PC_TITLE_RANDOMIZER (8)
 #else
 #define EBI_TITLE_MENU_NUM (6)
 #endif
@@ -73,20 +74,27 @@ struct TTitleMenu : public TScreenBase {
 	{
 #ifdef PIKI_PC_PORT
 		mPcHasSpeedrun = false;
-		mPcHasCoop     = false;
-		mPcVisPos      = 0;
+		mPcHasCoop       = false;
+		mPcHasRandomizer = false;
+		mPcVisPos        = 0;
 		mPcFitPane     = nullptr;
 #endif
 	}
 
-	// Opciones en uso: 6 del original, más Speedrun y Coop si se montaron
-	// (Coop solo se intenta con Speedrun montada).
+	// Opciones en uso: 6 del original, más Speedrun, Coop y Randomizer si se
+	// montaron (cada una solo se intenta con la anterior montada).
 #ifdef PIKI_PC_PORT
-	int menuNum() const { return 6 + (mPcHasSpeedrun ? 1 : 0) + (mPcHasCoop ? 1 : 0); }
+	int menuNum() const { return 6 + (mPcHasSpeedrun ? 1 : 0) + (mPcHasCoop ? 1 : 0) + (mPcHasRandomizer ? 1 : 0); }
 	// El cursor cuenta filas en pantalla; mSelectID es la opción. Coop va en
-	// la segunda fila y las demás bajan una.
-	int pcVisToIdx(int v) const { return !mPcHasCoop || v == 0 ? v : v == 1 ? PC_TITLE_COOP : v - 1; }
-	int pcIdxToVis(int i) const { return !mPcHasCoop || i == 0 ? i : i == PC_TITLE_COOP ? 1 : i + 1; }
+	// la segunda fila y las demás bajan una; Randomizer, la última, no se mueve.
+	int pcVisToIdx(int v) const
+	{
+		return !mPcHasCoop || v == 0 || v == PC_TITLE_RANDOMIZER ? v : v == 1 ? PC_TITLE_COOP : v - 1;
+	}
+	int pcIdxToVis(int i) const
+	{
+		return !mPcHasCoop || i == 0 || i == PC_TITLE_RANDOMIZER ? i : i == PC_TITLE_COOP ? 1 : i + 1;
+	}
 #else
 	int menuNum() const { return 6; }
 #endif
@@ -113,6 +121,7 @@ struct TTitleMenu : public TScreenBase {
 	void pcLayoutRows(JKRArchive*);
 	bool mPcHasSpeedrun; // false si no se pudo montar (sin letras latinas)
 	bool mPcHasCoop;
+	bool mPcHasRandomizer;
 	s32 mPcVisPos;       // fila del cursor en pantalla (mPad la mueve)
 	f32 mPcCoopY[2];     // Y de la fila Coop para cada mState (debajo de Story)
 	// Panel entre ROOT y NULL_001 que encaja las filas entre el logo y el

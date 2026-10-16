@@ -8,6 +8,7 @@
 #include "og/newScreen/ogUtil.h"
 #include "LifeGaugeMgr.h"
 #include "JSystem/JUtility/JUTTexture.h"
+#include "JSystem/JKernel/JKRArchive.h"
 #include "System.h"
 #include "og/Sound.h"
 #include "trig.h"
@@ -182,9 +183,12 @@ void CallBack_LifeGauge::setType(LifeGaugeType lifeGaugeType)
 static const ResTIMG* pcDiscTexture()
 {
 	static const int kSize = 32;
-	static u8* sImage      = nullptr;
-	if (!sImage) {
-		sImage       = new (0x20) u8[0x20 + kSize * kSize * 2];
+	// Memoria estática, no del montón del juego: el montón de la sección se
+	// vacía entre subniveles y el puntero quedaba colgando.
+	alignas(32) static u8 sImage[0x20 + kSize * kSize * 2];
+	static bool sBuilt = false;
+	if (!sBuilt) {
+		sBuilt       = true;
 		ResTIMG* img = reinterpret_cast<ResTIMG*>(sImage);
 		memset(img, 0, 0x20);
 		img->mTextureFormat   = GX_TF_IA8;
@@ -258,7 +262,10 @@ void CallBack_LifeGauge::pcSetCharacter(int character, int naviIndex)
 	}
 
 	static const int kLeafIcon[PC_P2_CHAR_COUNT] = { 0, 0, 0, 4, 7, 1, 10, 13, 16 }; // rp, yp, bp, blp, wp _l64, cha_l
-	ResTIMG* pikminTex                            = PikiIconTextureResTIMG[kLeafIcon[character]];
+	// Se busca en los archivos montados ahora: PikiIconTextureResTIMG guarda
+	// punteros del HUD de la pantalla anterior, que en un cambio de subnivel ya
+	// está liberado cuando ObjCave hace su primer update.
+	ResTIMG* pikminTex = static_cast<ResTIMG*>(JKRArchive::getGlbResource('TIMG', PikiIconTextureName[kLeafIcon[character]], nullptr));
 	if (!pikminTex) {
 		return; // el HUD aún no ha cargado los iconos: se reintenta
 	}

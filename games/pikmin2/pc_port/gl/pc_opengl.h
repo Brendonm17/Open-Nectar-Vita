@@ -60,6 +60,23 @@ static inline void glGetTexLevelParameteriv(GLenum, GLint, GLenum, GLint* p) { i
 #  ifndef APIENTRYP
 #    define APIENTRYP GL_APIENTRYP
 #  endif
+#elif defined(__APPLE__)
+// macOS solo trae las cabeceras de Apple. <GL/gl.h> resolvería al gl.h de este
+// proyecto en un sistema de archivos sin mayúsculas, así que no se usa aquí;
+// gl3.h es la cabecera del perfil core, que es lo que el render pide en macOS.
+#  ifndef GL_SILENCE_DEPRECATION
+#    define GL_SILENCE_DEPRECATION
+#  endif
+#  include <OpenGL/gl3.h>
+#  include <OpenGL/glext.h>
+// Códigos de error de GL_KHR_debug (GL 4.3): la cabecera core de Apple llega a
+// 3.2 y el informe de glGetError los nombra. Valores del registro de Khronos.
+#  ifndef GL_STACK_OVERFLOW
+#    define GL_STACK_OVERFLOW 0x0503
+#  endif
+#  ifndef GL_STACK_UNDERFLOW
+#    define GL_STACK_UNDERFLOW 0x0504
+#  endif
 #else
 #  include <GL/gl.h>
 #  include <GL/glext.h>

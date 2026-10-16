@@ -169,6 +169,9 @@ void TMainTitleMgr::startMenuSet(s32, s32 select)
 	case Select_Coop:
 		id = mTitleMenu.menuNum() > PC_TITLE_COOP ? PC_TITLE_COOP : 0;
 		break;
+	case Select_Randomizer:
+		id = mTitleMenu.menuNum() > PC_TITLE_RANDOMIZER ? PC_TITLE_RANDOMIZER : 0;
+		break;
 #endif
 	default:
 		JUT_PANICLINE(177, "P2Assert");
@@ -362,6 +365,9 @@ void TMainTitleMgr::update()
 					break;
 				case PC_TITLE_COOP:
 					mSelectedMenuOption = Select_Coop;
+					break;
+				case PC_TITLE_RANDOMIZER:
+					mSelectedMenuOption = Select_Randomizer;
 					break;
 #endif
 				}

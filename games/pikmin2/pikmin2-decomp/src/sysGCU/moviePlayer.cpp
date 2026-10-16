@@ -15,6 +15,8 @@ extern "C" int pc_speedrun_active(void);
 #include "Game/pcCoop.h"
 #include "Game/BaseGameSection.h"
 #include "Game/Navi.h"
+#include "Game/pelletMgr.h"
+#include "Game/Entities/ItemGate.h"
 #endif
 #include "Screen/Game2DMgr.h"
 #include "Game/GameSystem.h"
@@ -90,45 +92,59 @@ static void pcCoopMovieRestore()
 
 #ifdef PIKI_PC_PORT
 /**
- * Mod "Hide Drake Texts": demos de historia cuyo único contenido es la Drake
- * explicando algo (primer Pikmin de cada color, cuevas, compuertas, néctar,
- * aerosoles, mejoras...). Se saltan solas en cuanto cargan, sin mostrarse.
- * Quedan fuera las de argumento y las que mueven nave/cebollas a la vista
- * (llegadas, cebollas que despiertan, agujeros que aparecen, Louie).
+ * Mod "Hide Drake Texts": en el modo historia, los textos de todas las demos
+ * se escriben de golpe y pasan de página solos; la escena se sigue viendo.
  */
-static const char* const sPcDrakeTextDemos[] = {
-	"g01_pick_me",        "g03_meet_redpikmin",  "g04_find_treasure",     "g05_find_cave",     "g05_find_hole",
-	"g07_cv_gamestart",   "g08_first_return",    "g09_first_sunset",      "g0A_cv_find_hole",  "g0B_cv_find_fountain",
-	"g16_",               "g18_find_gate",       "g19_find_rock",         "g1A_red_doping",    "g1B_black_doping",
-	"g1F_meet_yellow",    "g21_meet_blue",       "g24_meet_black",        "g26_inout_black",   "g27_meet_white",
-	"g29_inout_white",    "g2B_white_poison",    "g2C_inout_red",         "g2D_red_extract",   "g2E_black_extract",
-	"g32_get_map",        "g33_camera_demo",     "g34_yellow_extract",    "g38_find_whitepom", "g39_find_blackpom",
-	"s11_dope",           "x02_watch_red",       "x04_exp_y",             "x06_join",          "x07_first_recovery",
-	"x08_cv_suck_carcass", "x09_exp_detector",   "x13_exp_leafchappy",    "x15_exp_x",         "x16_hiba",
-	"x17_join_guide",     "x18_exp_pellet",      "x20_blackman",
-};
 
 static bool pcIsDrakeTextDemo(Game::MovieConfig* config)
 {
 	if (!config || !Game::gameSystem || !Game::gameSystem->isStoryMode() || !pc_settings_get_hide_olimar_text()) {
 		return false;
 	}
-	for (u32 i = 0; i < sizeof(sPcDrakeTextDemos) / sizeof(sPcDrakeTextDemos[0]); i++) {
-		if (config->is(const_cast<char*>(sPcDrakeTextDemos[i]))) {
-			return true;
-		}
-	}
-	// Co-op: la llegada de Louie (el primer cambio con Y, que abre el co-op)
-	// también se salta; en un jugador se sigue viendo. El vaciado de
-	// Finishing ejecuta el resto del guion, así que Louie queda en su sitio.
-	if (pc_p2_coop_session() && config->is(const_cast<char*>("x05_louiestart"))) {
-		return true;
-	}
-	return false;
+	// Todas las demos del modo historia: quien ya lo jugó no repasa ningún texto.
+	return true;
 }
+
+// Co-op: la llegada de Louie (el primer cambio con Y, que abre el co-op)
+// se salta entera; en un jugador se sigue viendo. El vaciado de
+// Finishing ejecuta el resto del guion, así que Louie queda en su sitio.
+static bool pcIsCoopSkipDemo(Game::MovieConfig* config)
+{
+	return config && pc_p2_coop_session() && config->is(const_cast<char*>("x05_louiestart"));
+}
+
+// Demos de la nave: se ven, pero sus textos corren y pasan solos
+// (lo lee TSequenceProcessor::do_isReady).
+bool gPcAutoAdvanceMovieText = false;
 
 // La demo en curso se salta sola (no se dibuja su texto ni se aclara la pantalla).
 static bool sPcAutoSkipDemo = false;
+// Las demos de recoger un tesoro y de la compuerta pueden empezar antes de que
+// termine su efecto en el juego: un salto espera a que ese efecto se aplique.
+static bool sPcDeferredGameplaySkip = false;
+
+static bool pcMoviePelletDeliveryPending()
+{
+	if (!Game::gameSystem || !Game::gameSystem->mSection)
+		return false;
+	auto* creature = Game::gameSystem->mSection->mDraw2DCreature;
+	return creature && creature->isPellet()
+	    && static_cast<Game::Pellet*>(creature)->getStateID() == Game::PELSTATE_Goal;
+}
+
+static bool pcMovieGateBreakPending(const Game::MoviePlayer* player)
+{
+	if (!player->mCurrentConfig || !player->mCurrentConfig->is("g18_find_gate") || !player->mTargetObject
+	    || player->mTargetObject->getObjType() != OBJTYPE_Gate)
+		return false;
+	auto* gate = static_cast<Game::ItemGate*>(player->mTargetObject);
+	return gate->getStateID() == GATESTATE_Down && gate->mSegmentsDown < gate->mMaxSegments;
+}
+
+static bool pcMovieGameplayTransitionPending(const Game::MoviePlayer* player)
+{
+	return pcMoviePelletDeliveryPending() || pcMovieGateBreakPending(player);
+}
 #endif
 
 namespace Game {
@@ -280,6 +296,9 @@ int MoviePlayer::play(MovieConfig* config, MoviePlayArg& arg, bool flag)
 		cameraMgr->controllerLock(CAMNAVI_Both);
 		config->dump();
 		mCurrentConfig = config;
+#ifdef PIKI_PC_PORT
+		sPcDeferredGameplaySkip = false;
+#endif
 		mNaviID        = arg.mNaviID;
 		P2ASSERTLINE(594, config);
 
@@ -667,7 +686,11 @@ bool MoviePlayer::update(Controller* input1, Controller* input2)
 			mDemoState = DEMOSTATE_Playing;
 			u16 flag   = mCurrentConfig->mDrawType;
 #ifdef PIKI_PC_PORT
-			sPcAutoSkipDemo = pcIsDrakeTextDemo(mCurrentConfig);
+			sPcAutoSkipDemo         = pcIsCoopSkipDemo(mCurrentConfig);
+			gPcAutoAdvanceMovieText = pcIsDrakeTextDemo(mCurrentConfig);
+			if (pc_settings_get_hide_olimar_text()) {
+				fprintf(stderr, "[Drake] demo %s autoText=%d skip=%d\n", mCurrentConfig->mMovieNameBuffer2, gPcAutoAdvanceMovieText, sPcAutoSkipDemo);
+			}
 			if (sPcAutoSkipDemo) {
 				// Sigue en negro: skip() la cierra en el primer frame de juego.
 			} else
@@ -859,6 +882,13 @@ bool MoviePlayer::update(Controller* input1, Controller* input2)
 				skip();
 			}
 		}
+#ifdef PIKI_PC_PORT
+		// El salto pedido se cumple en cuanto el efecto en el juego ya se aplicó
+		// (fuera de la espera de texto: el botón ya se pulsó antes).
+		if (sPcDeferredGameplaySkip && mDemoState == DEMOSTATE_Playing && mStudioControl && !pcMovieGameplayTransitionPending(this)) {
+			skip();
+		}
+#endif
 	}
 	return isFlag(MVP_IsActive);
 }
@@ -869,7 +899,7 @@ bool MoviePlayer::update(Controller* input1, Controller* input2)
  */
 void MoviePlayer::draw(Graphics& gfx)
 {
-	if (isFlag(MVP_IsActive) && mTextControl PIKI_PC_ONLY(&& !pcIsDrakeTextDemo(mCurrentConfig))) {
+	if (isFlag(MVP_IsActive) && mTextControl) {
 		gfx.mOrthoGraph.setPort();
 		mTextControl->draw(gfx);
 	}
@@ -899,6 +929,10 @@ bool MoviePlayer::start(Camera* cam)
  */
 bool MoviePlayer::stop()
 {
+#ifdef PIKI_PC_PORT
+	gPcAutoAdvanceMovieText = false;
+	sPcDeferredGameplaySkip = false;
+#endif
 	if (isFlag(MVP_IsActive)) {
 		clearPauseAndDraw();
 		resetFlag(MVP_IsActive);
@@ -1134,6 +1168,13 @@ void MoviePlayer::drawLoading(Graphics& gfx)
  */
 void MoviePlayer::skip()
 {
+#ifdef PIKI_PC_PORT
+	if (pcMovieGameplayTransitionPending(this)) {
+		sPcDeferredGameplaySkip = true;
+		return;
+	}
+	sPcDeferredGameplaySkip = false;
+#endif
 	setFlag(MVP_IsFinished);
 	mDemoState = DEMOSTATE_Finishing;
 	mFadeTimer = 2.0f;

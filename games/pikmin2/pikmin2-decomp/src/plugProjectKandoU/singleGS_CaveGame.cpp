@@ -6,6 +6,7 @@ void pc_p2_rules_erase_current_save(void);
 #include "pc_p2_captains.h"
 #include "Game/pcCoop.h"
 #include "pc_speedrun.h"
+#include "randomizer/pc_randomizer_audit.h"
 #endif
 #include "Game/Entities/BlackMan.h"
 #include "Game/GameConfig.h"
@@ -184,6 +185,7 @@ void CaveState::exec(SingleGameSection* game)
 	// Atajo de prueba del modo Speedrun (PIKMIN_SR_DEBUG=1): F7 sale de la
 	// cueva con resultado, como al acabar la cinemática del géiser
 	// (onMovieDone, "s0C_cv_escape"). El split lo pone CaveResultState::init.
+	pc_p2_rnd_debug_exec(1); // atajos de prueba del Randomizer (PIKI_RND_DEBUG)
 	if (pc_speedrun_debug_take_cave_exit()) {
 		gameSystem->resetFlag(GAMESYS_IsGameWorldActive);
 		PSMCancelToPauseOffMainBgm();

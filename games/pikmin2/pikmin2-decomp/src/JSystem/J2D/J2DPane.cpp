@@ -14,6 +14,12 @@ extern bool gPcHudAnchor;
 extern bool gPcBgStretch;
 extern "C" void pc_gfx_p2_2d_widen_noclip(int on);
 extern f32 gPcHudWideH;
+#if PIKI_PC_TOUCH
+bool pc_gfx_project_mtx34(const float (*m)[4], float x, float y, float* winX, float* winY);
+extern "C" bool pc_touch_panes_active(void);
+extern "C" bool pc_touch_pane_tracked(const void* pane);
+extern "C" void pc_touch_pane_drawn(const void* pane, float x0, float y0, float x1, float y1);
+#endif
 #endif
 #ifdef PIKI_PC_PORT
 // Extension horizontal (sin escala ni giro) de los paneles que dibujan algo.
@@ -641,6 +647,33 @@ void J2DPane::draw(f32 x, f32 y, const J2DGrafContext* grafContext, bool isOrtho
 			mBounds         = pcSavedBounds;
 			for (int i = 0; i < 4; i++) {
 				pic->mTexCoords[i] = pcSavedTc[i];
+			}
+		}
+#endif
+#if PIKI_PC_TOUCH
+		// Menús táctiles: dónde cae en la ventana lo que dibuja un panel por el
+		// que pregunta un menú (pc_touch_pane_hit), hijos incluidos. Solo cuenta
+		// lo que pinta algo: los contenedores suelen cubrir toda la pantalla.
+		if (unkBool && getTypeID() != PANETYPE_Pane && pc_touch_panes_active()) {
+			bool tracked = false;
+			for (J2DPane* p = this; p && !tracked; p = p->mTree.getParent() ? p->mTree.getParent()->getObject() : nullptr) {
+				tracked = pc_touch_pane_tracked(p);
+			}
+			Mtx world;
+			f32 ax = 0, ay = 0, bx = 0, by = 0, cx = 0, cy = 0, dx = 0, dy = 0;
+			if (tracked) {
+				PSMTXConcat(*const_cast<Mtx*>(&grafContext->mPosMtx), mGlobalMtx, world);
+				tracked = pc_gfx_project_mtx34(world, mBounds.i.x, mBounds.i.y, &ax, &ay)
+				       && pc_gfx_project_mtx34(world, mBounds.f.x, mBounds.f.y, &bx, &by)
+				       && pc_gfx_project_mtx34(world, mBounds.f.x, mBounds.i.y, &cx, &cy)
+				       && pc_gfx_project_mtx34(world, mBounds.i.x, mBounds.f.y, &dx, &dy);
+			}
+			if (tracked) {
+				const f32 x0 = fminf(fminf(ax, bx), fminf(cx, dx)), y0 = fminf(fminf(ay, by), fminf(cy, dy));
+				const f32 x1 = fmaxf(fmaxf(ax, bx), fmaxf(cx, dx)), y1 = fmaxf(fmaxf(ay, by), fmaxf(cy, dy));
+				for (J2DPane* p = this; p; p = p->mTree.getParent() ? p->mTree.getParent()->getObject() : nullptr) {
+					pc_touch_pane_drawn(p, x0, y0, x1, y1);
+				}
 			}
 		}
 #endif

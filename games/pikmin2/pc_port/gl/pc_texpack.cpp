@@ -12,6 +12,9 @@
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
+#if defined(__APPLE__)
+#include <SDL2/SDL.h>
+#endif
 
 // PNG packs (la edición "Android & iOS" de Henriko es PNG). stb_image se
 // compila aquí, una sola vez, y sale a RGBA8: sin soporte de compresión
@@ -94,6 +97,21 @@ static void log_once(const std::string& name, const char* why)
 
 static bool has_gl_extension(const char* name)
 {
+#if defined(__APPLE__)
+    // El perfil core de macOS rechaza glGetString(GL_EXTENSIONS) (NULL y
+    // GL_INVALID_ENUM): se recorre la lista con glGetStringi (GL 3.0+).
+    using GetStringiFn = const GLubyte* (*)(GLenum, GLuint);
+    const auto getStringi = reinterpret_cast<GetStringiFn>(SDL_GL_GetProcAddress("glGetStringi"));
+    if (getStringi) {
+        GLint count = 0;
+        glGetIntegerv(GL_NUM_EXTENSIONS, &count);
+        for (GLint i = 0; i < count; ++i) {
+            const char* ext = reinterpret_cast<const char*>(getStringi(GL_EXTENSIONS, GLuint(i)));
+            if (ext && strcmp(ext, name) == 0) return true;
+        }
+        return false;
+    }
+#endif
     const char* all = reinterpret_cast<const char*>(glGetString(GL_EXTENSIONS));
     if (!all) return false;
     const char* found = strstr(all, name);

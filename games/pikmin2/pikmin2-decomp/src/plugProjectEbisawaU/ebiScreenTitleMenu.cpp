@@ -5,6 +5,11 @@
 #include "PSSystem/PSSystemIF.h"
 #include "SoundID.h"
 #include "Dolphin/rand.h"
+#if PIKI_PC_TOUCH
+extern "C" void pc_touch_claim_game_menu(void);
+extern "C" bool pc_touch_take_game_menu_tap(float* x, float* y);
+extern "C" bool pc_touch_pane_hit(const void* pane, float nx, float ny, float margin);
+#endif
 
 static const char name[] = "ebiScreenTitleMenu";
 
@@ -36,6 +41,10 @@ const char kPcSpeedrunWord[] = "speedrun";
 const f32 kPcSpeedrunAdvance[] = { 28.0f, 27.0f, 26.0f, 27.0f, 28.0f, 28.0f, 29.0f };
 const char kPcCoopWord[]    = "coop";
 const f32 kPcCoopAdvance[]  = { 27.0f, 27.0f, 27.0f };
+// "randomizer"; si a un idioma le falta alguna letra (la z), "random".
+const char kPcRandomizerWord[]     = "randomizer";
+const f32 kPcRandomizerAdvance[]   = { 26.0f, 27.0f, 27.0f, 27.0f, 27.0f, 30.0f, 22.0f, 26.0f, 26.0f };
+const char kPcRandomizerShortWord[] = "random";
 // Fila siguiente a Extras (Nomake está a 100; las filas van cada ~36), antes
 // de que Coop baje un hueco las de debajo de Story.
 const f32 kPcSpeedrunRowY = 136.0f;
@@ -314,6 +323,12 @@ void TTitleMenu::pcLayoutRows(JKRArchive* arc)
 		sp->setOffset(sp->mTranslateX, kPcSpeedrunRowY);
 		lastY = kPcSpeedrunRowY;
 	}
+	if (mPcHasRandomizer) {
+		// Debajo de Speedrun (con Coop baja un hueco como las demás).
+		J2DPane* rn = mCategoryPanes[PC_TITLE_RANDOMIZER];
+		rn->setOffset(rn->mTranslateX, lastY + rowStep);
+		lastY += rowStep;
+	}
 	if (mPcHasCoop) {
 		for (int i = 1; i < menuNum(); i++) {
 			if (i == PC_TITLE_COOP) {
@@ -426,6 +441,16 @@ void TTitleMenu::doSetArchive(JKRArchive* arc)
 	          && pcAddWordEntry(arc, PC_TITLE_COOP, kPcCoopWord, kPcCoopAdvance, "co", "Ncoop", &panelist1[PC_TITLE_COOP],
 	                            &panelist2[PC_TITLE_COOP])
 	                 != nullptr;
+	if (mPcHasCoop) {
+		mPcHasRandomizer = pcAddWordEntry(arc, PC_TITLE_RANDOMIZER, kPcRandomizerWord, kPcRandomizerAdvance, "rn", "Nrandom",
+		                                  &panelist1[PC_TITLE_RANDOMIZER], &panelist2[PC_TITLE_RANDOMIZER])
+		                   != nullptr;
+		if (!mPcHasRandomizer) {
+			mPcHasRandomizer = pcAddWordEntry(arc, PC_TITLE_RANDOMIZER, kPcRandomizerShortWord, kPcRandomizerAdvance, "rn",
+			                                  "Nrandom", &panelist1[PC_TITLE_RANDOMIZER], &panelist2[PC_TITLE_RANDOMIZER])
+			                   != nullptr;
+		}
+	}
 	if (mPcHasSpeedrun) {
 		pcLayoutRows(arc);
 	}
@@ -731,7 +756,39 @@ bool TTitleMenu::doUpdateStateWait()
 		mAnims1[mState][mSelectID].play(sys->mDeltaTime * 60.0f, J3DAA_UNKNOWN_0, true);
 	}
 
+#if PIKI_PC_TOUCH
+	// Táctil: tocar una opción la elige; tocar la elegida entra (como A).
+	pc_touch_claim_game_menu();
+	bool pcTouchDecide = false;
+	float pcTapX = 0.0f, pcTapY = 0.0f;
+	const bool pcTapped = pc_touch_take_game_menu_tap(&pcTapX, &pcTapY);
+	for (int i = 0; i < menuNum(); i++) {
+		J2DPane* row = mCategoryPanes[i];
+		if (!row || (mState == 0 && i == 2) || (Game::gGameConfig.mParms.mE3version.mData && i != 1 && i != 2)) continue;
+		if (!pc_touch_pane_hit(row, pcTapX, pcTapY, 0.01f) || !pcTapped) continue;
+		if (i == mSelectID) {
+			pcTouchDecide = true;
+		} else {
+			const int prev = mSelectID;
+			mSelectID      = i;
+			if (mPad.mSelIndex == &mPcVisPos) mPcVisPos = pcIdxToVis(i);
+			mAnims1[mState][mSelectID].play(sys->mDeltaTime * 60.0f, J3DAA_UNKNOWN_0, true);
+			showPika_(mSelectID);
+			mObjIcon[mSelectID].start();
+			mObjIcon2[mSelectID].start();
+			mObjIcon[prev].stop();
+			mObjIcon2[prev].stop();
+			PSSystem::spSysIF->playSystemSe(PSSE_SY_MENU_CURSOR, 0);
+			u32 count            = 30.0f / sys->mDeltaTime;
+			mMenuCloseCounter    = count;
+			mMenuCloseCounterMax = count;
+		}
+		break;
+	}
+	if (pcTouchDecide || mController->getButtonDown() & Controller::PRESS_A || mController->getButtonDown() & Controller::PRESS_START) {
+#else
 	if (mController->getButtonDown() & Controller::PRESS_A || mController->getButtonDown() & Controller::PRESS_START) {
+#endif
 		mDecidedMenuOption = true;
 		PSSystem::spSysIF->playSystemSe(PSSE_SY_MENU_DECIDE, 0);
 		return true;

@@ -163,7 +163,8 @@ add_compile_definitions(
 if(WIN32)
     include_directories(BEFORE ${ADAPTER_DIR}/win32)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/SDL2-mingw64/include")
-        include_directories("${CMAKE_CURRENT_SOURCE_DIR}/third_party/SDL2-mingw64/include")
+        include_directories("${CMAKE_CURRENT_SOURCE_DIR}/third_party/SDL2-mingw64/include"
+                            "${CMAKE_CURRENT_SOURCE_DIR}/third_party/SDL2-mingw64/include/SDL2")
     endif()
 endif()
 include_directories(
@@ -312,10 +313,19 @@ if(PIKMIN2_ENABLE_PORT_LAYER)
         ${PC_PORT_DIR}/settings/pc_p2_glass_assets.cpp
         ${PC_PORT_DIR}/pc_achievements.cpp
         ${PC_PORT_DIR}/pc_p2_cheats.cpp
+        ${PC_PORT_DIR}/pc_record.cpp
         ${PC_PORT_DIR}/pc_p2_rules.cpp
         ${PC_PORT_DIR}/pc_p2_coop.cpp
         ${PC_PORT_DIR}/pc_p2_captains.cpp
         ${PC_PORT_DIR}/pc_speedrun.cpp
+        ${PC_PORT_DIR}/randomizer/pc_randomizer.cpp
+        ${PC_PORT_DIR}/randomizer/pc_randomizer_catalog.cpp
+        ${PC_PORT_DIR}/randomizer/pc_randomizer_audit.cpp
+        ${PC_PORT_DIR}/randomizer/pc_randomizer_apply.cpp
+        ${PC_PORT_DIR}/randomizer/pc_randomizer_cave.cpp
+        ${PC_PORT_DIR}/randomizer/pc_randomizer_debug.cpp
+        ${PC_PORT_DIR}/randomizer/pc_randomizer_enemies.cpp
+        ${PC_PORT_DIR}/randomizer/pc_randomizer_logic.cpp
         ${PC_PORT_DIR}/pc_livesplit.cpp
         ${PC_PORT_DIR}/dolphin_stubs/p2_gx_stubs.cpp
         ${PC_PORT_DIR}/dolphin_stubs/p2_os_host.cpp
@@ -382,6 +392,10 @@ if(PIKMIN2_ENABLE_PORT_LAYER)
     if(PIKMIN_STATIC_RUNTIME AND NOT ANDROID)
         if(TARGET SDL2::SDL2-static)
             set(P2_SDL_LIBS SDL2::SDL2-static)
+        elseif(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/SDL2-mingw64/lib/libSDL2.a")
+            # Sin config de CMake usable: la biblioteca estática y lo que pide.
+            set(P2_SDL_LIBS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/SDL2-mingw64/lib/libSDL2.a"
+                m dinput8 dxguid dxerr8 user32 gdi32 winmm imm32 ole32 oleaut32 shell32 setupapi version uuid)
         endif()
         if(WIN32)
             add_link_options(-static)
@@ -477,6 +491,14 @@ if(PIKMIN2_ENABLE_PORT_LAYER)
             set(P2_HOST_TEST_TARGETS ${P2_HOST_TEST_TARGETS} ${target} PARENT_SCOPE)
         endfunction()
 
+        pikmin2_add_host_test(p2_randomizer_test
+            ${PC_PORT_DIR}/randomizer/pc_randomizer_test.cpp
+            ${PC_PORT_DIR}/randomizer/pc_randomizer.cpp
+            ${PC_PORT_DIR}/randomizer/pc_randomizer_catalog.cpp
+            ${PC_PORT_DIR}/randomizer/pc_randomizer_enemies.cpp
+            ${PC_PORT_DIR}/randomizer/pc_randomizer_logic.cpp
+            ${PC_PORT_DIR}/randomizer/pc_randomizer_cave.cpp
+        )
         pikmin2_add_host_test(p2_aram_test
             ${PC_PORT_DIR}/audio/pc_aram_test.cpp
             ${PC_PORT_DIR}/audio/pc_aram.cpp
