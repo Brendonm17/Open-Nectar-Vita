@@ -20,6 +20,8 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
+# libs/ y tools/ viven en la raíz del monorepo, que es lo que se monta en /src.
+monorepo_root="$(cd -- "${repo_root}/../.." && pwd)"
 build_dir="${repo_root}/build-linux-release"
 out_dir="${script_dir}/out"
 package_dir="${out_dir}/nectar-linux"
@@ -44,8 +46,8 @@ printf '[1/4] Imagen de compilación (Ubuntu 20.04)...\n'
 podman build -q -t "${image}" -f "${script_dir}/Containerfile" "${script_dir}" >/dev/null
 
 printf '[2/4] Compilando Open Nectar %s en el contenedor...\n' "${version}"
-podman run --rm --userns=keep-id -v "${repo_root}":/src -e OPEN_NECTAR_VERSION="${version}" \
-    "${image}" bash /src/packaging/linux/container-build.sh
+podman run --rm --userns=keep-id -v "${monorepo_root}":/src -e OPEN_NECTAR_VERSION="${version}" \
+    "${image}" bash /src/games/pikmin1/packaging/linux/container-build.sh
 
 usa="${build_dir}/usa/bin/nectar"
 pal="${build_dir}/pal/bin/nectar"
