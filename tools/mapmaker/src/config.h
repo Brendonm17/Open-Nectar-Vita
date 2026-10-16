@@ -17,6 +17,12 @@ struct Config {
 	bool tutorialDone = false;
 	std::string language = "en"; ///< "en" o "es"
 	float snapStep = 25.0f, snapAngle = 15.0f;
+	// Disposición del editor. Se guardan en píxeles lógicos de ImGui para que
+	// el usuario conserve el espacio dedicado a herramientas y propiedades.
+	float toolboxWidth = 312.0f, sidePanelWidth = 352.0f;
+	bool showToolbox = true, showSidePanel = true;
+	bool ignoreDecorSelection = false;
+	bool localGizmo = false;
 
 	std::string dataDir() const { return assetsDir + "/dataDir"; }
 	/// La carpeta del juego: donde están assets/ y user/ (el juego se abre ahí).

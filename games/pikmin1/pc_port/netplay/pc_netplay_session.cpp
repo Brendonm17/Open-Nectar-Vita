@@ -654,6 +654,8 @@ void compute_local_hello()
 			pc_vs_arena_gate(player, pos, face);
 			put(&pos, sizeof(pos));
 			put(&face, sizeof(face));
+			const PcVsReaction gateReaction = pc_vs_arena_gate_reaction(player);
+			put(&gateReaction, sizeof(gateReaction));
 			pc_vs_arena_bomb_pile(player, pos);
 			put(&pos, sizeof(pos));
 			for (int color = 0; color < 3; ++color) {
@@ -668,7 +670,7 @@ void compute_local_hello()
 		put(pellets, sizeof(pellets[0]) * (size_t)pc_vs_arena_pellet_spots(pellets, 16));
 		PcVsPieceSpot pieces[16];
 		put(pieces, sizeof(pieces[0]) * (size_t)pc_vs_arena_piece_spots(pieces, 16));
-		Vector3f guards[4];
+		PcVsGuardSpot guards[4];
 		put(guards, sizeof(guards[0]) * (size_t)pc_vs_arena_guard_spots(guards, 4));
 		PcVsEnemySpot enemies[48];
 		put(enemies, sizeof(enemies[0]) * (size_t)pc_vs_arena_enemy_spots(enemies, 48));

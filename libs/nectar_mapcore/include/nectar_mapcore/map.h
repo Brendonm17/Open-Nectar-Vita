@@ -18,6 +18,16 @@ namespace nectar {
 
 // ── Documento (map.json) ───────────────────────────────────────────────────
 
+/// Reacción opcional de un elemento interactuable. El disparador se deduce
+/// del dueño: derrota para enemigos, destrucción para puertas y finalización
+/// para puentes, rampas y bloques.
+struct DocReaction {
+	std::string action; ///< "enemy", "pellet", "bomb" o "nectar"; vacío = ninguna
+	std::string value;  ///< tipo de enemigo o id de pellet, según action
+	int count     = 1;
+	double radius = 60; ///< separación alrededor del elemento al generar varios
+};
+
 struct DocWall {
 	bool isArc = false;
 	double ax = 0, az = 0, bx = 0, bz = 0; ///< tramo recto
@@ -34,6 +44,7 @@ struct DocSpot {
 	int player  = 0;
 	double x = 0, z = 0;
 	double face = 0; ///< grados
+	DocReaction reaction;
 };
 
 struct DocOnion {
@@ -57,6 +68,7 @@ struct DocPiece {
 struct DocEnemy {
 	std::string type = "swallow";
 	double x = 0, z = 0, face = 0;
+	DocReaction reaction;
 };
 
 /// Construcción que funciona como en el juego (objectKinds()): puentes y
@@ -67,11 +79,13 @@ struct DocObject {
 	double y    = 0;   ///< altura sobre el suelo (puentes entre mesetas…)
 	double push = 300; ///< roca: cuánto se desplaza al empujarla (hacia donde mira)
 	int work     = 2;   ///< puente: trabajo por tramo (1 poco, 2 normal, 4 mucho)
+	DocReaction reaction;
 };
 
 struct DocGuard {
 	std::string enemy = "chappy";
 	double x = 0, z = 0;
+	DocReaction reaction;
 };
 
 /// Malla estática de un .mod del juego metida en el mapa.
@@ -177,11 +191,20 @@ void resizeTerrain(MapDoc& doc, int left, int right, int top, int bottom);
 struct MapWall {
 	float ax, az, bx, bz, thickness, height;
 };
+enum MapReactionKind { MAPREACT_None, MAPREACT_Enemy, MAPREACT_Pellet, MAPREACT_Bomb, MAPREACT_Nectar };
+struct MapReaction {
+	int kind = MAPREACT_None;
+	std::uint32_t pellet = 0;
+	int teki = -1, boss = -1;
+	int count = 1;
+	float radius = 60.0f;
+};
 struct MapPond {
 	float cx, cz, rx, rz, island, depth, surface;
 };
 struct MapSpot {
 	float x, z, face; ///< face en radianes
+	MapReaction reaction;
 };
 struct MapPellet {
 	float x, z;
@@ -196,6 +219,7 @@ struct MapEnemy {
 	float x, z, face;
 	int teki; ///< tipo de enemigo del juego, o -1
 	int boss; ///< tipo de jefe (GENBOSS_*), o -1
+	MapReaction reaction;
 };
 enum MapObjectKind { MAPOBJ_Bridge, MAPOBJ_BridgeLong, MAPOBJ_SlopeUp, MAPOBJ_SlopeDown, MAPOBJ_PushRock, MAPOBJ_GateSoft, MAPOBJ_GateHard, MAPOBJ_GateBomb,
                      MAPOBJ_Key, MAPOBJ_KeyDoor, MAPOBJ_Nectar };
@@ -204,6 +228,7 @@ struct MapObject {
 	float x, z, face, push;
 	int work;
 	float y = 0.0f; ///< sobre el suelo
+	MapReaction reaction;
 };
 struct MapMaterial {
 	std::string source;

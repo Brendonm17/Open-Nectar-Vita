@@ -1017,6 +1017,20 @@ struct PcVsNectar {
 static PcVsNectar sVsNectar[16];
 static int sVsNectarCount = 0;
 
+enum PcVsReactionTrigger { VS_TRIGGER_Defeated, VS_TRIGGER_Building, VS_TRIGGER_Work, VS_TRIGGER_Hidden, VS_TRIGGER_Door };
+struct PcVsReactionWatch {
+	Creature* source;
+	PcVsReaction reaction;
+	PcVsReactionTrigger trigger;
+	bool fired;
+};
+static std::vector<PcVsReactionWatch> sVsReactions;
+
+static void pcVsWatch(Creature* source, const PcVsReaction& reaction, PcVsReactionTrigger trigger)
+{
+	if (source && reaction.kind != PC_VS_REACT_NONE) sVsReactions.push_back({ source, reaction, trigger, false });
+}
+
 static void pcVsChoosePieces()
 {
 	for (u32& id : sVsPieceIds) id = 0;
@@ -1054,6 +1068,21 @@ static void pcVsChoosePieces()
 	}
 }
 
+static void pcVsPreloadReaction(const PcVsReaction& reaction)
+{
+	if (reaction.kind == PC_VS_REACT_PELLET && reaction.pelletId) pelletMgr->addUseList(reaction.pelletId);
+	if (reaction.kind != PC_VS_REACT_ENEMY) return;
+	if (reaction.teki >= 0) tekiMgr->mUsingType[reaction.teki] = true;
+	if (reaction.boss >= 0) {
+		GenObjectBoss gen;
+		gen.mBossID = reaction.boss;
+		// Casi todos los jefes ignoran el parámetro `count` y reservan una
+		// instancia por llamada. Repetirlo garantiza que una reacción de 2–8
+		// jefes tenga nodos suficientes en BossMgr.
+		for (int i = 0; i < reaction.count; i++) gen.updateUseList(nullptr, 1);
+	}
+}
+
 static Pellet* pcVsSpawnPellet(MapMgr* map, u32 id, f32 x, f32 z)
 {
 	if (!id) return nullptr;
@@ -1066,9 +1095,77 @@ static Pellet* pcVsSpawnPellet(MapMgr* map, u32 id, f32 x, f32 z)
 	return pellet;
 }
 
+static Creature* pcVsSpawnEnemy(MapMgr* map, int tekiType, int bossType, f32 x, f32 z, f32 face)
+{
+	Vector3f pos(x, map->getMinY(x, z, true), z);
+	if (bossType >= 0) {
+		GenObjectBoss gen;
+		gen.mBossID          = bossType;
+		gen.mItemCount       = 0;
+		gen.mPelletConfigIdx = -1;
+		BirthInfo info;
+		info.set(pos, Vector3f(0.0f, face, 0.0f), Vector3f(1.0f, 1.0f, 1.0f), nullptr);
+		return bossMgr->create(bossType, info, &gen);
+	}
+	Teki* teki = tekiMgr->newTeki(tekiType);
+	if (!teki) return nullptr;
+	TekiPersonality pers;
+	pers.mPosition      = pos;
+	pers.mNestPosition  = pos;
+	pers.mFaceDirection = face;
+	pers.setF(TekiPersonality::FLT_TerritoryRange, 250.0f);
+	teki->mPersonality->input(pers);
+	teki->reset();
+	teki->startAI(0);
+	teki->mSRT.r.set(0.0f, face, 0.0f);
+	return teki;
+}
+
+static void pcVsRunReaction(MapMgr* map, const PcVsReactionWatch& watch)
+{
+	const Vector3f center = watch.source->mSRT.t;
+	for (int i = 0; i < watch.reaction.count; i++) {
+		const f32 angle = watch.reaction.count > 1 ? f32(i) * 6.2831853f / f32(watch.reaction.count) : 0.0f;
+		const f32 distance = watch.reaction.count > 1 ? watch.reaction.radius : 0.0f;
+		const f32 x = center.x + cosf(angle) * distance, z = center.z + sinf(angle) * distance;
+		if (watch.reaction.kind == PC_VS_REACT_ENEMY)
+			pcVsSpawnEnemy(map, watch.reaction.teki, watch.reaction.boss, x, z, angle);
+		else if (watch.reaction.kind == PC_VS_REACT_PELLET)
+			pcVsSpawnPellet(map, watch.reaction.pelletId, x, z);
+		else if (watch.reaction.kind == PC_VS_REACT_BOMB) {
+			if (BombItem* bomb = static_cast<BombItem*>(itemMgr->birth(OBJTYPE_Bomb))) {
+				Vector3f pos(x, map->getMinY(x, z, true), z);
+				bomb->init(pos);
+				bomb->startAI(0);
+			}
+		} else if (watch.reaction.kind == PC_VS_REACT_NECTAR) {
+			if (Creature* drop = itemMgr->birth(OBJTYPE_FallWater)) {
+				Vector3f pos(x, map->getMinY(x, z, true) + 120.0f, z);
+				drop->init(pos);
+				drop->startAI(0);
+			}
+		}
+	}
+}
+
 // Reloj y eventos, cada fotograma de juego.
 static void pcVsUpdate(MapMgr* map)
 {
+	for (PcVsReactionWatch& watch : sVsReactions) {
+		if (watch.fired || !watch.source) continue;
+		bool fire = false;
+		switch (watch.trigger) {
+		case VS_TRIGGER_Defeated: fire = !watch.source->isAlive(); break;
+		case VS_TRIGGER_Building: fire = static_cast<BuildingItem*>(watch.source)->isCompleted(); break;
+		case VS_TRIGGER_Work: fire = static_cast<WorkObject*>(watch.source)->isFinished(); break;
+		case VS_TRIGGER_Hidden: fire = !watch.source->isVisible(); break;
+		case VS_TRIGGER_Door: fire = static_cast<DoorItem*>(watch.source)->mStateId == DoorState::Vanishing
+		                                  || static_cast<DoorItem*>(watch.source)->mStateId == DoorState::Killed; break;
+		}
+		if (!fire) continue;
+		watch.fired = true;
+		pcVsRunReaction(map, watch);
+	}
 	// Test evidence (PIKMIN_NETPLAY_DEBUG_VS=1, deterministic mode): where each
 	// VS piece is and how many Pikmin carry it, every 150 ticks.
 	static const bool kPieceTrace = getenv("PIKMIN_NETPLAY_DEBUG_VS") != nullptr;
@@ -1267,6 +1364,8 @@ static u64 pcVsHashMode()
 		mixF(sEmptyFor[p]);
 		mixF(sReinforceCd[p]);
 	}
+	mix(u32(sVsReactions.size()));
+	for (const PcVsReactionWatch& reaction : sVsReactions) mix(reaction.fired ? 1u : 0u);
 	if (!naviMgr) return h; // no live stage (see pc_state_hash.h)
 	if (pikiMgr) {
 		Iterator it(pikiMgr);
@@ -1294,6 +1393,7 @@ static u64 pcVsHashMode()
 /// color) en su grupo, y aparecen las pastillas de prueba del mapa.
 static void pcVsSetupBases(MapMgr* map)
 {
+	sVsReactions.clear();
 	// Cuenta atrás 3, 2, 1, START con el mundo en pausa (la lleva el HUD).
 	pc_vs_countdown_arm();
 	if (pc_vs_missing_pieces()) pc_vs_announce("NO SHIP PARTS FOUND - CHECK GAME FILES", 60.0f);
@@ -1393,6 +1493,7 @@ static void pcVsSetupBases(MapMgr* map)
 			// startAI no cierra el paso (solo lo hace al restaurar una partida):
 			// cerrada, los caminos rodean por las salidas hasta que se rompa.
 			if (gate->mWayPoint) gate->mWayPoint->setFlag(false);
+			pcVsWatch(gate, pc_vs_arena_gate_reaction(player), VS_TRIGGER_Building);
 		}
 		pc_vs_arena_bomb_pile(player, pos);
 		pos.y = map->getMinY(pos.x, pos.z, true);
@@ -1405,14 +1506,13 @@ static void pcVsSetupBases(MapMgr* map)
 	}
 
 	// Bulborbs grandes durmiendo junto a las medianas custodiadas.
-	Vector3f guards[4];
+	PcVsGuardSpot guards[4];
 	const int ng = pc_vs_arena_guard_spots(guards, 4);
 	for (int i = 0; i < ng; i++) {
 		Teki* teki = tekiMgr->newTeki(TEKI_Swallow);
 		if (!teki) continue;
 		TekiPersonality pers;
-		pers.mPosition = guards[i];
-		pers.mPosition.y = map->getMinY(guards[i].x, guards[i].z, true);
+		pers.mPosition.set(guards[i].x, map->getMinY(guards[i].x, guards[i].z, true), guards[i].z);
 		pers.mNestPosition  = pers.mPosition;
 		pers.mFaceDirection = i == 0 ? 1.5707963f : -1.5707963f;
 		pers.setF(TekiPersonality::FLT_TerritoryRange, 250.0f);
@@ -1420,35 +1520,15 @@ static void pcVsSetupBases(MapMgr* map)
 		teki->reset();
 		teki->startAI(0);
 		teki->mSRT.r.set(0.0f, pers.mFaceDirection, 0.0f);
+		pcVsWatch(teki, guards[i].reaction, VS_TRIGGER_Defeated);
 	}
 
 	// Enemigos y jefes puestos en el editor.
 	PcVsEnemySpot enemies[48];
 	const int ne = pc_vs_arena_enemy_spots(enemies, 48);
 	for (int i = 0; i < ne; i++) {
-		Vector3f pos(enemies[i].x, 0.0f, enemies[i].z);
-		pos.y = map->getMinY(pos.x, pos.z, true);
-		if (enemies[i].boss >= 0) {
-			GenObjectBoss gen; // sin generador de verdad: no suelta nada
-			gen.mBossID          = enemies[i].boss;
-			gen.mItemCount       = 0;
-			gen.mPelletConfigIdx = -1;
-			BirthInfo info;
-			info.set(pos, Vector3f(0.0f, enemies[i].face, 0.0f), Vector3f(1.0f, 1.0f, 1.0f), nullptr);
-			bossMgr->create(enemies[i].boss, info, &gen);
-			continue;
-		}
-		Teki* teki = tekiMgr->newTeki(enemies[i].teki);
-		if (!teki) continue;
-		TekiPersonality pers;
-		pers.mPosition      = pos;
-		pers.mNestPosition  = pos;
-		pers.mFaceDirection = enemies[i].face;
-		pers.setF(TekiPersonality::FLT_TerritoryRange, 250.0f);
-		teki->mPersonality->input(pers);
-		teki->reset();
-		teki->startAI(0);
-		teki->mSRT.r.set(0.0f, enemies[i].face, 0.0f);
+		Creature* enemy = pcVsSpawnEnemy(map, enemies[i].teki, enemies[i].boss, enemies[i].x, enemies[i].z, enemies[i].face);
+		pcVsWatch(enemy, enemies[i].reaction, VS_TRIGGER_Defeated);
 	}
 
 	// Construcciones: puentes y rampas que construyen los Pikmin, bloques que
@@ -1477,6 +1557,7 @@ static void pcVsSetupBases(MapMgr* map)
 			// Sin vida, la colisión las ignora (isAlive mira mHealth > 0).
 			obj->mHealth = obj->mMaxHealth = 1.0f;
 			obj->startAI(0);
+			pcVsWatch(obj, o.reaction, o.kind == PC_VS_OBJ_KEY ? VS_TRIGGER_Hidden : VS_TRIGGER_Door);
 			continue;
 		}
 		if (o.kind >= PC_VS_OBJ_GATE_SOFT) {
@@ -1488,6 +1569,7 @@ static void pcVsSetupBases(MapMgr* map)
 				gate->mSRT.r.set(0.0f, o.face, 0.0f);
 				gate->startAI(0);
 				if (gate->mWayPoint) gate->mWayPoint->setFlag(false);
+				pcVsWatch(gate, o.reaction, VS_TRIGGER_Building);
 			}
 			continue;
 		}
@@ -1509,6 +1591,7 @@ static void pcVsSetupBases(MapMgr* map)
 		obj->mHealth    = f32(o.work);
 		obj->mMaxHealth = obj->mHealth;
 		obj->startAI(0);
+		pcVsWatch(obj, o.reaction, VS_TRIGGER_Work);
 	}
 }
 #endif
@@ -1798,7 +1881,12 @@ void GameCoreSection::initStage()
 				gen.mBossID = enemies[i].boss;
 				gen.updateUseList(nullptr, 1);
 			}
+			pcVsPreloadReaction(enemies[i].reaction);
 		}
+		PcVsGuardSpot guards[4];
+		const int ng = pc_vs_arena_guard_spots(guards, 4);
+		for (int i = 0; i < ng; i++) pcVsPreloadReaction(guards[i].reaction);
+		for (int player = 0; player < 2; player++) pcVsPreloadReaction(pc_vs_arena_gate_reaction(player));
 		PcVsObjectSpot objects[32];
 		const int no = pc_vs_arena_object_spots(objects, 32);
 		for (int i = 0; i < no; i++) {
@@ -1806,6 +1894,7 @@ void GameCoreSection::initStage()
 			if (objects[i].kind <= PC_VS_OBJ_PUSH_ROCK) workObjectMgr->addUseList(kShape[objects[i].kind]);
 			else if (objects[i].kind == PC_VS_OBJ_GATE_SOFT) itemMgr->addUseList(OBJTYPE_SluiceSoft);
 			else if (objects[i].kind == PC_VS_OBJ_GATE_HARD) itemMgr->addUseList(OBJTYPE_SluiceHard);
+			pcVsPreloadReaction(objects[i].reaction);
 		}
 	}
 #endif

@@ -32,6 +32,29 @@ void pos2(const json& j, double& x, double& z)
 	z             = p.at(1).get<double>();
 }
 
+DocReaction parseReaction(const json& owner)
+{
+	DocReaction out;
+	if (!owner.contains("reaction")) return out;
+	const json& j = owner.at("reaction");
+	out.action = j.value("action", std::string());
+	out.value  = j.value("value", std::string());
+	out.count  = j.value("count", 1);
+	out.radius = j.value("radius", 60.0);
+	if (out.action != "enemy" && out.action != "pellet" && out.action != "bomb" && out.action != "nectar")
+		throw std::runtime_error(tr("reacción desconocida: ") + out.action);
+	if (out.count < 1 || out.count > 8) throw std::runtime_error(tr("reacción: la cantidad debe estar entre 1 y 8"));
+	if (out.radius < 0.0 || out.radius > 1000.0) throw std::runtime_error(tr("reacción: el radio debe estar entre 0 y 1000"));
+	return out;
+}
+
+json reactionJson(const DocReaction& r)
+{
+	json j = { { "action", r.action }, { "count", r.count }, { "radius", r.radius } };
+	if (!r.value.empty()) j["value"] = r.value;
+	return j;
+}
+
 int playerOf(const json& j)
 {
 	const int p = j.at("player").get<int>();
@@ -39,7 +62,7 @@ int playerOf(const json& j)
 	return p;
 }
 
-void perPlayer(const json& list, DocSpot out[2], const char* what)
+void perPlayer(const json& list, DocSpot out[2], const char* what, bool allowReaction = false)
 {
 	bool seen[2] = { false, false };
 	for (const json& j : list) {
@@ -48,6 +71,9 @@ void perPlayer(const json& list, DocSpot out[2], const char* what)
 		s.player = p;
 		pos2(j, s.x, s.z);
 		s.face  = j.value("face", 0.0);
+		if (j.contains("reaction") && !allowReaction)
+			throw std::runtime_error(std::string("vs.") + what + tr(": este elemento no admite reacciones"));
+		s.reaction = allowReaction ? parseReaction(j) : DocReaction {};
 		out[p]  = s;
 		seen[p] = true;
 	}
@@ -84,6 +110,31 @@ std::uint32_t pelletId(const std::string& s)
 	if (!ok) throw std::runtime_error(tr("pastilla desconocida: \"") + s + tr("\" (pr01, pb05, py10...)"));
 	return (std::uint32_t(std::uint8_t(s[0])) << 24) | (std::uint32_t(std::uint8_t(s[1])) << 16) | (std::uint32_t(std::uint8_t(s[2])) << 8)
 	     | std::uint8_t(s[3]);
+}
+
+MapReaction expandReaction(const DocReaction& r)
+{
+	MapReaction out;
+	if (r.action.empty()) return out;
+	out.count  = std::max(1, std::min(8, r.count));
+	out.radius = float(std::max(0.0, std::min(1000.0, r.radius)));
+	if (r.action == "pellet") {
+		out.kind   = MAPREACT_Pellet;
+		out.pellet = pelletId(r.value.empty() ? "pr01" : r.value);
+	} else if (r.action == "enemy") {
+		out.kind = MAPREACT_Enemy;
+		for (const EnemyInfo& e : enemyTypes()) {
+			if (r.value == e.id) {
+				out.teki = e.teki;
+				out.boss = e.boss;
+			}
+		}
+		if (out.teki < 0 && out.boss < 0) throw std::runtime_error(tr("reacción: enemigo desconocido: ") + r.value);
+	} else if (r.action == "bomb")
+		out.kind = MAPREACT_Bomb;
+	else if (r.action == "nectar")
+		out.kind = MAPREACT_Nectar;
+	return out;
 }
 
 // ── Base64 (alturas y celdas del terreno, para que el JSON no se dispare) ──
@@ -308,7 +359,7 @@ void parseDoc(const json& root, MapDoc& m)
 	const json& vs = root.at("vs");
 	perPlayer(vs.at("bases"), m.bases, "bases");
 	perPlayer(vs.at("rockets"), m.rockets, "rockets");
-	perPlayer(vs.at("gates"), m.gates, "gates");
+	perPlayer(vs.at("gates"), m.gates, "gates", true);
 	perPlayer(vs.at("bombPiles"), m.bombPiles, "bombPiles");
 	bool onion[2][3] = {};
 	for (const json& j : vs.at("onions")) {
@@ -342,6 +393,7 @@ void parseDoc(const json& root, MapDoc& m)
 		DocGuard d;
 		d.enemy = j.value("enemy", "chappy");
 		pos2(j, d.x, d.z);
+		d.reaction = parseReaction(j);
 		m.guards.push_back(d);
 	}
 	for (const json& j : vs.value("enemies", json::array())) {
@@ -349,6 +401,7 @@ void parseDoc(const json& root, MapDoc& m)
 		e.type = j.at("type").get<std::string>();
 		pos2(j, e.x, e.z);
 		e.face = j.value("face", 0.0);
+		e.reaction = parseReaction(j);
 		m.enemies.push_back(e);
 	}
 	for (const json& j : vs.value("objects", json::array())) {
@@ -359,6 +412,9 @@ void parseDoc(const json& root, MapDoc& m)
 		o.push = j.value("push", 300.0);
 		o.work = j.value("work", 2);
 		o.y    = j.value("y", 0.0);
+		if (o.kind == "nectar" && j.contains("reaction"))
+			throw std::runtime_error(tr("el néctar no admite reacciones"));
+		o.reaction = parseReaction(j);
 		m.objects.push_back(o);
 	}
 }
@@ -394,6 +450,19 @@ void check(const MapData& m)
 	for (const MapEnemy& s : m.enemies) inside(s.x, s.z, tr("enemigo"));
 	for (const MapObject& s : m.objects) inside(s.x, s.z, tr("construcción"));
 	if (m.enemies.size() + m.guards.size() > 40) throw std::runtime_error(tr("demasiados enemigos (máximo 40, contando los del otro lado)"));
+	int possibleTekis = int(m.guards.size()), possibleBosses = 0;
+	for (const MapEnemy& enemy : m.enemies) enemy.boss >= 0 ? ++possibleBosses : ++possibleTekis;
+	auto addReactionCapacity = [&](const MapReaction& reaction) {
+		if (reaction.kind != MAPREACT_Enemy) return;
+		if (reaction.boss >= 0) possibleBosses += reaction.count;
+		else possibleTekis += reaction.count;
+	};
+	for (int p = 0; p < 2; p++) addReactionCapacity(m.gates[p].reaction);
+	for (const MapSpot& guard : m.guards) addReactionCapacity(guard.reaction);
+	for (const MapEnemy& enemy : m.enemies) addReactionCapacity(enemy.reaction);
+	for (const MapObject& object : m.objects) addReactionCapacity(object.reaction);
+	if (possibleTekis > 80) throw std::runtime_error(tr("demasiados enemigos posibles con las reacciones (máximo 80)"));
+	if (possibleBosses > 40) throw std::runtime_error(tr("demasiados jefes posibles con las reacciones (máximo 40)"));
 	if (m.objects.size() > 24) throw std::runtime_error(tr("demasiadas construcciones (máximo 24, contando las del otro lado)"));
 	for (const MapProp& s : m.props) inside(s.x, s.z, tr("objeto"));
 	inside(m.bigPiece.x, m.bigPiece.z, tr("pieza grande"));
@@ -414,10 +483,11 @@ void check(const MapData& m)
 	}
 }
 
-json spotJson(const DocSpot& s, bool face)
+json spotJson(const DocSpot& s, bool face, bool allowReaction = false)
 {
 	json j = { { "player", s.player }, { "pos", { s.x, s.z } } };
 	if (face) j["face"] = s.face;
+	if (allowReaction && !s.reaction.action.empty()) j["reaction"] = reactionJson(s.reaction);
 	return j;
 }
 
@@ -540,15 +610,15 @@ bool expandMap(const MapDoc& d, MapData& m, std::string& error, bool validate)
 		m.routeStep   = float(d.routeStep);
 		m.routeMargin = float(d.routeMargin);
 		for (double x : d.barrierX) m.barrierX.push_back(float(x));
-		for (const auto& p : d.passes) m.passes.push_back({ float(p.first), float(p.second), 0.0f });
+		for (const auto& p : d.passes) m.passes.push_back({ float(p.first), float(p.second), 0.0f, MapReaction {} });
 
-		auto spot = [](const DocSpot& s) { return MapSpot { float(s.x), float(s.z), deg(float(s.face)) }; };
+		auto spot = [](const DocSpot& s) { return MapSpot { float(s.x), float(s.z), deg(float(s.face)), expandReaction(s.reaction) }; };
 		for (int p = 0; p < 2; p++) {
 			m.bases[p]     = spot(d.bases[p]);
 			m.rockets[p]   = spot(d.rockets[p]);
 			m.gates[p]     = spot(d.gates[p]);
 			m.bombPiles[p] = spot(d.bombPiles[p]);
-			for (int c = 0; c < 3; c++) m.onions[p][c] = { float(d.onions[p][c].x), float(d.onions[p][c].z), deg(0.0f) };
+			for (int c = 0; c < 3; c++) m.onions[p][c] = { float(d.onions[p][c].x), float(d.onions[p][c].z), deg(0.0f), MapReaction {} };
 		}
 		for (const DocPellet& s : d.pellets) {
 			const MapPellet p { float(s.x), float(s.z), pelletId(s.id) };
@@ -574,9 +644,9 @@ bool expandMap(const MapDoc& d, MapData& m, std::string& error, bool validate)
 				if (e.type == t.id) info = &t;
 			}
 			if (!info) throw std::runtime_error(tr("enemigo desconocido: ") + e.type);
-			const MapEnemy me { float(e.x), float(e.z), deg(float(e.face)), info->teki, info->boss };
+			const MapEnemy me { float(e.x), float(e.z), deg(float(e.face)), info->teki, info->boss, expandReaction(e.reaction) };
 			m.enemies.push_back(me);
-			if (twin) m.enemies.push_back({ -me.x, -me.z, deg(float(e.face) + 180.0f), me.teki, me.boss });
+			if (twin) m.enemies.push_back({ -me.x, -me.z, deg(float(e.face) + 180.0f), me.teki, me.boss, me.reaction });
 		}
 		for (const DocObject& o : d.objects) {
 			int kind = -1;
@@ -584,15 +654,15 @@ bool expandMap(const MapDoc& d, MapData& m, std::string& error, bool validate)
 				if (o.kind == objectKinds()[k].id) kind = int(k);
 			}
 			if (kind < 0) throw std::runtime_error(tr("construcción desconocida: ") + o.kind);
-			const MapObject mo { kind, float(o.x), float(o.z), deg(float(o.face)), float(o.push), std::max(1, std::min(9, o.work)), float(o.y) };
+			const MapObject mo { kind, float(o.x), float(o.z), deg(float(o.face)), float(o.push), std::max(1, std::min(9, o.work)), float(o.y), expandReaction(o.reaction) };
 			m.objects.push_back(mo);
-			if (twin) m.objects.push_back({ kind, -mo.x, -mo.z, deg(float(o.face) + 180.0f), mo.push, mo.work, mo.y });
+			if (twin) m.objects.push_back({ kind, -mo.x, -mo.z, deg(float(o.face) + 180.0f), mo.push, mo.work, mo.y, mo.reaction });
 		}
-		m.bigPiece = { float(d.bigX), float(d.bigZ), deg(0.0f) };
+		m.bigPiece = { float(d.bigX), float(d.bigZ), deg(0.0f), MapReaction {} };
 		for (const DocGuard& s : d.guards) {
-			const MapSpot g { float(s.x), float(s.z), deg(0.0f) };
+			const MapSpot g { float(s.x), float(s.z), deg(0.0f), expandReaction(s.reaction) };
 			m.guards.push_back(g);
-			if (twin) m.guards.push_back({ -g.x, -g.z, g.face });
+			if (twin) m.guards.push_back({ -g.x, -g.z, g.face, g.reaction });
 		}
 		if (validate) check(m);
 		return true;
@@ -635,7 +705,7 @@ std::string writeMapDoc(const MapDoc& d)
 	for (int p = 0; p < 2; p++) {
 		bases.push_back(spotJson(d.bases[p], true));
 		rockets.push_back(spotJson(d.rockets[p], true));
-		gates.push_back(spotJson(d.gates[p], true));
+		gates.push_back(spotJson(d.gates[p], true, true));
 		bombs.push_back(spotJson(d.bombPiles[p], false));
 	}
 	for (int p = 0; p < 2; p++) {
@@ -647,10 +717,22 @@ std::string writeMapDoc(const MapDoc& d)
 	json pellets = json::array(), pieces = json::array(), guards = json::array();
 	for (const DocPellet& s : d.pellets) pellets.push_back({ { "id", s.id }, { "pos", { s.x, s.z } } });
 	for (const DocPiece& s : d.pieces) pieces.push_back({ { "kind", pieceKindName(s.kind) }, { "pos", { s.x, s.z } } });
-	for (const DocGuard& s : d.guards) guards.push_back({ { "enemy", s.enemy }, { "pos", { s.x, s.z } } });
+	for (const DocGuard& s : d.guards) {
+		json j = { { "enemy", s.enemy }, { "pos", { s.x, s.z } } };
+		if (!s.reaction.action.empty()) j["reaction"] = reactionJson(s.reaction);
+		guards.push_back(j);
+	}
 	json enemies = json::array(), objects = json::array();
-	for (const DocEnemy& e : d.enemies) enemies.push_back({ { "type", e.type }, { "pos", { e.x, e.z } }, { "face", e.face } });
-	for (const DocObject& o : d.objects) objects.push_back({ { "kind", o.kind }, { "pos", { o.x, o.z } }, { "face", o.face }, { "push", o.push }, { "work", o.work }, { "y", o.y } });
+	for (const DocEnemy& e : d.enemies) {
+		json j = { { "type", e.type }, { "pos", { e.x, e.z } }, { "face", e.face } };
+		if (!e.reaction.action.empty()) j["reaction"] = reactionJson(e.reaction);
+		enemies.push_back(j);
+	}
+	for (const DocObject& o : d.objects) {
+		json j = { { "kind", o.kind }, { "pos", { o.x, o.z } }, { "face", o.face }, { "push", o.push }, { "work", o.work }, { "y", o.y } };
+		if (!o.reaction.action.empty()) j["reaction"] = reactionJson(o.reaction);
+		objects.push_back(j);
+	}
 	for (std::size_t i = 0; i < d.pieces.size(); i++) {
 		if (!d.pieces[i].part.empty()) pieces[i]["part"] = d.pieces[i].part;
 	}
@@ -712,10 +794,10 @@ MapDoc defaultMapDoc()
 	d.walls  = { arc(-51.5, -27.3, 6), arc(-18.3, -6.0, 3), arc(6.0, 18.3, 3), arc(27.3, 51.5, 6) };
 	for (int p = 0; p < 2; p++) {
 		const double s = p == 0 ? 1.0 : -1.0;
-		d.bases[p]     = { p, s * -1260, 0, p == 0 ? 90.0 : -90.0 };
-		d.rockets[p]   = { p, s * -1480, 0, p == 0 ? 90.0 : -90.0 };
-		d.gates[p]     = { p, s * -1150, 0, 90.0 };
-		d.bombPiles[p] = { p, s * -1480, s * -650, 0 };
+		d.bases[p]     = { p, s * -1260, 0, p == 0 ? 90.0 : -90.0, DocReaction {} };
+		d.rockets[p]   = { p, s * -1480, 0, p == 0 ? 90.0 : -90.0, DocReaction {} };
+		d.gates[p]     = { p, s * -1150, 0, 90.0, DocReaction {} };
+		d.bombPiles[p] = { p, s * -1480, s * -650, 0, DocReaction {} };
 		const double onion[3][2] = { { -1480, 700 }, { -1320, 420 }, { -1320, -420 } };
 		for (int c = 0; c < 3; c++) d.onions[p][c] = { p, c, s * onion[c][0], s * onion[c][1] };
 	}

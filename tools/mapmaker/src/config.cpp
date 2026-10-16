@@ -59,6 +59,12 @@ bool Config::load()
 		language     = j.value("language", std::string("en"));
 		snapStep     = j.value("snapStep", 25.0f);
 		snapAngle    = j.value("snapAngle", 15.0f);
+		toolboxWidth = j.value("toolboxWidth", 312.0f);
+		sidePanelWidth = j.value("sidePanelWidth", 352.0f);
+		showToolbox  = j.value("showToolbox", true);
+		showSidePanel = j.value("showSidePanel", true);
+		ignoreDecorSelection = j.value("ignoreDecorSelection", false);
+		localGizmo = j.value("localGizmo", false);
 	} catch (const std::exception&) {
 		return false;
 	}
@@ -71,7 +77,10 @@ bool Config::save() const
 	fs::create_directories(directory(), ec);
 	const json j = { { "assetsDir", assetsDir }, { "gameExe", gameExe }, { "lastMap", lastMap }, { "favorites", favorites },
 		             { "recents", recents },     { "snap", snap },       { "snapStep", snapStep }, { "snapAngle", snapAngle },
-		             { "tutorialDone", tutorialDone }, { "language", language } };
+		             { "tutorialDone", tutorialDone }, { "language", language },
+		             { "toolboxWidth", toolboxWidth }, { "sidePanelWidth", sidePanelWidth },
+		             { "showToolbox", showToolbox }, { "showSidePanel", showSidePanel },
+		             { "ignoreDecorSelection", ignoreDecorSelection }, { "localGizmo", localGizmo } };
 	std::ofstream f(fs::path(directory()) / "config.json");
 	if (!f) return false;
 	f << j.dump(2);

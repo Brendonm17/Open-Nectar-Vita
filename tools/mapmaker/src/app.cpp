@@ -16,6 +16,8 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <queue>
+#include <set>
 #include <sstream>
 
 #include <SDL.h>
@@ -32,9 +34,10 @@ using nectar::MapDoc;
 namespace {
 
 constexpr double kAutosaveSeconds = 120.0;
-constexpr float kTopBarH = 58.0f, kToolboxW = 300.0f, kSideW = 340.0f;
+constexpr float kTopBarH = 72.0f, kDefaultToolboxW = 312.0f, kDefaultSideW = 352.0f;
+constexpr float kMinToolboxW = 240.0f, kMinSideW = 280.0f, kMinViewportW = 420.0f;
 
-const ImVec4 kGood(0.45f, 0.9f, 0.45f, 1), kWarn(1, 0.8f, 0.4f, 1), kBad(1, 0.45f, 0.4f, 1), kDim(0.62f, 0.66f, 0.74f, 1);
+const ImVec4 kGood(0.57f, 0.84f, 0.37f, 1), kWarn(0.96f, 0.76f, 0.28f, 1), kBad(0.96f, 0.40f, 0.30f, 1), kDim(0.62f, 0.66f, 0.50f, 1);
 
 double now() { return double(SDL_GetTicks64()) / 1000.0; }
 
@@ -77,6 +80,99 @@ std::string slug(const std::string& name)
 	return out.empty() ? "mi_mapa" : out.substr(0, 48);
 }
 
+/// Clave sencilla para búsquedas de interfaz: minúsculas y vocales españolas
+/// sin tilde, de modo que "decoracion" encuentre "Decoración".
+std::string searchKey(std::string text)
+{
+	const std::pair<const char*, const char*> folds[] = { { "á", "a" }, { "é", "e" }, { "í", "i" }, { "ó", "o" }, { "ú", "u" }, { "ü", "u" }, { "ñ", "n" },
+	                                                       { "Á", "a" }, { "É", "e" }, { "Í", "i" }, { "Ó", "o" }, { "Ú", "u" }, { "Ü", "u" }, { "Ñ", "n" } };
+	for (const auto& fold : folds) {
+		std::size_t at = 0;
+		while ((at = text.find(fold.first, at)) != std::string::npos) {
+			text.replace(at, std::strlen(fold.first), fold.second);
+			at += std::strlen(fold.second);
+		}
+	}
+	std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+	return text;
+}
+
+std::map<int, std::vector<int>> routeGraph(const nectar::Routes& routes)
+{
+	std::map<int, std::vector<int>> graph;
+	for (const nectar::RoutePoint& p : routes.points) graph[p.index];
+	for (const auto& link : routes.links) {
+		graph[link.first].push_back(link.second);
+		graph[link.second].push_back(link.first);
+	}
+	return graph;
+}
+
+int nearestRoutePoint(const nectar::Routes& routes, double x, double z)
+{
+	int best = -1;
+	double bestDistance = 1e30;
+	for (const nectar::RoutePoint& p : routes.points) {
+		const double dx = p.pos.x - x, dz = p.pos.z - z, distance = dx * dx + dz * dz;
+		if (distance < bestDistance) {
+			bestDistance = distance;
+			best = p.index;
+		}
+	}
+	return best;
+}
+
+std::map<int, int> routeComponents(const nectar::Routes& routes)
+{
+	const auto graph = routeGraph(routes);
+	std::map<int, int> component;
+	int next = 0;
+	for (const auto& node : graph) {
+		if (component.count(node.first)) continue;
+		std::queue<int> pending;
+		pending.push(node.first);
+		component[node.first] = next;
+		while (!pending.empty()) {
+			const int at = pending.front();
+			pending.pop();
+			const auto found = graph.find(at);
+			if (found == graph.end()) continue;
+			for (int other : found->second) {
+				if (component.emplace(other, next).second) pending.push(other);
+			}
+		}
+		next++;
+	}
+	return component;
+}
+
+std::vector<int> routePath(const nectar::Routes& routes, int start, int goal)
+{
+	if (start < 0 || goal < 0) return {};
+	const auto graph = routeGraph(routes);
+	std::map<int, int> previous;
+	std::queue<int> pending;
+	previous[start] = start;
+	pending.push(start);
+	while (!pending.empty() && !previous.count(goal)) {
+		const int at = pending.front();
+		pending.pop();
+		const auto found = graph.find(at);
+		if (found == graph.end()) continue;
+		for (int other : found->second) {
+			if (previous.emplace(other, at).second) pending.push(other);
+		}
+	}
+	if (!previous.count(goal)) return {};
+	std::vector<int> path;
+	for (int at = goal;; at = previous[at]) {
+		path.push_back(at);
+		if (at == start) break;
+	}
+	std::reverse(path.begin(), path.end());
+	return path;
+}
+
 /// Texto gris y con salto de línea: las explicaciones.
 void hint(const char* text)
 {
@@ -92,13 +188,45 @@ bool wideButton(const char* label, float h = 36.0f) { return ImGui::Button(label
 bool choiceButton(const char* label, bool on, ImVec2 size = ImVec2(0, 0))
 {
 	if (on) {
-		ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.95f, 0.6f, 0.15f, 1));
-		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.7f, 0.25f, 1));
-		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.1f, 0.08f, 0.05f, 1));
+		ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.52f, 0.66f, 0.25f, 1));
+		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.64f, 0.76f, 0.31f, 1));
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.08f, 0.12f, 0.05f, 1));
 	}
 	const bool pressed = ImGui::Button(label, size);
 	if (on) ImGui::PopStyleColor(3);
 	return pressed;
+}
+
+/// Emblema vegetal sencillo, dibujado a mano para no depender de recursos
+/// externos. Se usa como firma visual en la barra superior.
+void drawSprout(ImDrawList* dl, ImVec2 c, float scale)
+{
+	const ImU32 stem = IM_COL32(170, 196, 74, 255);
+	const ImU32 leaf = IM_COL32(103, 166, 67, 255);
+	const ImU32 glow = IM_COL32(225, 218, 111, 255);
+	dl->AddCircleFilled(ImVec2(c.x, c.y + 8 * scale), 13 * scale, IM_COL32(48, 75, 35, 255));
+	dl->AddLine(ImVec2(c.x, c.y + 7 * scale), ImVec2(c.x, c.y - 12 * scale), stem, 3.0f * scale);
+	dl->AddEllipseFilled(ImVec2(c.x - 7 * scale, c.y - 13 * scale), ImVec2(10 * scale, 5 * scale), leaf, -0.55f);
+	dl->AddEllipseFilled(ImVec2(c.x + 7 * scale, c.y - 9 * scale), ImVec2(9 * scale, 4.5f * scale), glow, 0.45f);
+}
+
+/// Cabecera compacta para los paneles fijos del editor.
+void panelHeading(const char* title, const char* subtitle)
+{
+	const ImVec2 p = ImGui::GetCursorScreenPos();
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	const float titleW = ImGui::CalcTextSize(title).x;
+	dl->AddCircleFilled(ImVec2(p.x + 5, p.y + 9), 4.0f, IM_COL32(166, 190, 70, 255));
+	dl->AddLine(ImVec2(p.x + 26 + titleW, p.y + 9), ImVec2(p.x + ImGui::GetContentRegionAvail().x, p.y + 9), IM_COL32(86, 112, 49, 190), 1.0f);
+	ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 18);
+	ImGui::TextColored(ImVec4(0.88f, 0.85f, 0.60f, 1), "%s", title);
+	if (subtitle && *subtitle) {
+		ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 18);
+		ImGui::PushStyleColor(ImGuiCol_Text, kDim);
+		ImGui::TextUnformatted(subtitle);
+		ImGui::PopStyleColor();
+	}
+	ImGui::Spacing();
 }
 
 const char* courseName(const std::string& path)
@@ -339,6 +467,15 @@ void boxLines(std::vector<V3>& out, const M4& m, const V3& lo, const V3& hi)
 	}
 }
 
+float pointSegmentDistance(const ImVec2& p, const ImVec2& a, const ImVec2& b)
+{
+	const float dx = b.x - a.x, dy = b.y - a.y;
+	const float l2 = dx * dx + dy * dy;
+	if (l2 <= 0.0001f) return std::hypot(p.x - a.x, p.y - a.y);
+	const float t = std::max(0.0f, std::min(1.0f, ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2));
+	return std::hypot(p.x - (a.x + dx * t), p.y - (a.y + dy * t));
+}
+
 std::string pelletId(int colour, int value)
 {
 	static const char cs[] = { 'r', 'b', 'y' };
@@ -373,6 +510,11 @@ const nectar::ShipPartInfo* partInfo(const std::string& id)
 
 int pelletColour(const std::string& id) { return id.size() > 1 ? (id[1] == 'b' ? 1 : id[1] == 'y' ? 2 : 0) : 0; }
 int pelletValue(const std::string& id) { return id.size() == 4 ? std::atoi(id.c_str() + 2) : 1; }
+bool validPelletId(const std::string& id)
+{
+	return id.size() == 4 && id[0] == 'p' && (id[1] == 'r' || id[1] == 'b' || id[1] == 'y')
+	    && (id.compare(2, 2, "01") == 0 || id.compare(2, 2, "05") == 0 || id.compare(2, 2, "10") == 0 || id.compare(2, 2, "20") == 0);
+}
 
 } // namespace
 
@@ -581,6 +723,16 @@ void App::drawWelcome()
 	ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f, vp->WorkPos.y + vp->WorkSize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
 	ImGui::SetNextWindowSize(ImVec2(760, 0));
 	ImGui::Begin(tr("¿Qué quieres hacer?"), nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
+	{
+		const ImVec2 p = ImGui::GetCursorScreenPos();
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		drawSprout(dl, ImVec2(p.x + 30, p.y + 29), 1.15f);
+		ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 62);
+		ImGui::TextColored(ImVec4(0.90f, 0.87f, 0.62f, 1), "NECTAR MAP MAKER");
+		ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 62);
+		hint(tr("Crea un pequeño mundo para el modo VS."));
+		ImGui::Spacing();
+	}
 	std::error_code ec;
 	if (!cfg_.lastMap.empty() && fs::exists(cfg_.lastMap, ec)) {
 		std::string text, err;
@@ -664,6 +816,8 @@ void App::newMap(nectar::TerrainShape shape)
 	}
 	d.name = tr("Mi mapa");
 	ed_.reset(d, "");
+	hiddenItems_.clear();
+	lockedItems_.clear();
 	cam_.target   = V3(0, 0, 0);
 	cam_.distance = 4000;
 	cam_.topDown  = false;
@@ -719,6 +873,8 @@ bool App::templatePickers(float size)
 	if (!chosen) return false;
 	const MapDoc d = chosen->build();
 	ed_.reset(d, "");
+	hiddenItems_.clear();
+	lockedItems_.clear();
 	cam_.target   = V3(0, 0, 0);
 	cam_.distance = 4000;
 	cam_.topDown  = false;
@@ -756,6 +912,8 @@ bool App::coursePickers()
 		return false;
 	}
 	ed_.reset(d, "");
+	hiddenItems_.clear();
+	lockedItems_.clear();
 	cam_.target   = V3(float(d.bases[0].x), 0, float(d.bases[0].z));
 	cam_.distance = 2500;
 	cam_.topDown  = false;
@@ -778,6 +936,8 @@ void App::openMap(const std::string& path)
 		return;
 	}
 	ed_.reset(doc, path);
+	hiddenItems_.clear();
+	lockedItems_.clear();
 	cfg_.lastMap = path;
 	cfg_.save();
 	cam_.target   = V3(float((doc.minX + doc.maxX) * 0.5), 0, float((doc.minZ + doc.maxZ) * 0.5));
@@ -794,6 +954,8 @@ void App::openBuiltIn()
 	doc.name = tr("Mi arena");
 	doc.author.clear();
 	ed_.reset(doc, "");
+	hiddenItems_.clear();
+	lockedItems_.clear();
 	cam_.target   = V3(0, 0, 0);
 	cam_.distance = 4000;
 	notify(0, tr("Copia de la arena del juego: cámbiala como quieras."));
@@ -912,6 +1074,7 @@ void App::deleteSelection()
 		if (!ed_.selection.empty()) notify(1, tr("Eso no se puede borrar: el juego lo necesita. Muévelo a donde quieras."));
 		return;
 	}
+	remapSessionItemsAfterRemoval(del);
 	removeItems(ed_.doc, del);
 	ed_.clearSelection();
 	ed_.touch();
@@ -982,6 +1145,63 @@ void App::liftSelection(double dy)
 	if (any) ed_.touch();
 }
 
+bool App::selectionCanGround() const
+{
+	for (const ItemRef& r : ed_.selection) {
+		if (r.type == ItemType::Prop || r.type == ItemType::Gen || r.type == ItemType::Object) return true;
+	}
+	return false;
+}
+
+void App::placeSelectionOnGround()
+{
+	bool changed = false;
+	for (const ItemRef& r : ed_.selection) {
+		if (!itemExists(ed_.doc, r)) continue;
+		Xform x = getXform(ed_.doc, r);
+		double target = x.y;
+		if (r.type == ItemType::Object) target = 0.0; // su Y se guarda como altura sobre el suelo
+		else if (r.type == ItemType::Prop || r.type == ItemType::Gen) target = docHeight(float(x.x), float(x.z));
+		else continue;
+		if (std::fabs(x.y - target) < 0.001) continue;
+		x.y = target;
+		setXform(ed_.doc, r, x);
+		ItemRef other;
+		if (mirrorEdits_ && ed_.doc.symmetric && counterpart(r, other) && !ed_.selected(other)) mirrorToCounterpart(ed_.doc, r);
+		changed = true;
+	}
+	if (changed) ed_.touch();
+}
+
+bool App::itemHidden(const ItemRef& r) const { return std::find(hiddenItems_.begin(), hiddenItems_.end(), r) != hiddenItems_.end(); }
+bool App::itemLocked(const ItemRef& r) const { return std::find(lockedItems_.begin(), lockedItems_.end(), r) != lockedItems_.end(); }
+
+void App::toggleHidden(const ItemRef& r)
+{
+	auto it = std::find(hiddenItems_.begin(), hiddenItems_.end(), r);
+	if (it == hiddenItems_.end()) hiddenItems_.push_back(r);
+	else hiddenItems_.erase(it);
+	if (itemHidden(r)) ed_.selection.erase(std::remove(ed_.selection.begin(), ed_.selection.end(), r), ed_.selection.end());
+}
+
+void App::toggleLocked(const ItemRef& r)
+{
+	auto it = std::find(lockedItems_.begin(), lockedItems_.end(), r);
+	if (it == lockedItems_.end()) lockedItems_.push_back(r);
+	else lockedItems_.erase(it);
+	if (itemLocked(r)) ed_.selection.erase(std::remove(ed_.selection.begin(), ed_.selection.end(), r), ed_.selection.end());
+}
+
+void App::remapSessionItemsAfterRemoval(const std::vector<ItemRef>& removed)
+{
+	(void)removed;
+	// ItemRef usa índices: al borrar una entrada, las posteriores cambian de
+	// identidad. Es más seguro limpiar estos estados efímeros que bloquear u
+	// ocultar accidentalmente otro elemento (también tras deshacer el borrado).
+	hiddenItems_.clear();
+	lockedItems_.clear();
+}
+
 std::string App::placeAsset(const PlaceChoice& c) const
 {
 	switch (c.type) {
@@ -1031,14 +1251,14 @@ std::vector<App::Issue> App::checkMap() const
 		if (r.type == ItemType::Wall) continue;
 		const Xform x = getXform(d, r);
 		if (x.x <= d.minX || x.x >= d.maxX || x.z <= d.minZ || x.z >= d.maxZ) {
-			out.push_back({ true, itemName(d, r) + tr(" está fuera del mapa."), true, r });
+			out.push_back({ true, itemName(d, r) + tr(" está fuera del mapa."), true, r, IssueFix::ClampInside });
 		} else if (r.type != ItemType::Pond && !docSolid(float(x.x), float(x.z))) {
-			out.push_back({ true, itemName(d, r) + tr(" está sobre un hueco: ponle suelo debajo o muévelo."), true, r });
+			out.push_back({ true, itemName(d, r) + tr(" está sobre un hueco: ponle suelo debajo o muévelo."), true, r, IssueFix::NearestGround });
 		}
 		// Con el mapa espejo, también su gemelo del otro lado.
 		if (d.symmetric && itemCaps(r.type).twinned && r.type != ItemType::Pond && !docSolid(float(-x.x), float(-x.z))
 		    && x.x > d.minX && x.x < d.maxX) {
-			out.push_back({ true, tr("La copia de «") + itemName(d, r) + tr("» del lado del Jugador 2 cae sobre un hueco."), true, r });
+			out.push_back({ true, tr("La copia de «") + itemName(d, r) + tr("» del lado del Jugador 2 cae sobre un hueco."), true, r, IssueFix::NearestGround });
 		}
 	}
 	const int k = d.symmetric ? 2 : 1;
@@ -1046,6 +1266,44 @@ std::vector<App::Issue> App::checkMap() const
 	if (int(d.pieces.size()) * k > 16) out.push_back({ true, tr("Hay demasiadas piezas de la nave (el máximo son 16 en total)."), false, {} });
 	if (int(d.pellets.size()) * k > 16) out.push_back({ true, tr("Hay demasiadas pastillas (el máximo son 16 en total)."), false, {} });
 	if (int(d.guards.size()) * k > 4) out.push_back({ true, tr("Hay demasiados Bulborbs (el máximo son 4 en total)."), false, {} });
+	for (std::size_t index = 0; index < d.props.size(); index++) {
+		const nectar::DocProp& prop = d.props[index];
+		if (!std::isfinite(prop.scale) || prop.scale <= 0.0 || prop.scale > 20.0)
+			out.push_back({ true, itemName(d, { ItemType::Prop, int(index), 0 }) + tr(" tiene una escala inválida."), true,
+			                { ItemType::Prop, int(index), 0 }, IssueFix::NormalizeScale });
+		bool missing = false;
+		const auto loadedError = modelErrors_.find(prop.asset);
+		if (loadedError != modelErrors_.end() && !loadedError->second.empty()) missing = true;
+		if (catalogFinished_) {
+			bool found = false;
+			for (const nectar::CatalogEntry& entry : catalog_.entries) {
+				if (entry.path != prop.asset) continue;
+				found = true;
+				missing = missing || !entry.error.empty();
+				break;
+			}
+			missing = missing || !found;
+		}
+		if (missing) out.push_back({ true, itemName(d, { ItemType::Prop, int(index), 0 }) + tr(" usa un asset inexistente o dañado."), true,
+		                             { ItemType::Prop, int(index), 0 }, IssueFix::DeleteItem });
+	}
+	if (compiled_.generation == ed_.liveGeneration && !compiled_.routes.points.empty()) {
+		const std::map<int, int> components = routeComponents(compiled_.routes);
+		const int start = nearestRoutePoint(compiled_.routes, d.bases[0].x, d.bases[0].z);
+		for (const ItemRef& r : allItems(d)) {
+			if (r.type != ItemType::Pellet && r.type != ItemType::Piece && r.type != ItemType::BigPiece) continue;
+			const Xform x = getXform(d, r);
+			const int goal = nearestRoutePoint(compiled_.routes, x.x, x.z);
+			bool reachable = start >= 0 && goal >= 0 && components.count(start) && components.count(goal) && components.at(start) == components.at(goal);
+			for (const nectar::RoutePoint& p : compiled_.routes.points) {
+				if (p.index != goal) continue;
+				const double distance = std::hypot(p.pos.x - x.x, p.pos.z - x.z);
+				reachable = reachable && distance <= std::max(300.0, d.routeStep * 2.0);
+				break;
+			}
+			if (!reachable) out.push_back({ true, itemName(d, r) + tr(" no tiene una ruta alcanzable desde la base."), true, r });
+		}
+	}
 	// Lo que diga el compilador (tamaño, archivos que faltan...).
 	if (!compiled_.playable && !compiled_.error.empty() && compiled_.generation == ed_.liveGeneration) {
 		bool known = false;
@@ -1058,6 +1316,91 @@ std::vector<App::Issue> App::checkMap() const
 	}
 	if (d.pellets.empty()) out.push_back({ false, tr("Consejo: pon algunas pastillas para que los jugadores consigan más Pikmin."), false, {} });
 	return out;
+}
+
+void App::applyIssueFix(const Issue& issue)
+{
+	if (!issue.hasItem || !itemExists(ed_.doc, issue.item) || issue.fix == IssueFix::None) return;
+	if (issue.fix == IssueFix::DeleteItem) {
+		ed_.selection = { issue.item };
+		deleteSelection();
+		return;
+	}
+	MapDoc& d = ed_.doc;
+	Xform x = getXform(d, issue.item);
+	if (issue.fix == IssueFix::NormalizeScale) {
+		x.scale = 1.0;
+		setXform(d, issue.item, x);
+		ed_.selection = { issue.item };
+		ed_.touch();
+		return;
+	}
+	const double oldGround = docHeight(float(x.x), float(x.z));
+	if (issue.fix == IssueFix::ClampInside) {
+		const double margin = std::max(10.0, d.cell * 0.5);
+		x.x = std::max(d.minX + margin, std::min(d.maxX - margin, x.x));
+		x.z = std::max(d.minZ + margin, std::min(d.maxZ - margin, x.z));
+	} else {
+		const double step = std::max(25.0, d.cell * 0.5);
+		const double maxRadius = std::max(d.maxX - d.minX, d.maxZ - d.minZ);
+		bool found = false;
+		double bestX = x.x, bestZ = x.z;
+		for (double radius = 0; radius <= maxRadius && !found; radius += step) {
+			for (double dz = -radius; dz <= radius && !found; dz += step) {
+				for (double dx = -radius; dx <= radius; dx += step) {
+					if (radius > 0 && std::fabs(dx) < radius && std::fabs(dz) < radius) continue;
+					const double cx = x.x + dx, cz = x.z + dz;
+					if (cx <= d.minX || cx >= d.maxX || cz <= d.minZ || cz >= d.maxZ) continue;
+					if (!docSolid(float(cx), float(cz))) continue;
+					if (d.symmetric && itemCaps(issue.item.type).twinned && !docSolid(float(-cx), float(-cz))) continue;
+					bestX = cx;
+					bestZ = cz;
+					found = true;
+					break;
+				}
+			}
+		}
+		if (!found) {
+			notify(1, tr("No se encontró suelo válido cercano."));
+			return;
+		}
+		x.x = bestX;
+		x.z = bestZ;
+	}
+	if (issue.item.type == ItemType::Prop || issue.item.type == ItemType::Gen) x.y += docHeight(float(x.x), float(x.z)) - oldGround;
+	setXform(d, issue.item, x);
+	ItemRef other;
+	if (mirrorEdits_ && d.symmetric && counterpart(issue.item, other) && !ed_.selected(other)) mirrorToCounterpart(d, issue.item);
+	ed_.selection = { issue.item };
+	ed_.touch();
+	focusSelection();
+}
+
+void App::createGroundUnder(const ItemRef& item)
+{
+	if (!itemExists(ed_.doc, item) || !ensureTerrain()) return;
+	MapDoc& d = ed_.doc;
+	nectar::DocTerrain& terrain = d.terrain;
+	const Xform x = getXform(d, item);
+	auto fill = [&](double wx, double wz) {
+		const int cx = std::max(0, std::min(terrain.nx, int(std::lround((wx - d.minX) / d.cell))));
+		const int cz = std::max(0, std::min(terrain.nz, int(std::lround((wz - d.minZ) / d.cell))));
+		for (int iz = std::max(0, cz - 1); iz <= std::min(terrain.nz, cz + 1); iz++) {
+			for (int ix = std::max(0, cx - 1); ix <= std::min(terrain.nx, cx + 1); ix++) {
+				const std::size_t vertex = std::size_t(terrain.vertexIndex(ix, iz));
+				terrain.floor[vertex] = 255;
+				if (!terrain.layers.empty()) {
+					terrain.layers[0][vertex] = 255;
+					for (std::size_t layer = 1; layer < terrain.layers.size(); layer++) terrain.layers[layer][vertex] = 0;
+				}
+			}
+		}
+	};
+	fill(x.x, x.z);
+	if (d.symmetric && itemCaps(item.type).twinned) fill(-x.x, -x.z);
+	ed_.selection = { item };
+	ed_.touch();
+	focusSelection();
 }
 
 // ── Recursos ────────────────────────────────────────────────────────────────
@@ -1171,6 +1514,10 @@ void App::drawEditor()
 				if (t.material != 15) continue;
 				for (const nectar::Vec3& p : t.p) waterTris_.push_back(V3(p.x, p.y + 1, p.z));
 			}
+			collisionTris_.clear();
+			for (const nectar::BakedTri& t : nectar::bakeModel(r.full)) {
+				for (const nectar::Vec3& p : t.p) collisionTris_.push_back(V3(p.x, p.y + 2, p.z));
+			}
 		}
 		compiled_ = std::move(r);
 	}
@@ -1182,10 +1529,57 @@ void App::drawEditor()
 
 	const ImGuiViewport* vp = ImGui::GetMainViewport();
 	const float X = vp->WorkPos.x, Y = vp->WorkPos.y, W = vp->WorkSize.x, H = vp->WorkSize.y;
+	// Los dos laterales son ajustables, pero el lienzo siempre conserva un
+	// mínimo útil. Las preferencias antiguas no tienen estas claves y reciben
+	// los tamaños por defecto desde Config.
+	float toolW = cfg_.showToolbox ? std::max(kMinToolboxW, cfg_.toolboxWidth) : 0.0f;
+	float sideW = cfg_.showSidePanel ? std::max(kMinSideW, cfg_.sidePanelWidth) : 0.0f;
+	const float availableForSides = std::max(kMinToolboxW + kMinSideW, W - kMinViewportW);
+	if (cfg_.showToolbox && cfg_.showSidePanel && toolW + sideW > availableForSides) {
+		const float excess = toolW + sideW - availableForSides;
+		const float shrinkTool = std::min(excess * 0.5f, toolW - kMinToolboxW);
+		toolW -= shrinkTool;
+		sideW = std::max(kMinSideW, availableForSides - toolW);
+	} else if (cfg_.showToolbox) {
+		toolW = std::min(toolW, W - kMinViewportW);
+	} else if (cfg_.showSidePanel) {
+		sideW = std::min(sideW, W - kMinViewportW);
+	}
+	if (cfg_.showToolbox) cfg_.toolboxWidth = toolW;
+	if (cfg_.showSidePanel) cfg_.sidePanelWidth = sideW;
 	drawTopBar({ X, Y, W, kTopBarH });
-	drawToolbox({ X, Y + kTopBarH, kToolboxW, H - kTopBarH });
-	drawViewport({ X + kToolboxW, Y + kTopBarH, W - kToolboxW - kSideW, H - kTopBarH });
-	drawSidePanel({ X + W - kSideW, Y + kTopBarH, kSideW, H - kTopBarH });
+	if (cfg_.showToolbox) drawToolbox({ X, Y + kTopBarH, toolW, H - kTopBarH });
+	drawViewport({ X + toolW, Y + kTopBarH, W - toolW - sideW, H - kTopBarH });
+	if (cfg_.showSidePanel) drawSidePanel({ X + W - sideW, Y + kTopBarH, sideW, H - kTopBarH });
+
+	// Captura directa por coordenadas: no depende del orden de hover de las
+	// ventanas del visor y los paneles, que comparten exactamente este borde.
+	auto splitter = [&](int which, float x, float& value, float sign, float defaultValue) {
+		ImGuiIO& io = ImGui::GetIO();
+		const bool insideY = io.MousePos.y >= Y + kTopBarH && io.MousePos.y <= Y + H;
+		const bool hovered = insideY && std::fabs(io.MousePos.x - x) <= 7.0f;
+		if (splitterDrag_ == 0 && hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) splitterDrag_ = which;
+		const bool active = splitterDrag_ == which;
+		if (active && ImGui::IsMouseDown(ImGuiMouseButton_Left)) value += io.MouseDelta.x * sign;
+		if (active && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+			splitterDrag_ = 0;
+			cfg_.save();
+		}
+		if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+			value = defaultValue;
+			cfg_.save();
+		}
+		if (hovered || active) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+
+		ImDrawList* fg = ImGui::GetForegroundDrawList();
+		const ImU32 col = active ? IM_COL32(215, 222, 98, 255) : hovered ? IM_COL32(171, 196, 76, 255) : IM_COL32(94, 117, 49, 190);
+		fg->AddLine(ImVec2(x, Y + kTopBarH), ImVec2(x, Y + H), col, active || hovered ? 3.0f : 2.0f);
+		const float cy = Y + kTopBarH + (H - kTopBarH) * 0.5f;
+		fg->AddRectFilled(ImVec2(x - 4, cy - 24), ImVec2(x + 4, cy + 24), col, 4.0f);
+		for (int i = -1; i <= 1; i++) fg->AddLine(ImVec2(x - 2, cy + i * 7.0f), ImVec2(x + 2, cy + i * 7.0f), IM_COL32(26, 45, 20, 230), 1.0f);
+	};
+	if (cfg_.showToolbox) splitter(1, X + toolW, cfg_.toolboxWidth, 1.0f, kDefaultToolboxW);
+	if (cfg_.showSidePanel) splitter(2, X + W - sideW, cfg_.sidePanelWidth, -1.0f, kDefaultSideW);
 	drawModals();
 	drawTutorial();
 	handleShortcuts();
@@ -1198,8 +1592,21 @@ void App::drawTopBar(const Rect& r)
 {
 	ImGui::SetNextWindowPos(ImVec2(r.x, r.y));
 	ImGui::SetNextWindowSize(ImVec2(r.w, r.h));
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 10));
 	ImGui::Begin("##top", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
-	const ImVec2 b(110, 38);
+	ImGui::PopStyleVar();
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	const ImVec2 wp = ImGui::GetWindowPos();
+	// Una franja de hojas/tierra separa claramente el editor del lienzo.
+	dl->AddRectFilled(wp, ImVec2(wp.x + r.w, wp.y + r.h), IM_COL32(19, 35, 18, 255));
+	dl->AddRectFilled(ImVec2(wp.x, wp.y + r.h - 5), ImVec2(wp.x + r.w, wp.y + r.h), IM_COL32(91, 111, 43, 255));
+	dl->AddLine(ImVec2(wp.x, wp.y + r.h - 6), ImVec2(wp.x + r.w, wp.y + r.h - 6), IM_COL32(160, 168, 71, 150), 1.0f);
+	drawSprout(dl, ImVec2(wp.x + 31, wp.y + 33), 1.0f);
+	dl->AddText(ImVec2(wp.x + 55, wp.y + 15), IM_COL32(236, 226, 169, 255), "NECTAR");
+	dl->AddText(ImVec2(wp.x + 55, wp.y + 37), IM_COL32(145, 167, 91, 255), "VS MAP MAKER");
+
+	ImGui::SetCursorPos(ImVec2(190, 16));
+	const ImVec2 b(88, 38);
 	if (ImGui::Button(tr("Nuevo"), b)) openNew_ = true;
 	ImGui::SetItemTooltip(tr("Empezar otro mapa"));
 	ImGui::SameLine();
@@ -1211,32 +1618,59 @@ void App::drawTopBar(const Rect& r)
 	ImGui::SameLine();
 	if (ImGui::Button(tr("Guardar"), b)) saveOrAsk(false);
 	ImGui::SetItemTooltip(tr("Guardar (Ctrl+S)"));
-	ImGui::SameLine(0, 24);
+	ImGui::SameLine(0, 14);
 	ImGui::BeginDisabled(!ed_.canUndo());
-	if (ImGui::Button(tr("Deshacer"), b)) ed_.undo();
+	if (ImGui::Button(tr("Deshacer"), ImVec2(92, 38))) ed_.undo();
 	ImGui::SetItemTooltip(tr("Volver atrás el último cambio (Ctrl+Z)"));
 	ImGui::EndDisabled();
 	ImGui::SameLine();
 	ImGui::BeginDisabled(!ed_.canRedo());
-	if (ImGui::Button(tr("Rehacer"), b)) ed_.redo();
+	if (ImGui::Button(tr("Rehacer"), ImVec2(88, 38))) ed_.redo();
 	ImGui::SetItemTooltip(tr("Repetir lo que deshiciste (Ctrl+Y)"));
 	ImGui::EndDisabled();
-	ImGui::SameLine(0, 24);
-	ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 9);
-	ImGui::Text("%s%s", ed_.doc.name.c_str(), ed_.dirty ? tr("  (sin guardar)") : "");
+	const float mapX = ImGui::GetItemRectMax().x - wp.x + 18.0f;
+	if (mapX < r.w - 370.0f) {
+		ImGui::SameLine(0, 18);
+		ImGui::SetCursorPosY(16);
+		ImGui::TextColored(ImVec4(0.71f, 0.75f, 0.54f, 1), "%s%s", ed_.doc.name.c_str(), ed_.dirty ? tr("  (sin guardar)") : "");
+	}
 
 	// A la derecha: ayuda y probar.
-	const float testW = 230, helpW = 100;
-	ImGui::SameLine(r.w - testW - helpW - 24);
-	ImGui::SetCursorPosY(8);
+	const float testW = 220, helpW = 96, viewW = 88;
+	ImGui::SameLine(r.w - testW - helpW - viewW - 32);
+	ImGui::SetCursorPosY(16);
+	if (ImGui::Button(tr("Vista"), ImVec2(viewW, 38))) ImGui::OpenPopup("##view_menu");
+	if (ImGui::BeginPopup("##view_menu")) {
+		bool changed = false;
+		changed |= ImGui::Checkbox(tr("Panel de herramientas"), &cfg_.showToolbox);
+		changed |= ImGui::Checkbox(tr("Panel de propiedades"), &cfg_.showSidePanel);
+		ImGui::SeparatorText(tr("Capas del visor"));
+		ImGui::Checkbox(tr("Colisión compilada"), &showCollision_);
+		ImGui::Checkbox(tr("Rutas de los Pikmin"), &showRoutes_);
+		ImGui::Checkbox(tr("Pendientes no transitables"), &showSlopesOverlay_);
+		ImGui::Checkbox(tr("Superficie del agua"), &showWaterOverlay_);
+		ImGui::Checkbox(tr("Nombres de elementos"), &showLabels_);
+		ImGui::Separator();
+		if (ImGui::MenuItem(tr("Restablecer disposición"))) {
+			cfg_.toolboxWidth  = kDefaultToolboxW;
+			cfg_.sidePanelWidth = kDefaultSideW;
+			cfg_.showToolbox   = true;
+			cfg_.showSidePanel = true;
+			changed            = true;
+		}
+		if (changed) cfg_.save();
+		ImGui::EndPopup();
+	}
+	ImGui::SameLine();
 	if (ImGui::Button(tr("Ayuda"), ImVec2(helpW, 38))) openHelp_ = true;
 	ImGui::SameLine();
-	ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.58f, 0.25f, 1));
-	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.26f, 0.7f, 0.32f, 1));
+	ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.45f, 0.59f, 0.20f, 1));
+	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.58f, 0.70f, 0.27f, 1));
+	ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.07f, 0.11f, 0.04f, 1));
 	if (ImGui::Button(tr("Probar en el juego"), ImVec2(testW, 38))) testInGame();
 	const ImVec2 tmin = ImGui::GetItemRectMin(), tmax = ImGui::GetItemRectMax();
 	testButtonRect_   = { tmin.x, tmin.y, tmax.x - tmin.x, tmax.y - tmin.y };
-	ImGui::PopStyleColor(2);
+	ImGui::PopStyleColor(3);
 	ImGui::SetItemTooltip(tr("Guarda el mapa y lo abre en el juego para jugarlo (F5)"));
 	ImGui::End();
 }
@@ -1245,8 +1679,9 @@ void App::drawToolbox(const Rect& r)
 {
 	ImGui::SetNextWindowPos(ImVec2(r.x, r.y));
 	ImGui::SetNextWindowSize(ImVec2(r.w, r.h));
-	ImGui::Begin(tr("Herramientas"), nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
+	ImGui::Begin("##tools", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings);
 	toolboxRect_ = { r.x, r.y, r.w, r.h };
+	panelHeading(tr("Herramientas"), tr("Esculpe, coloca y decora"));
 	struct T {
 		Tool tool;
 		const char* label;
@@ -1262,6 +1697,7 @@ void App::drawToolbox(const Rect& r)
 		                { Tool::Paint, tr("Pintar el suelo"), tr("Cambia el aspecto del suelo"), true, Icon::Paint },
 		                { Tool::Water, tr("Agua"), tr("Pinta lagos (solo los Pikmin azules entran)"), true, Icon::Water },
 		                { Tool::Walls, tr("Muros"), tr("Dibuja muros arrastrando"), false, Icon::Walls },
+		                { Tool::Ramp, tr("Rampas"), tr("Une dos alturas con una pendiente transitable"), true, Icon::Plateau },
 		                { Tool::Scatter, tr("Decorar"), tr("Esparce hierbas, flores y piedras pintando"), false, Icon::Decor } };
 	int n = 1;
 	for (const T& t : tools) {
@@ -1270,11 +1706,14 @@ void App::drawToolbox(const Rect& r)
 		// Con un escenario del juego, el suelo y los muros no se tocan.
 		const bool locked = courseMode() && (t.terrain || t.tool == Tool::Walls || t.tool == Tool::Scatter);
 		if (locked) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.4f);
-		const bool pressedTool = choiceButton(label, tool_ == t.tool, ImVec2(-1, 38));
+		const bool pressedTool = choiceButton(label, tool_ == t.tool, ImVec2(-1, 40));
 		if (locked) ImGui::PopStyleVar();
 		if (pressedTool) {
 			if (courseMode() && (t.tool == Tool::Walls || t.tool == Tool::Scatter)) notify(1, tr("En los escenarios del juego todavía no se pueden poner muros ni decoración."));
-			else if (!t.terrain || ensureTerrain()) tool_ = t.tool;
+			else if (!t.terrain || ensureTerrain()) {
+				tool_ = t.tool;
+				if (tool_ != Tool::Ramp) drawingRamp_ = false;
+			}
 		}
 		{
 			// Icono a la izquierda y el atajo (número) a la derecha.
@@ -1283,7 +1722,7 @@ void App::drawToolbox(const Rect& r)
 			const ImU32 ink = ImGui::GetColorU32(ImGuiCol_Text);
 			drawIcon(dl, ImVec2(ra.x + 22.0f, (ra.y + rb.y) * 0.5f), 10.0f, t.icon, ink);
 			char key[4];
-			std::snprintf(key, sizeof(key), "%d", n - 1);
+			std::snprintf(key, sizeof(key), "%d", n - 1 == 10 ? 0 : n - 1);
 			dl->AddText(ImVec2(rb.x - 20.0f, (ra.y + rb.y) * 0.5f - ImGui::GetFontSize() * 0.5f), ImGui::GetColorU32(ImGuiCol_TextDisabled), key);
 		}
 		ImGui::SetItemTooltip("%s", t.tip);
@@ -1301,13 +1740,29 @@ void App::drawToolbox(const Rect& r)
 void App::drawToolOptions()
 {
 	switch (tool_) {
-	case Tool::Move:
+	case Tool::Move: {
 		ImGui::SeparatorText(tr("Mover y girar"));
+		const float modeW = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 2.0f) / 3.0f;
+		if (choiceButton(tr("Mover (W)"), transformMode_ == TransformMode::Move, ImVec2(modeW, 32))) transformMode_ = TransformMode::Move;
+		ImGui::SameLine();
+		if (choiceButton(tr("Girar (E)"), transformMode_ == TransformMode::Rotate, ImVec2(modeW, 32))) transformMode_ = TransformMode::Rotate;
+		ImGui::SameLine();
+		if (choiceButton(tr("Escalar (R)"), transformMode_ == TransformMode::Scale, ImVec2(modeW, 32))) transformMode_ = TransformMode::Scale;
 		hint(tr("Haz clic en algo para elegirlo y arrástralo por el suelo. Con Ctrl eliges varias cosas a la vez."));
-		hint(tr("Q y E lo giran. Supr lo borra. Ctrl+D lo duplica."));
+		hint(tr("W mueve por los ejes, E gira con el aro y R cambia el tamaño de la decoración."));
+		hint(tr("Alt + clic recorre las cosas superpuestas. Q gira por pasos. Supr borra. Ctrl+D duplica."));
+		if (ImGui::Checkbox(tr("Ejes locales"), &cfg_.localGizmo)) cfg_.save();
+		ImGui::SetItemTooltip("%s", tr("Orienta X/Z según el último objeto seleccionado, en vez de usar los ejes del mapa."));
+		ImGui::BeginDisabled(!selectionCanGround());
+		if (ImGui::Button(tr("Colocar sobre el terreno"), ImVec2(-1, 32))) placeSelectionOnGround();
+		ImGui::EndDisabled();
+		ImGui::SetItemTooltip("%s", tr("Baja al suelo la decoración y los objetos seleccionados que estén flotando o enterrados."));
 		if (ImGui::Checkbox(tr("Encajar en la cuadrícula"), &cfg_.snap)) cfg_.save();
 		ImGui::SetItemTooltip(tr("Las cosas se colocan alineadas, a saltos de %.0f."), cfg_.snapStep);
+		if (ImGui::Checkbox(tr("Ignorar decoración al seleccionar"), &cfg_.ignoreDecorSelection)) cfg_.save();
+		ImGui::SetItemTooltip("%s", tr("Permite elegir objetivos y construcciones a través de plantas y adornos."));
 		break;
+	}
 	case Tool::Place: drawPlaceOptions(); break;
 	case Tool::Floor: drawFloorOptions(); break;
 	case Tool::Height: drawHeightOptions(); break;
@@ -1315,6 +1770,7 @@ void App::drawToolOptions()
 	case Tool::Paint: drawPaintOptions(); break;
 	case Tool::Water: drawWaterOptions(); break;
 	case Tool::Walls: drawWallOptions(); break;
+	case Tool::Ramp: drawRampOptions(); break;
 	case Tool::Scatter: drawScatterOptions(); break;
 	}
 }
@@ -1323,6 +1779,21 @@ void App::drawPlaceOptions()
 {
 	ImGui::SeparatorText(tr("¿Qué quieres poner?"));
 	hint(tr("Elige algo y haz clic en el mapa. Puedes poner varios seguidos."));
+	auto choose = [&](const PlaceChoice& c) {
+		place_ = c;
+		if (c.type != ItemType::Prop || c.asset.empty()) return;
+		cfg_.recents.erase(std::remove(cfg_.recents.begin(), cfg_.recents.end(), c.asset), cfg_.recents.end());
+		cfg_.recents.insert(cfg_.recents.begin(), c.asset);
+		if (cfg_.recents.size() > 16) cfg_.recents.resize(16);
+		cfg_.save();
+	};
+	auto favorite = [&](const std::string& asset) { return std::find(cfg_.favorites.begin(), cfg_.favorites.end(), asset) != cfg_.favorites.end(); };
+	auto toggleFavorite = [&](const std::string& asset) {
+		auto it = std::find(cfg_.favorites.begin(), cfg_.favorites.end(), asset);
+		if (it == cfg_.favorites.end()) cfg_.favorites.push_back(asset);
+		else cfg_.favorites.erase(it);
+		cfg_.save();
+	};
 	// Rejilla de miniaturas de modelos del juego.
 	auto grid = [&](const char* id, const std::vector<std::pair<PlaceChoice, std::string>>& items, const char* tipFmt) {
 		ImGui::PushID(id);
@@ -1332,10 +1803,10 @@ void App::drawPlaceOptions()
 			ImGui::PushID(c.label.c_str());
 			const unsigned t = assetThumb(placeAsset(c));
 			const bool on    = place_.type == c.type && place_.label == c.label;
-			if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.95f, 0.6f, 0.15f, 1));
+			if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.52f, 0.66f, 0.25f, 1));
 			const bool pressed = t ? ImGui::ImageButton("##g", ImTextureID(std::intptr_t(t)), ImVec2(72, 72)) : ImGui::Button(it.second.c_str(), ImVec2(80, 80));
 			if (on) ImGui::PopStyleColor();
-			if (pressed) place_ = c;
+			if (pressed) choose(c);
 			ImGui::SetItemTooltip(tipFmt, it.second.c_str());
 			ImGui::PopID();
 			if (++col < 3) ImGui::SameLine();
@@ -1412,15 +1883,51 @@ void App::drawPlaceOptions()
 	}
 	ImGui::SetNextItemWidth(-1);
 	ImGui::InputTextWithHint("##buscar", tr("Buscar..."), search_, sizeof(search_));
-	std::string q = search_;
-	std::transform(q.begin(), q.end(), q.begin(), [](unsigned char ch) { return char(std::tolower(ch)); });
+	const std::string q = searchKey(search_);
+	static int assetFilter = 0;
+	static bool assetGrid = true;
+	static int assetCategoryFilter = 0;
+	static int assetCostFilter = 0;
+	static bool assetCollisionOnly = false;
+	if (choiceButton(tr("Todos"), assetFilter == 0, ImVec2(72, 0))) assetFilter = 0;
+	ImGui::SameLine();
+	if (choiceButton(tr("Favoritos"), assetFilter == 1, ImVec2(88, 0))) assetFilter = 1;
+	ImGui::SameLine();
+	if (choiceButton(tr("Recientes"), assetFilter == 2, ImVec2(88, 0))) assetFilter = 2;
+	if (choiceButton(tr("Cuadrícula"), assetGrid, ImVec2(100, 0))) assetGrid = true;
+	ImGui::SameLine();
+	if (choiceButton(tr("Lista"), !assetGrid, ImVec2(80, 0))) assetGrid = false;
+	const char* categoryLabels[] = { tr("Todas las categorías"), tr("Plantas"), tr("Objetos"), tr("Otros") };
+	ImGui::SetNextItemWidth(-1);
+	ImGui::Combo(tr("Categoría"), &assetCategoryFilter, categoryLabels, 4);
+	const char* costLabels[] = { tr("Cualquier coste"), tr("Ligero"), tr("Medio") };
+	ImGui::SetNextItemWidth(-1);
+	ImGui::Combo(tr("Coste"), &assetCostFilter, costLabels, 3);
+	ImGui::Checkbox(tr("Solo con colisión"), &assetCollisionOnly);
+	auto catalogEntry = [&](const std::string& asset) -> const nectar::CatalogEntry* {
+		for (const nectar::CatalogEntry& e : catalog_.entries) if (e.path == asset) return &e;
+		return nullptr;
+	};
+	auto passesFilter = [&](const std::string& asset) {
+		if (assetFilter == 1 && !favorite(asset)) return false;
+		if (assetFilter == 2 && std::find(cfg_.recents.begin(), cfg_.recents.end(), asset) == cfg_.recents.end()) return false;
+		const nectar::CatalogEntry* entry = catalogEntry(asset);
+		const std::string category = entry ? entry->category : nectar::assetCategory(asset, nectar::AssetKind::Model);
+		if (assetCategoryFilter == 1 && category != "plants") return false;
+		if (assetCategoryFilter == 2 && category != "objects") return false;
+		if (assetCategoryFilter == 3 && (category == "plants" || category == "objects")) return false;
+		if (assetCollisionOnly && (!entry || entry->collisionTris <= 0)) return false;
+		if (assetCostFilter == 1 && entry && entry->triangles > 1000) return false;
+		if (assetCostFilter == 2 && entry && entry->triangles > 5000) return false;
+		return true;
+	};
 	std::string group;
 	int col = 0;
 	for (const DecorItem& it : decorItems()) {
 		std::string name = tr(it.name);
-		std::string low  = name;
-		std::transform(low.begin(), low.end(), low.begin(), [](unsigned char ch) { return char(std::tolower(ch)); });
-		if (!q.empty() && low.find(q) == std::string::npos) continue;
+		const std::string haystack = searchKey(name + " " + it.path + " " + tr(it.group));
+		if (!q.empty() && haystack.find(q) == std::string::npos) continue;
+		if (!passesFilter(it.path)) continue;
 		if (group != it.group) {
 			if (col) ImGui::NewLine();
 			col   = 0;
@@ -1430,21 +1937,33 @@ void App::drawPlaceOptions()
 		ImGui::PushID(it.path);
 		const unsigned t = assetThumb(it.path);
 		const bool on    = place_.type == ItemType::Prop && place_.asset == it.path;
-		if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.95f, 0.6f, 0.15f, 1));
-		const bool pressed = t ? ImGui::ImageButton("##d", ImTextureID(std::intptr_t(t)), ImVec2(72, 72)) : ImGui::Button(tr(it.name), ImVec2(80, 80));
-		if (on) ImGui::PopStyleColor();
-		if (pressed) place_ = { ItemType::Prop, it.path, tr(it.name) };
-		ImGui::SetItemTooltip("%s", tr(it.name));
+		if (on || favorite(it.path)) ImGui::PushStyleColor(ImGuiCol_Button, on ? ImVec4(0.52f, 0.66f, 0.25f, 1) : ImVec4(0.37f, 0.43f, 0.20f, 1));
+		const bool pressed = assetGrid ? (t ? ImGui::ImageButton("##d", ImTextureID(std::intptr_t(t)), ImVec2(72, 72)) : ImGui::Button(tr(it.name), ImVec2(80, 80)))
+		                               : ImGui::Selectable((std::string(favorite(it.path) ? "[F] " : "") + tr(it.name) + "##" + it.path).c_str(), on);
+		if (on || favorite(it.path)) ImGui::PopStyleColor();
+		if (pressed) choose({ ItemType::Prop, it.path, tr(it.name) });
+		if (const nectar::CatalogEntry* e = catalogEntry(it.path)) {
+			const char* warning = e->triangles > 10000 ? tr("Aviso: modelo muy pesado") : (e->boundsMax.x - e->boundsMin.x > 3000 || e->boundsMax.y - e->boundsMin.y > 3000 || e->boundsMax.z - e->boundsMin.z > 3000) ? tr("Aviso: modelo muy grande") : "";
+			ImGui::SetItemTooltip("%s\n%s\n%s: %d · %s: %d%s%s", tr(it.name), it.path, tr("Triángulos"), e->triangles, tr("Triángulos de colisión"), e->collisionTris,
+			                      *warning ? "\n" : "", warning);
+		} else ImGui::SetItemTooltip("%s\n%s", tr(it.name), it.path);
+		if (ImGui::BeginPopupContextItem("##asset_ctx")) {
+			if (ImGui::MenuItem(favorite(it.path) ? tr("Quitar de favoritos") : tr("Añadir a favoritos"))) toggleFavorite(it.path);
+			ImGui::EndPopup();
+		}
 		if (ImGui::BeginDragDropSource()) {
 			ImGui::SetDragDropPayload("NM_ASSET", it.path, std::strlen(it.path) + 1);
 			ImGui::Text("%s", tr(it.name));
 			ImGui::EndDragDropSource();
 		}
 		ImGui::PopID();
-		if (++col < 3) ImGui::SameLine();
-		else col = 0;
+		if (assetGrid) {
+			if (++col < 3) ImGui::SameLine();
+			else col = 0;
+		}
 	}
 	if (col) ImGui::NewLine();
+	col = 0;
 	if (iconHeader(tr("Más cosas del juego (avanzado)"), Icon::More)) {
 		hint(tr("Cualquier modelo del juego como decoración. Algunos se ven raros o son muy grandes."));
 		for (const nectar::CatalogEntry& e : catalog_.entries) {
@@ -1459,10 +1978,36 @@ void App::drawPlaceOptions()
 			for (const char* c : kSkipCat) skip |= e.category == c;
 			for (const char* p : kSkipPath) skip |= e.path.rfind(p, 0) == 0;
 			if (skip) continue;
-			if (!q.empty() && e.path.find(q) == std::string::npos) continue;
+			if (!q.empty() && searchKey(e.path + " " + e.category).find(q) == std::string::npos) continue;
+			if (!passesFilter(e.path)) continue;
 			const bool on = place_.type == ItemType::Prop && place_.asset == e.path;
-			if (ImGui::Selectable(e.path.c_str(), on)) place_ = { ItemType::Prop, e.path, e.path };
+			ImGui::PushID(e.path.c_str());
+			if (on || favorite(e.path)) ImGui::PushStyleColor(ImGuiCol_Button, on ? ImVec4(0.52f, 0.66f, 0.25f, 1) : ImVec4(0.37f, 0.43f, 0.20f, 1));
+			const unsigned t = assetThumb(e.path);
+			const bool pressed = assetGrid ? (t ? ImGui::ImageButton("##catalog_asset", ImTextureID(std::intptr_t(t)), ImVec2(72, 72)) : ImGui::Button(e.path.c_str(), ImVec2(80, 80)))
+			                               : ImGui::Selectable((std::string(favorite(e.path) ? "[F] " : "") + e.path).c_str(), on);
+			if (on || favorite(e.path)) ImGui::PopStyleColor();
+			if (pressed) choose({ ItemType::Prop, e.path, e.path });
+			const char* warning = e.triangles > 10000 ? tr("Aviso: modelo muy pesado") : (e.boundsMax.x - e.boundsMin.x > 3000 || e.boundsMax.y - e.boundsMin.y > 3000 || e.boundsMax.z - e.boundsMin.z > 3000) ? tr("Aviso: modelo muy grande") : "";
+			ImGui::SetItemTooltip("%s\n%s: %d\n%s: %d\n%s: %.0f × %.0f × %.0f%s%s", e.path.c_str(), tr("Triángulos"), e.triangles,
+			                      tr("Triángulos de colisión"), e.collisionTris, tr("Dimensiones"), e.boundsMax.x - e.boundsMin.x,
+			                      e.boundsMax.y - e.boundsMin.y, e.boundsMax.z - e.boundsMin.z, *warning ? "\n" : "", warning);
+			if (ImGui::BeginPopupContextItem("##catalog_ctx")) {
+				if (ImGui::MenuItem(favorite(e.path) ? tr("Quitar de favoritos") : tr("Añadir a favoritos"))) toggleFavorite(e.path);
+				ImGui::EndPopup();
+			}
+			if (ImGui::BeginDragDropSource()) {
+				ImGui::SetDragDropPayload("NM_ASSET", e.path.c_str(), e.path.size() + 1);
+				ImGui::TextUnformatted(e.path.c_str());
+				ImGui::EndDragDropSource();
+			}
+			ImGui::PopID();
+			if (assetGrid) {
+				if (++col < 3) ImGui::SameLine();
+				else col = 0;
+			}
 		}
+		if (assetGrid && col) ImGui::NewLine();
 	}
 }
 
@@ -1474,7 +2019,7 @@ void App::drawSwatches(bool allowAdd)
 		ImGui::PushID(int(k));
 		const unsigned t = swatch(g.palette[k].source, g.palette[k].index);
 		const bool sel   = paintMaterial_ == int(k);
-		if (sel) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.95f, 0.6f, 0.15f, 1));
+		if (sel) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.52f, 0.66f, 0.25f, 1));
 		if (t ? ImGui::ImageButton("##p", ImTextureID(std::intptr_t(t)), ImVec2(56, 56)) : ImGui::Button("?", ImVec2(64, 64))) paintMaterial_ = int(k);
 		if (sel) ImGui::PopStyleColor();
 		const char* course = courseName(g.palette[k].source);
@@ -1516,6 +2061,22 @@ void App::drawSwatches(bool allowAdd)
 	hint(tr("Clic derecho en un suelo para cambiarlo o quitarlo."));
 }
 
+void App::drawBrushSettings()
+{
+	ImGui::SliderFloat(tr("Pincel"), &brushRadius_, 25, 1000, "%.0f");
+	ImGui::SetItemTooltip(tr("Tamaño del pincel (también con Ctrl + rueda del ratón)."));
+	ImGui::TextColored(kDim, "%s", tr("Forma"));
+	ImGui::SameLine(78);
+	if (choiceButton(tr("Circular"), brushShape_ == BrushShape::Circle, ImVec2(88, 0))) brushShape_ = BrushShape::Circle;
+	ImGui::SameLine();
+	if (choiceButton(tr("Cuadrado"), brushShape_ == BrushShape::Square, ImVec2(88, 0))) brushShape_ = BrushShape::Square;
+	ImGui::TextColored(kDim, "%s", tr("Borde"));
+	ImGui::SameLine(78);
+	if (choiceButton(tr("Suave"), brushFalloff_ == BrushFalloff::Smooth, ImVec2(88, 0))) brushFalloff_ = BrushFalloff::Smooth;
+	ImGui::SameLine();
+	if (choiceButton(tr("Duro"), brushFalloff_ == BrushFalloff::Hard, ImVec2(88, 0))) brushFalloff_ = BrushFalloff::Hard;
+}
+
 void App::drawFloorOptions()
 {
 	ImGui::SeparatorText(tr("Dibujar suelo"));
@@ -1524,8 +2085,7 @@ void App::drawFloorOptions()
 	if (choiceButton(tr("Hacer hueco"), floorErase_, ImVec2(130, 34))) floorErase_ = true;
 	hint(floorErase_ ? tr("Pinta para quitar suelo. Alrededor de los huecos se ponen paredes solas.")
 	                 : tr("Pinta para añadir suelo. Mantén Mayús para hacer huecos."));
-	ImGui::SliderFloat(tr("Pincel"), &brushRadius_, 25, 1000, "%.0f");
-	ImGui::SetItemTooltip(tr("Tamaño del pincel (también con Ctrl + rueda del ratón)."));
+	drawBrushSettings();
 	ImGui::SeparatorText(tr("¿Qué suelo?"));
 	drawSwatches(true);
 
@@ -1592,8 +2152,7 @@ void App::drawHeightOptions()
 	}
 	hint(tips[int(heightOp_)]);
 	if (heightOp_ == HeightOp::Raise || heightOp_ == HeightOp::Lower) hint(tr("Con Mayús hace lo contrario."));
-	ImGui::SliderFloat(tr("Pincel"), &brushRadius_, 25, 1000, "%.0f");
-	ImGui::SetItemTooltip(tr("Tamaño del pincel (también con Ctrl + rueda del ratón)."));
+	drawBrushSettings();
 	ImGui::SliderFloat(tr("Fuerza"), &brushStrength_, 20, 600, "%.0f");
 	ImGui::Spacing();
 	ImGui::TextColored(kWarn, tr("Las zonas rojas son tan empinadas"));
@@ -1609,7 +2168,8 @@ void App::drawPaintOptions()
 {
 	ImGui::SeparatorText(tr("Pintar el suelo"));
 	hint(tr("Elige un suelo y pinta encima del mapa. Solo cambia el aspecto: la forma no."));
-	ImGui::SliderFloat(tr("Pincel"), &brushRadius_, 25, 1000, "%.0f");
+	drawBrushSettings();
+	hint(tr("Alt + clic toma el material del suelo."));
 	drawSwatches(true);
 	if (ImGui::CollapsingHeader(tr("Ajustes del suelo elegido (avanzado)"))) {
 		nectar::DocTerrain& g = ed_.doc.terrain;
@@ -1631,8 +2191,7 @@ void App::drawWaterOptions()
 	ImGui::SameLine();
 	if (choiceButton(tr("Quitar agua"), waterErase_, ImVec2(130, 34))) waterErase_ = true;
 	hint(waterErase_ ? tr("Pinta para secar el agua.") : tr("Pinta sobre el suelo para hacer un lago. Mantén Mayús para quitar agua."));
-	ImGui::SliderFloat(tr("Pincel"), &brushRadius_, 25, 1000, "%.0f");
-	ImGui::SetItemTooltip(tr("Tamaño del pincel (también con Ctrl + rueda del ratón)."));
+	drawBrushSettings();
 	hint(tr("Cada lago queda plano, a la altura de su orilla más baja."));
 	hint(tr("Solo los Pikmin azules pueden entrar en el agua: es buen sitio para esconder piezas."));
 }
@@ -1655,8 +2214,7 @@ void App::drawPlateauOptions()
 		if (i % 2) ImGui::SameLine();
 		if (choiceButton(amounts[i].label, plateauAmount_ == amounts[i].amount, ImVec2(130, 0))) plateauAmount_ = amounts[i].amount;
 	}
-	ImGui::SliderFloat(tr("Pincel"), &brushRadius_, 25, 1000, "%.0f");
-	ImGui::SetItemTooltip(tr("Tamaño del pincel (también con Ctrl + rueda del ratón)."));
+	drawBrushSettings();
 	ImGui::Spacing();
 	ImGui::TextColored(kWarn, tr("Los bordes son acantilados:"));
 	ImGui::TextColored(kWarn, tr("los Pikmin no pueden subirlos."));
@@ -1671,7 +2229,7 @@ void App::drawScatterOptions()
 	if (choiceButton(tr("Quitar"), scatterErase_, ImVec2(110, 34))) scatterErase_ = true;
 	hint(scatterErase_ ? tr("Pinta para quitar la decoración elegida abajo (sin nada elegido, toda).")
 	                   : tr("Pinta para esparcir lo elegido abajo, girado y de tamaños distintos. Mantén Mayús para quitar."));
-	ImGui::SliderFloat(tr("Pincel"), &brushRadius_, 25, 1000, "%.0f");
+	drawBrushSettings();
 	ImGui::SliderFloat(tr("Cuánta"), &scatterDensity_, 1.0f, 30.0f, "%.0f");
 	ImGui::SliderFloat(tr("Variedad de tamaño"), &scatterSizeVar_, 0.0f, 0.6f, "%.2f");
 	ImGui::Checkbox(tr("Los Pikmin no lo atraviesan"), &scatterCollide_);
@@ -1702,7 +2260,7 @@ void App::drawScatterOptions()
 		ImGui::PushID(it.path);
 		auto pos      = std::find(scatterSet_.begin(), scatterSet_.end(), std::string(it.path));
 		const bool on = pos != scatterSet_.end();
-		if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.95f, 0.6f, 0.15f, 1));
+		if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.52f, 0.66f, 0.25f, 1));
 		const unsigned t   = assetThumb(it.path);
 		const bool pressed = t ? ImGui::ImageButton("##s", ImTextureID(std::intptr_t(t)), ImVec2(52, 52)) : ImGui::Button(tr(it.name), ImVec2(60, 60));
 		if (on) ImGui::PopStyleColor();
@@ -1721,6 +2279,10 @@ void App::scatter(const V3& at)
 {
 	MapDoc& d     = ed_.doc;
 	const float r = brushRadius_;
+	auto distance = [&](float x, float z) {
+		const float dx = std::fabs(x - at.x), dz = std::fabs(z - at.z);
+		return brushShape_ == BrushShape::Square ? std::max(dx, dz) : std::hypot(dx, dz);
+	};
 	auto rnd      = [&]() {
         scatterSeed_ = scatterSeed_ * 1664525u + 1013904223u;
         return float((scatterSeed_ >> 8) & 0xFFFF) / 65535.0f;
@@ -1732,7 +2294,7 @@ void App::scatter(const V3& at)
 			const nectar::DocProp& p = d.props[i];
 			for (int side = 0; side < (d.symmetric ? 2 : 1); side++) {
 				const float px = side ? float(-p.x) : float(p.x), pz = side ? float(-p.z) : float(p.z);
-				if ((px - at.x) * (px - at.x) + (pz - at.z) * (pz - at.z) <= r * r && inSet(p.asset)) {
+				if (distance(px, pz) <= r && inSet(p.asset)) {
 					gone.push_back({ ItemType::Prop, int(i), 0 });
 					break;
 				}
@@ -1740,6 +2302,7 @@ void App::scatter(const V3& at)
 		}
 		if (!gone.empty()) {
 			ed_.clearSelection();
+			remapSessionItemsAfterRemoval(gone);
 			removeItems(d, gone);
 			ed_.touch();
 		}
@@ -1764,8 +2327,16 @@ void App::scatter(const V3& at)
 	};
 	bool changed = false;
 	for (int attempt = 0; attempt < 10; attempt++) {
-		const float a = rnd() * 6.2831853f, dist = std::sqrt(rnd()) * r;
-		const float x = at.x + std::cos(a) * dist, z = at.z + std::sin(a) * dist;
+		float x, z;
+		if (brushShape_ == BrushShape::Square) {
+			x = at.x + (rnd() * 2.0f - 1.0f) * r;
+			z = at.z + (rnd() * 2.0f - 1.0f) * r;
+		} else {
+			const float a = rnd() * 6.2831853f, dist = std::sqrt(rnd()) * r;
+			x = at.x + std::cos(a) * dist;
+			z = at.z + std::sin(a) * dist;
+		}
+		if (brushFalloff_ == BrushFalloff::Smooth && rnd() > std::max(0.0f, 1.0f - distance(x, z) / r)) continue;
 		if (!docSolid(x, z) || wet(x, z)) continue;
 		// Ni en cuestas fuertes ni junto a un borde.
 		const float h = docHeight(x, z);
@@ -1814,6 +2385,31 @@ void App::drawWallOptions()
 	hint(tr("Los muros bajos se pueden ver por encima, pero los Pikmin no los cruzan."));
 }
 
+void App::drawRampOptions()
+{
+	ImGui::SeparatorText(tr("Rampas de terreno"));
+	if (drawingRamp_)
+		ImGui::TextColored(kGood, "%s", tr("PASO 2 DE 2 · Haz clic en el extremo alto"));
+	else
+		ImGui::TextColored(kWarn, "%s", tr("PASO 1 DE 2 · Haz clic en el extremo bajo"));
+	hint(tr("Une dos zonas que ya están a alturas diferentes. No coloca un objeto: modifica el suelo dentro del rectángulo."));
+	ImGui::SliderFloat(tr("Anchura"), &rampWidth_, 100.0f, 1000.0f, "%.0f");
+	if (choiceButton(tr("Perfil suavizado"), rampSmooth_, ImVec2(132, 0))) rampSmooth_ = true;
+	ImGui::SameLine();
+	if (choiceButton(tr("Perfil lineal"), !rampSmooth_, ImVec2(120, 0))) rampSmooth_ = false;
+	if (drawingRamp_ && rampPreviewValid_) {
+		const float distance = std::hypot(rampEnd_.x - rampStart_.x, rampEnd_.z - rampStart_.z);
+		const float height = std::fabs(rampEnd_.y - rampStart_.y);
+		const float slope = distance > 1.0f ? height / distance : 999.0f;
+		if (height < 5.0f)
+			ImGui::TextColored(kWarn, "%s", tr("Sin desnivel: apunta a una zona más alta."));
+		else
+			ImGui::TextColored(slope <= 0.577f ? kGood : kWarn, slope <= 0.577f ? tr("Pendiente transitable: %.0f%%") : tr("Aviso: pendiente demasiado fuerte (%.0f%%)"), slope * 100.0f);
+	}
+	if (drawingRamp_ && ImGui::Button(tr("Cancelar rampa"), ImVec2(-1, 30))) drawingRamp_ = false;
+	hint(tr("La rampa modifica el terreno y se puede deshacer con Ctrl+Z."));
+}
+
 void App::growMap(int dx, int dz)
 {
 	if (!ensureTerrain()) return;
@@ -1824,7 +2420,7 @@ void App::growMap(int dx, int dz)
 const char* App::toolHelp() const
 {
 	switch (tool_) {
-	case Tool::Move: return tr("Haz clic en algo y arrástralo. Q / E: girar. Supr: borrar. Botón derecho: girar la vista.");
+	case Tool::Move: return tr("W: mover · E: girar · R: escalar · Q: giro por pasos · Supr: borrar");
 	case Tool::Place: return tr("Haz clic en el mapa para poner lo elegido a la izquierda.");
 	case Tool::Scatter: return scatterErase_ ? tr("Pinta para quitar decoración.") : tr("Pinta para esparcir decoración (Mayús: quitarla).");
 	case Tool::Floor: return floorErase_ ? tr("Pinta con el ratón para hacer huecos.") : tr("Pinta con el ratón para añadir suelo (Mayús: hacer huecos).");
@@ -1833,6 +2429,7 @@ const char* App::toolHelp() const
 	case Tool::Paint: return tr("Pinta con el ratón para cambiar el aspecto del suelo.");
 	case Tool::Water: return waterErase_ ? tr("Pinta para quitar agua.") : tr("Pinta sobre el suelo para hacer un lago (Mayús: quitar agua).");
 	case Tool::Walls: return tr("Haz clic y arrastra para dibujar un muro.");
+	case Tool::Ramp: return drawingRamp_ ? tr("2/2: mueve el ratón a la zona alta y haz clic para crear.") : tr("1/2: haz clic donde debe empezar la rampa.");
 	}
 	return "";
 }
@@ -1843,14 +2440,30 @@ void App::drawSidePanel(const Rect& r)
 	ImGui::SetNextWindowSize(ImVec2(r.w, r.h));
 	ImGui::Begin("##side", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
 	ed_.pruneSelection();
-	ImGui::BeginChild("top", ImVec2(0, r.h * 0.6f));
+	panelHeading(ed_.selection.empty() ? tr("Tu mapa") : tr("Selección"), ed_.selection.empty() ? tr("Resumen y ambiente") : tr("Ajusta lo que has elegido"));
+	const float headingH = ImGui::GetCursorPosY();
+	ImGui::BeginChild("top", ImVec2(0, r.h * 0.6f - headingH));
 	if (!ed_.selection.empty()) drawSelected();
 	else drawMapPanel();
 	ImGui::EndChild();
 	const ImVec2 cmin = ImGui::GetCursorScreenPos();
 	checklistRect_    = { cmin.x, cmin.y, r.w - 16, r.h * 0.4f - 16 };
 	ImGui::BeginChild("check");
-	drawChecklist();
+	if (ImGui::BeginTabBar("##side_bottom_tabs")) {
+		if (ImGui::BeginTabItem(tr("Jerarquía"))) {
+			drawHierarchy();
+			ImGui::EndTabItem();
+		}
+		if (ImGui::BeginTabItem(tr("Comprobaciones"))) {
+			drawChecklist();
+			ImGui::EndTabItem();
+		}
+		if (ImGui::BeginTabItem(tr("Informe"))) {
+			drawTechnicalReport();
+			ImGui::EndTabItem();
+		}
+		ImGui::EndTabBar();
+	}
 	ImGui::EndChild();
 	ImGui::End();
 }
@@ -1878,7 +2491,7 @@ void App::drawMinimap()
 	if (hovered) ImGui::SetTooltip("%s", tr("Haz clic para mover la vista ahí."));
 
 	ImDrawList* dl = ImGui::GetWindowDrawList();
-	dl->AddRectFilled(o, ImVec2(o.x + w, o.y + h), IM_COL32(24, 26, 31, 255), 4.0f);
+	dl->AddRectFilled(o, ImVec2(o.x + w, o.y + h), IM_COL32(21, 34, 20, 255), 8.0f);
 	// Suelo: celdas sombreadas por altura; agua en azul; huecos vacíos.
 	const int cols = std::max(1, std::min(96, g.grid ? g.nx : 48));
 	const int rows = std::max(1, std::min(96, int(float(cols) * spanZ / spanX + 0.5f)));
@@ -1932,6 +2545,7 @@ void App::drawMinimap()
 	}
 	// Cosas del mapa: puntos con el color de su jugador.
 	for (const ItemRef& it : allItems(d)) {
+		if (itemHidden(it)) continue;
 		const ItemCaps caps = itemCaps(it.type);
 		if (it.type == ItemType::Wall || it.type == ItemType::Pond) continue;
 		const Xform x = getXform(d, it);
@@ -1964,7 +2578,7 @@ void App::drawMinimap()
 		                      IM_COL32(255, 255, 255, 110));
 		dl->AddCircleFilled(t, 3.5f, IM_COL32(255, 255, 255, 255));
 	}
-	dl->AddRect(o, ImVec2(o.x + w, o.y + h), IM_COL32(80, 86, 96, 255), 4.0f);
+	dl->AddRect(o, ImVec2(o.x + w, o.y + h), IM_COL32(112, 139, 59, 255), 8.0f, 0, 2.0f);
 }
 
 void App::drawSelected()
@@ -1972,22 +2586,175 @@ void App::drawSelected()
 	MapDoc& d           = ed_.doc;
 	const ItemRef r     = ed_.selection.back();
 	const ItemCaps caps = itemCaps(r.type);
+	const bool multi    = ed_.selection.size() > 1;
 	bool ch             = false;
-	if (ed_.selection.size() > 1) ImGui::TextColored(kDim, tr("%zu cosas elegidas"), ed_.selection.size());
+	if (multi) ImGui::TextColored(kDim, tr("%zu cosas elegidas"), ed_.selection.size());
 	ImGui::SeparatorText(itemName(d, r).c_str());
-
-	if (caps.rotateY) {
-		if (ImGui::Button(tr("Girar a la izquierda (Q)"), ImVec2(-1, 32))) rotateSelection(-cfg_.snapAngle);
-		if (ImGui::Button(tr("Girar a la derecha (E)"), ImVec2(-1, 32))) rotateSelection(cfg_.snapAngle);
+	ImGui::SeparatorText(tr("Transformación"));
+	Xform transform = getXform(d, r);
+	auto syncMirror = [&](const ItemRef& selected) {
+		ItemRef other;
+		if (mirrorEdits_ && d.symmetric && counterpart(selected, other) && !ed_.selected(other)) mirrorToCounterpart(d, selected);
+	};
+	if (!multi) {
+		bool transformChanged = false;
+		float positionXZ[2] = { float(transform.x), float(transform.z) };
+		ImGui::SetNextItemWidth(-1);
+		if (ImGui::DragFloat2(tr("Posición X / Z"), positionXZ, 1.0f, -10000.0f, 10000.0f, "%.1f")) {
+			transform.x = positionXZ[0];
+			transform.z = positionXZ[1];
+			transformChanged = true;
+		}
+		if (caps.height) {
+			float y = float(transform.y);
+			ImGui::SetNextItemWidth(-1);
+			if (ImGui::DragFloat(r.type == ItemType::Object ? tr("Altura sobre el suelo") : tr("Posición Y"), &y, 1.0f, -2000.0f, 4000.0f, "%.1f")) {
+				transform.y = y;
+				transformChanged = true;
+			}
+		}
+		if (caps.rotateAll) {
+			float rotation[3] = { float(transform.rx), float(transform.ry), float(transform.rz) };
+			ImGui::SetNextItemWidth(-1);
+			if (ImGui::DragFloat3(tr("Rotación X / Y / Z"), rotation, 0.5f, -360.0f, 360.0f, "%.1f°")) {
+				transform.rx = rotation[0];
+				transform.ry = rotation[1];
+				transform.rz = rotation[2];
+				transformChanged = true;
+			}
+		} else if (caps.rotateY) {
+			float rotationY = float(transform.ry);
+			ImGui::SetNextItemWidth(-1);
+			if (ImGui::DragFloat(tr("Rotación Y"), &rotationY, 0.5f, -360.0f, 360.0f, "%.1f°")) {
+				transform.ry = rotationY;
+				transformChanged = true;
+			}
+		}
+		if (caps.scale) {
+			float scale = float(transform.scale);
+			ImGui::SetNextItemWidth(-1);
+			if (ImGui::DragFloat(tr("Escala uniforme"), &scale, 0.01f, 0.01f, 20.0f, "%.2f")) {
+				transform.scale = scale;
+				transformChanged = true;
+			}
+		}
+		if (transformChanged) {
+			setXform(d, r, transform);
+			ItemRef other;
+			if (mirrorEdits_ && d.symmetric && counterpart(r, other) && !ed_.selected(other)) mirrorToCounterpart(d, r);
+			ch = true;
+		}
+	} else {
+		V3 pivot;
+		selectionPivot(pivot);
+		float center[2] = { pivot.x, pivot.z };
+		ImGui::SetNextItemWidth(-1);
+		if (ImGui::DragFloat2(tr("Centro X / Z"), center, 1.0f, -10000.0f, 10000.0f, "%.1f")) {
+			const double dx = center[0] - pivot.x, dz = center[1] - pivot.z;
+			for (const ItemRef& selected : ed_.selection) {
+				Xform x = getXform(d, selected);
+				const double oldGround = docHeight(float(x.x), float(x.z));
+				x.x += dx;
+				x.z += dz;
+				if (selected.type == ItemType::Prop || selected.type == ItemType::Gen) x.y += docHeight(float(x.x), float(x.z)) - oldGround;
+				setXform(d, selected, x);
+				ItemRef other;
+				if (mirrorEdits_ && d.symmetric && counterpart(selected, other) && !ed_.selected(other)) mirrorToCounterpart(d, selected);
+			}
+			ch = true;
+		}
+		const bool allHeight = std::all_of(ed_.selection.begin(), ed_.selection.end(), [](const ItemRef& item) { return itemCaps(item.type).height; });
+		const bool allRotate = std::all_of(ed_.selection.begin(), ed_.selection.end(), [](const ItemRef& item) { return itemCaps(item.type).rotateY; });
+		const bool allScale = std::all_of(ed_.selection.begin(), ed_.selection.end(), [](const ItemRef& item) { return itemCaps(item.type).scale; });
+		auto differs = [&](auto value) {
+			for (const ItemRef& selected : ed_.selection) if (std::fabs(value(getXform(d, selected)) - value(transform)) > 0.001) return true;
+			return false;
+		};
+		if (allHeight) {
+			if (differs([](const Xform& x) { return x.y; })) ImGui::TextColored(kDim, "%s", tr("— valores distintos"));
+			float y = float(transform.y);
+			if (ImGui::DragFloat(tr("Posición Y"), &y, 1.0f, -2000.0f, 4000.0f, "%.1f")) {
+				for (const ItemRef& selected : ed_.selection) { Xform x = getXform(d, selected); x.y = y; setXform(d, selected, x); syncMirror(selected); }
+				ch = true;
+			}
+		}
+		if (allRotate) {
+			if (differs([](const Xform& x) { return x.ry; })) ImGui::TextColored(kDim, "%s", tr("— valores distintos"));
+			float ry = float(transform.ry);
+			if (ImGui::DragFloat(tr("Rotación Y"), &ry, 0.5f, -360.0f, 360.0f, "%.1f°")) {
+				for (const ItemRef& selected : ed_.selection) { Xform x = getXform(d, selected); x.ry = ry; setXform(d, selected, x); syncMirror(selected); }
+				ch = true;
+			}
+		}
+		if (allScale) {
+			if (differs([](const Xform& x) { return x.scale; })) ImGui::TextColored(kDim, "%s", tr("— valores distintos"));
+			float scale = float(transform.scale);
+			if (ImGui::DragFloat(tr("Escala uniforme"), &scale, 0.01f, 0.01f, 20.0f, "%.2f")) {
+				for (const ItemRef& selected : ed_.selection) { Xform x = getXform(d, selected); x.scale = scale; setXform(d, selected, x); syncMirror(selected); }
+				ch = true;
+			}
+		}
 	}
-	if (caps.height) {
+	hint(tr("Arrastra un valor o haz doble clic para escribir una cifra exacta."));
+	const float transformButtonW = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+	ImGui::BeginDisabled(multi);
+	if (ImGui::Button(tr("Copiar transformación"), ImVec2(transformButtonW, 30))) {
+		transformClipboard_ = getXform(d, r);
+		transformClipboardCaps_ = caps;
+		hasTransformClipboard_ = true;
+		notify(0, tr("Transformación copiada."));
+	}
+	ImGui::SameLine();
+	ImGui::BeginDisabled(!hasTransformClipboard_);
+	if (ImGui::Button(tr("Pegar transformación"), ImVec2(-1, 30))) {
+		Xform pasted = getXform(d, r);
+		pasted.x = transformClipboard_.x;
+		pasted.z = transformClipboard_.z;
+		if (caps.height && transformClipboardCaps_.height) pasted.y = transformClipboard_.y;
+		if (caps.rotateY && transformClipboardCaps_.rotateY) pasted.ry = transformClipboard_.ry;
+		if (caps.rotateAll && transformClipboardCaps_.rotateAll) {
+			pasted.rx = transformClipboard_.rx;
+			pasted.rz = transformClipboard_.rz;
+		}
+		if (caps.scale && transformClipboardCaps_.scale) pasted.scale = transformClipboard_.scale;
+		setXform(d, r, pasted);
+		ItemRef other;
+		if (mirrorEdits_ && d.symmetric && counterpart(r, other) && !ed_.selected(other)) mirrorToCounterpart(d, r);
+		ch = true;
+	}
+	ImGui::EndDisabled();
+	if (ImGui::Button(tr("Restablecer transformación"), ImVec2(-1, 30))) {
+		Xform reset = getXform(d, r);
+		reset.x = reset.y = reset.z = 0.0;
+		reset.rx = reset.ry = reset.rz = 0.0;
+		reset.scale = 1.0;
+		setXform(d, r, reset);
+		ItemRef other;
+		if (mirrorEdits_ && d.symmetric && counterpart(r, other) && !ed_.selected(other)) mirrorToCounterpart(d, r);
+		ch = true;
+	}
+	ImGui::SetItemTooltip("%s", tr("Devuelve la posición y la rotación a cero, y la escala a uno. Puedes deshacerlo con Ctrl+Z."));
+	ImGui::EndDisabled();
+
+	if (selectionCanRotate()) {
+		if (ImGui::Button(tr("Girar a la izquierda"), ImVec2(-1, 32))) rotateSelection(-cfg_.snapAngle);
+		if (ImGui::Button(tr("Girar a la derecha"), ImVec2(-1, 32))) rotateSelection(cfg_.snapAngle);
+	}
+	const bool anyHeight = std::any_of(ed_.selection.begin(), ed_.selection.end(), [](const ItemRef& item) { return itemCaps(item.type).height; });
+	if (anyHeight) {
 		const float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
 		if (ImGui::Button(tr("Subir (Re Pág)"), ImVec2(half, 32))) liftSelection(ImGui::GetIO().KeyShift ? 100 : 20);
 		ImGui::SameLine();
 		if (ImGui::Button(tr("Hundir (Av Pág)"), ImVec2(half, 32))) liftSelection(ImGui::GetIO().KeyShift ? -100 : -20);
 		hint(tr("Con Mayúsculas sube o baja más de golpe."));
 	}
+	if (selectionCanGround()) {
+		if (ImGui::Button(tr("Colocar sobre el terreno"), ImVec2(-1, 32))) placeSelectionOnGround();
+		ImGui::SetItemTooltip("%s", tr("Baja al suelo la decoración y los objetos seleccionados que estén flotando o enterrados."));
+	}
 	const auto i = std::size_t(r.index);
+	if (!multi) {
+	ImGui::SeparatorText(tr("Jugabilidad y propiedades"));
 	switch (r.type) {
 	case ItemType::Pellet: {
 		std::string& id = d.pellets[i].id;
@@ -2050,11 +2817,6 @@ void App::drawSelected()
 		nectar::DocObject& o            = d.objects[i];
 		const nectar::ObjectInfo* info = objectInfo(o.kind);
 		if (info) hint(tr(info->hint));
-		float above = float(o.y);
-		if (ImGui::DragFloat(tr("Altura sobre el suelo"), &above, 2.0f, -400.0f, 1000.0f, "%.0f")) {
-			o.y = above;
-			ch  = true;
-		}
 		if (o.kind.rfind("bridge", 0) == 0 || o.kind.rfind("slope", 0) == 0) {
 			ImGui::Text(tr("Trabajo para construirlo:"));
 			const struct {
@@ -2068,7 +2830,7 @@ void App::drawSelected()
 					ch     = true;
 				}
 			}
-			hint(tr("Se construye hacia donde mira: gíralo con Q / E."));
+			hint(tr("Se construye hacia donde mira: gíralo con el aro (E)."));
 		}
 		if (o.kind == "push_rock") {
 			float push = float(o.push);
@@ -2076,7 +2838,7 @@ void App::drawSelected()
 				o.push = push;
 				ch     = true;
 			}
-			hint(tr("La línea amarilla enseña hacia dónde va. Gíralo con Q / E."));
+			hint(tr("La línea amarilla enseña hacia dónde va. Gíralo con el aro (E)."));
 		}
 		break;
 	}
@@ -2088,16 +2850,6 @@ void App::drawSelected()
 	case ItemType::BombPile: hint(tr("Rocas bomba para que los Pikmin amarillos rompan la puerta.")); break;
 	case ItemType::Prop: {
 		nectar::DocProp& p = d.props[i];
-		float s = float(p.scale);
-		if (ImGui::SliderFloat(tr("Tamaño"), &s, 0.25f, 4.0f, "%.2f")) {
-			p.scale = s;
-			ch      = true;
-		}
-		float above = float(p.y - docHeight(float(p.x), float(p.z)));
-		if (ImGui::DragFloat(tr("Altura sobre el suelo"), &above, 2.0f, -600.0f, 1500.0f, "%.0f")) {
-			p.y = docHeight(float(p.x), float(p.z)) + above;
-			ch  = true;
-		}
 		ch |= ImGui::Checkbox(tr("Los Pikmin no lo atraviesan"), &p.collide);
 		break;
 	}
@@ -2162,13 +2914,115 @@ void App::drawSelected()
 	}
 	}
 
+	nectar::DocReaction* reaction = nullptr;
+	const char* reactionTrigger = nullptr;
+	if (r.type == ItemType::Enemy) {
+		reaction = &d.enemies[i].reaction;
+		reactionTrigger = tr("Al derrotar al enemigo");
+	} else if (r.type == ItemType::Guard) {
+		reaction = &d.guards[i].reaction;
+		reactionTrigger = tr("Al derrotar al guardián");
+	} else if (r.type == ItemType::Gate) {
+		reaction = &d.gates[r.index].reaction;
+		reactionTrigger = tr("Al destruir la compuerta");
+	} else if (r.type == ItemType::Object && d.objects[i].kind != "nectar") {
+		reaction = &d.objects[i].reaction;
+		const std::string& kind = d.objects[i].kind;
+		reactionTrigger = kind.rfind("bridge", 0) == 0 || kind.rfind("slope", 0) == 0 ? tr("Al terminar de construirlo")
+		                : kind == "push_rock" ? tr("Al terminar de empujarlo")
+		                : kind == "key" ? tr("Al recoger la llave")
+		                : kind == "key_door" ? tr("Al abrir la puerta")
+		                : kind.rfind("gate_", 0) == 0 ? tr("Al destruir la compuerta") : tr("Al destruirlo");
+	}
+	if (reaction) {
+		bool reactionChanged = false;
+		ImGui::PushID("reaction");
+		ImGui::SeparatorText(tr("Reacción al interactuar"));
+		ImGui::TextColored(kDim, "%s", reactionTrigger);
+		const char* actions[] = { tr("No ocurre nada"), tr("Aparecen enemigos"), tr("Aparecen pellets"), tr("Aparecen rocas bomba"), tr("Aparece néctar") };
+		int action = reaction->action == "enemy" ? 1 : reaction->action == "pellet" ? 2 : reaction->action == "bomb" ? 3 : reaction->action == "nectar" ? 4 : 0;
+		ImGui::SetNextItemWidth(-1);
+		if (ImGui::Combo(tr("Entonces ocurre"), &action, actions, 5)) {
+			if (action == 0) *reaction = nectar::DocReaction {};
+			else reaction->action = action == 1 ? "enemy" : action == 2 ? "pellet" : action == 3 ? "bomb" : "nectar";
+			if (action == 1 && !enemyInfo(reaction->value)) reaction->value = "chappy";
+			if (action == 2 && !validPelletId(reaction->value)) reaction->value = "pr01";
+			if (action >= 3) reaction->value.clear();
+			ch = reactionChanged = true;
+		}
+		if (action == 1) {
+			const nectar::EnemyInfo* selected = enemyInfo(reaction->value);
+			if (ImGui::BeginCombo(tr("Enemigo que aparece"), selected ? tr(selected->label) : reaction->value.c_str())) {
+				for (const nectar::EnemyInfo& enemy : nectar::enemyTypes()) {
+					if (ImGui::Selectable(tr(enemy.label), reaction->value == enemy.id)) {
+						reaction->value = enemy.id;
+						ch = reactionChanged = true;
+					}
+				}
+				ImGui::EndCombo();
+			}
+		} else if (action == 2) {
+			int colour = pelletColour(reaction->value), value = pelletValue(reaction->value);
+			const char* colours[] = { tr("Roja"), tr("Azul"), tr("Amarilla") };
+			for (int c = 0; c < 3; c++) {
+				if (c) ImGui::SameLine();
+				if (choiceButton(colours[c], colour == c, ImVec2(78, 0))) {
+					reaction->value = pelletId(c, value);
+					ch = reactionChanged = true;
+				}
+			}
+			const int values[] = { 1, 5, 10, 20 };
+			for (int k = 0; k < 4; k++) {
+				if (k) ImGui::SameLine();
+				char label[8];
+				std::snprintf(label, sizeof(label), "%d", values[k]);
+				if (choiceButton(label, value == values[k], ImVec2(55, 0))) {
+					reaction->value = pelletId(colour, values[k]);
+					ch = reactionChanged = true;
+				}
+			}
+		}
+		if (action != 0) {
+			if (ImGui::SliderInt(tr("Cantidad que aparece"), &reaction->count, 1, 8)) ch = reactionChanged = true;
+			if (reaction->count > 1) {
+				float radius = float(reaction->radius);
+				if (ImGui::SliderFloat(tr("Separación al aparecer"), &radius, 0.0f, 400.0f, "%.0f")) {
+					reaction->radius = radius;
+					ch = reactionChanged = true;
+				}
+			}
+			hint(tr("La reacción ocurre una sola vez y aparece alrededor del elemento."));
+			if (d.symmetric && (r.type == ItemType::Enemy || r.type == ItemType::Guard || r.type == ItemType::Object))
+				hint(tr("En un mapa espejo, cada copia activa su propia reacción."));
+		}
+		if (reactionChanged && r.type == ItemType::Gate && mirrorEdits_ && d.symmetric) d.gates[1 - r.index].reaction = *reaction;
+		ImGui::PopID();
+	}
+	}
+	if (!multi && ImGui::CollapsingHeader(tr("Información técnica"))) {
+		ImGui::TextColored(kDim, "%s", tr("Referencia interna"));
+		ImGui::SameLine();
+		ImGui::Text("%d:%d:%d", int(r.type), r.index, r.sub);
+		const std::string asset = markerAsset(r);
+		if (!asset.empty()) {
+			ImGui::TextColored(kDim, "%s", tr("Ruta del asset"));
+			ImGui::TextWrapped("%s", asset.c_str());
+			if (ImGui::SmallButton(tr("Copiar ruta"))) {
+				ImGui::SetClipboardText(asset.c_str());
+				notify(0, tr("Ruta copiada al portapapeles."));
+			}
+		}
+	}
+
 	ImGui::Spacing();
-	if (caps.perPlayer) {
+	ImGui::SeparatorText(tr("Acciones"));
+	if (!multi && caps.perPlayer) {
 		ImGui::TextColored(r.index == 0 ? ImVec4(1, 0.5f, 0.45f, 1) : ImVec4(0.45f, 0.65f, 1, 1), tr("Es del %s."), r.index == 0 ? tr("Jugador 1") : tr("Jugador 2"));
 		if (d.symmetric && mirrorEdits_) hint(tr("Al moverlo, el del otro jugador se coloca solo en el lado contrario."));
 	}
-	if (caps.twinned && d.symmetric) hint(tr("Como el mapa es espejo, el otro jugador tiene uno igual en su lado (se ve más claro)."));
-	if (caps.removable) {
+	if (!multi && caps.twinned && d.symmetric) hint(tr("Como el mapa es espejo, el otro jugador tiene uno igual en su lado (se ve más claro)."));
+	const bool anyRemovable = std::any_of(ed_.selection.begin(), ed_.selection.end(), [](const ItemRef& item) { return itemCaps(item.type).removable; });
+	if (anyRemovable) {
 		if (ImGui::Button(tr("Duplicar (Ctrl+D)"), ImVec2(150, 32))) duplicateSelection();
 		ImGui::SameLine();
 		if (ImGui::Button(tr("Borrar (Supr)"), ImVec2(-1, 32))) {
@@ -2285,6 +3139,115 @@ void App::drawMapPanel()
 	if (ch) ed_.touch();
 }
 
+void App::drawHierarchy()
+{
+	const MapDoc& d = ed_.doc;
+	const std::vector<ItemRef> items = allItems(d);
+	ImGui::SetNextItemWidth(hierarchySearch_[0] ? -30.0f : -1.0f);
+	ImGui::InputTextWithHint("##hierarchy_search", tr("Buscar..."), hierarchySearch_, sizeof(hierarchySearch_));
+	if (hierarchySearch_[0]) {
+		ImGui::SameLine();
+		if (ImGui::SmallButton("×##clear_hierarchy_search")) hierarchySearch_[0] = '\0';
+	}
+	const std::string query = searchKey(hierarchySearch_);
+	struct Group {
+		const char* name;
+		int id;
+	};
+	const Group groups[] = { { tr("Jugador 1"), 0 }, { tr("Jugador 2"), 1 }, { tr("Objetivos"), 2 }, { tr("Enemigos"), 3 },
+	                         { tr("Construcciones"), 4 }, { tr("Muros y agua"), 5 }, { tr("Decoración"), 6 }, { tr("Elementos del escenario"), 7 } };
+	auto groupOf = [](const ItemRef& r) {
+		if (itemCaps(r.type).perPlayer) return r.index == 0 ? 0 : 1;
+		switch (r.type) {
+		case ItemType::Pellet:
+		case ItemType::Piece:
+		case ItemType::BigPiece: return 2;
+		case ItemType::Enemy:
+		case ItemType::Guard: return 3;
+		case ItemType::Object: return 4;
+		case ItemType::Wall:
+		case ItemType::Pond: return 5;
+		case ItemType::Prop: return 6;
+		case ItemType::Gen: return 7;
+		default: return 7;
+		}
+	};
+	auto sameKind = [&](const ItemRef& a, const ItemRef& b) {
+		if (a.type != b.type) return false;
+		switch (a.type) {
+		case ItemType::Onion: return a.sub == b.sub;
+		case ItemType::Pellet: return d.pellets[std::size_t(a.index)].id == d.pellets[std::size_t(b.index)].id;
+		case ItemType::Piece: {
+			const nectar::DocPiece& x = d.pieces[std::size_t(a.index)], &y = d.pieces[std::size_t(b.index)];
+			return x.kind == y.kind && x.part == y.part;
+		}
+		case ItemType::Guard: return d.guards[std::size_t(a.index)].enemy == d.guards[std::size_t(b.index)].enemy;
+		case ItemType::Enemy: return d.enemies[std::size_t(a.index)].type == d.enemies[std::size_t(b.index)].type;
+		case ItemType::Object: return d.objects[std::size_t(a.index)].kind == d.objects[std::size_t(b.index)].kind;
+		case ItemType::Prop: return d.props[std::size_t(a.index)].asset == d.props[std::size_t(b.index)].asset;
+		case ItemType::Gen: {
+			const nectar::DocGen& x = d.gens[std::size_t(a.index)], &y = d.gens[std::size_t(b.index)];
+			return x.file == y.file && x.label == y.label && x.model == y.model;
+		}
+		case ItemType::Wall: return d.walls[std::size_t(a.index)].isArc == d.walls[std::size_t(b.index)].isArc;
+		default: return true;
+		}
+	};
+	hint(tr("Clic selecciona; Ctrl combina; doble clic enfoca. V oculta y B bloquea durante esta sesión."));
+	int totalMatches = 0;
+	for (const Group& group : groups) {
+		int count = 0;
+		for (const ItemRef& r : items) {
+			if (groupOf(r) == group.id && (query.empty() || searchKey(itemName(d, r)).find(query) != std::string::npos)) count++;
+		}
+		if (!count && !query.empty()) continue;
+		totalMatches += count;
+		char heading[128];
+		std::snprintf(heading, sizeof(heading), "%s (%d)##hierarchy_group_%d", group.name, count, group.id);
+		const ImGuiTreeNodeFlags flags = (group.id <= 2 || !query.empty()) ? ImGuiTreeNodeFlags_DefaultOpen : ImGuiTreeNodeFlags_None;
+		if (!ImGui::TreeNodeEx(heading, flags)) continue;
+		int row = 0;
+		for (const ItemRef& r : items) {
+			if (groupOf(r) != group.id) continue;
+			const std::string label = itemName(d, r);
+			if (!query.empty() && searchKey(label).find(query) == std::string::npos) continue;
+			ImGui::PushID(group.id * 100000 + row++);
+			const bool selected = ed_.selected(r);
+			const bool hidden = itemHidden(r), locked = itemLocked(r);
+			const bool canHide = r.type != ItemType::Wall && r.type != ItemType::Pond;
+			ImGui::BeginDisabled(hidden || locked);
+			const float labelW = std::max(40.0f, ImGui::GetContentRegionAvail().x - 58.0f);
+			if (ImGui::Selectable(label.c_str(), selected, ImGuiSelectableFlags_AllowDoubleClick, ImVec2(labelW, 0))) {
+				ed_.select(r, ImGui::GetIO().KeyCtrl);
+				tool_ = Tool::Move;
+				if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && ed_.selected(r)) focusSelection();
+			}
+			ImGui::EndDisabled();
+			if (ImGui::BeginPopupContextItem("##hierarchy_item_menu")) {
+				if (ImGui::MenuItem(tr("Seleccionar todos los del mismo tipo"))) {
+					ed_.clearSelection();
+					for (const ItemRef& candidate : items) {
+						if (sameKind(candidate, r) && !itemHidden(candidate) && !itemLocked(candidate)) ed_.selection.push_back(candidate);
+					}
+					tool_ = Tool::Move;
+				}
+				ImGui::EndPopup();
+			}
+			ImGui::SameLine();
+			ImGui::BeginDisabled(!canHide);
+			if (choiceButton("V##visibility", !hidden, ImVec2(22, 0))) toggleHidden(r);
+			ImGui::EndDisabled();
+			ImGui::SetItemTooltip("%s", hidden ? tr("Mostrar en el visor") : tr("Ocultar temporalmente"));
+			ImGui::SameLine();
+			if (choiceButton("B##lock", locked, ImVec2(22, 0))) toggleLocked(r);
+			ImGui::SetItemTooltip("%s", locked ? tr("Desbloquear selección") : tr("Bloquear selección"));
+			ImGui::PopID();
+		}
+		ImGui::TreePop();
+	}
+	if (!query.empty() && totalMatches == 0) hint(tr("No hay elementos que coincidan con la búsqueda."));
+}
+
 void App::drawChecklist()
 {
 	ImGui::SeparatorText(tr("¿Está listo para jugar?"));
@@ -2306,6 +3269,16 @@ void App::drawChecklist()
 			tool_         = Tool::Move;
 			focusSelection();
 		}
+		if (i.fix != IssueFix::None) {
+			if (i.hasItem) ImGui::SameLine();
+			const char* fixLabel = i.fix == IssueFix::ClampInside ? tr("Mover dentro") : i.fix == IssueFix::NearestGround ? tr("Buscar suelo cercano")
+			                     : i.fix == IssueFix::DeleteItem ? tr("Borrar elemento") : tr("Normalizar escala");
+			if (ImGui::SmallButton(fixLabel)) applyIssueFix(i);
+		}
+		if (i.fix == IssueFix::NearestGround) {
+			ImGui::SameLine();
+			if (ImGui::SmallButton(tr("Crear suelo debajo"))) createGroundUnder(i.item);
+		}
 		ImGui::PopID();
 	}
 	if (compiled_.ok) {
@@ -2313,6 +3286,57 @@ void App::drawChecklist()
 		ImGui::Spacing();
 		ImGui::TextColored(kDim, tr("Tamaño para el juego:"));
 		ImGui::ProgressBar(use, ImVec2(-1, 0), use < 0.75f ? tr("Bien") : use < 1.0f ? tr("Casi lleno") : tr("Demasiado"));
+	}
+}
+
+void App::drawTechnicalReport()
+{
+	ImGui::SeparatorText(tr("Resultado compilado"));
+	if (preview_.busy() && compiled_.generation != ed_.liveGeneration) {
+		hint(tr("Compilando los últimos cambios..."));
+		return;
+	}
+	if (compiled_.generation != ed_.liveGeneration) {
+		hint(tr("Todavía no hay un informe actualizado."));
+		return;
+	}
+	const ImVec4 state = compiled_.playable ? kGood : compiled_.ok ? kWarn : kBad;
+	ImGui::TextColored(state, "%s", compiled_.playable ? tr("Jugable") : compiled_.ok ? tr("Compila con avisos") : tr("No compila"));
+	if (ImGui::BeginTable("##technical_report", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
+		auto row = [](const char* label, const std::string& value) {
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::TextUnformatted(label);
+			ImGui::TableSetColumnIndex(1);
+			ImGui::TextUnformatted(value.c_str());
+		};
+		row(tr("Vértices"), std::to_string(compiled_.vertices));
+		row(tr("Triángulos de colisión"), std::to_string(compiled_.collisionTris));
+		row(tr("Puntos de ruta"), std::to_string(compiled_.routePoints));
+		const std::map<int, int> components = routeComponents(compiled_.routes);
+		std::set<int> componentIds;
+		for (const auto& entry : components) componentIds.insert(entry.second);
+		row(tr("Grupos de rutas"), std::to_string(componentIds.size()));
+		row(tr("Decoración compilada"), std::to_string(compiled_.props));
+		row(tr("Tamaño compilado"), std::to_string((compiled_.bytes + 1023) / 1024) + " KiB");
+		row(tr("Piezas"), std::to_string(ed_.doc.pieces.size()));
+		row(tr("Pastillas"), std::to_string(ed_.doc.pellets.size()));
+		row(tr("Enemigos"), std::to_string(ed_.doc.enemies.size() + ed_.doc.guards.size()));
+		row(tr("Construcciones"), std::to_string(ed_.doc.objects.size()));
+		std::set<std::string> uniqueAssets;
+		for (const nectar::DocProp& p : ed_.doc.props) uniqueAssets.insert(p.asset);
+		for (const nectar::DocGen& g : ed_.doc.gens) uniqueAssets.insert(g.file.empty() ? g.model : g.file);
+		row(tr("Assets únicos"), std::to_string(uniqueAssets.size()));
+		ImGui::EndTable();
+	}
+	if (!compiled_.error.empty()) {
+		ImGui::Spacing();
+		ImGui::SeparatorText(tr("Detalle técnico"));
+		ImGui::TextWrapped("%s", compiled_.error.c_str());
+		if (ImGui::Button(tr("Copiar detalle"), ImVec2(-1, 30))) {
+			ImGui::SetClipboardText(compiled_.error.c_str());
+			notify(0, tr("Detalle copiado al portapapeles."));
+		}
 	}
 }
 
@@ -2450,12 +3474,15 @@ void App::drawHelp()
 	ImGui::TextWrapped(tr("2. Con «Poner cosas» añade piezas de la nave, pastillas, Bulborbs y decoración."));
 	ImGui::TextWrapped(tr("3. Coloca las salidas, cebollas y cohetes de cada jugador con «Mover y girar»."));
 	ImGui::TextWrapped(tr("4. Mira a la derecha si está listo y pulsa «Probar en el juego»."));
+	ImGui::TextWrapped(tr("5. Usa Vista para revisar colisión, rutas y pendientes antes de jugar."));
+	ImGui::TextWrapped(tr("6. Las comprobaciones pueden mover elementos, crear suelo o corregir errores seguros."));
+	ImGui::TextWrapped(tr("7. Rampas une dos alturas: marca primero el extremo bajo y después el alto."));
 	ImGui::SeparatorText(tr("La vista"));
 	ImGui::TextWrapped("%s%s", tr("Botón derecho + arrastrar: girar la vista. Rueda: acercar y alejar. Botón central: desplazar. "),
 	                   tr("Botón derecho + W A S D: volar."));
 	ImGui::SeparatorText(tr("Teclas"));
 	ImGui::TextWrapped("%s%s", tr("1-9: herramientas · Ctrl+Z: deshacer · Ctrl+Y: rehacer · Ctrl+S: guardar · F5: probar · "),
-	                   tr("Q / E: girar · Supr: borrar · Ctrl+D: duplicar · Ctrl+C / Ctrl+V: copiar y pegar · F: ver de cerca · T: vista desde arriba"));
+	                   tr("W: mover · E: girar · R: escalar · Q: giro por pasos · Supr: borrar · Ctrl+D: duplicar · F: ver de cerca · T: vista desde arriba"));
 	ImGui::Spacing();
 	if (ImGui::Button(tr("Ver el tutorial otra vez"))) {
 		tutorialStep_ = 0;
@@ -2550,22 +3577,38 @@ void App::handleShortcuts()
 	if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
 		ed_.clearSelection();
 		drawingWall_ = false;
+		drawingRamp_ = false;
 	}
 	// Letras sueltas: no mientras se vuela con el botón derecho (WASD).
 	if (!ctrl && !ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
-		if (ImGui::IsKeyPressed(ImGuiKey_Q, false)) rotateSelection(-cfg_.snapAngle);
-		if (ImGui::IsKeyPressed(ImGuiKey_E, false)) rotateSelection(cfg_.snapAngle);
+		if (ImGui::IsKeyPressed(ImGuiKey_W, false)) {
+			tool_ = Tool::Move;
+			transformMode_ = TransformMode::Move;
+		}
+		if (ImGui::IsKeyPressed(ImGuiKey_E, false)) {
+			tool_ = Tool::Move;
+			transformMode_ = TransformMode::Rotate;
+		}
+		if (ImGui::IsKeyPressed(ImGuiKey_R, false)) {
+			tool_ = Tool::Move;
+			transformMode_ = TransformMode::Scale;
+		}
+		if (ImGui::IsKeyPressed(ImGuiKey_Q, false)) rotateSelection(io.KeyShift ? cfg_.snapAngle : -cfg_.snapAngle);
 		if (ImGui::IsKeyPressed(ImGuiKey_PageUp)) liftSelection(io.KeyShift ? 100 : 20);
 		if (ImGui::IsKeyPressed(ImGuiKey_PageDown)) liftSelection(io.KeyShift ? -100 : -20);
 		if (ImGui::IsKeyPressed(ImGuiKey_T, false)) cam_.topDown = !cam_.topDown;
 		if (ImGui::IsKeyPressed(ImGuiKey_F, false)) focusSelection();
-		const Tool keys[] = { Tool::Move, Tool::Place, Tool::Floor, Tool::Height, Tool::Plateau, Tool::Paint, Tool::Water, Tool::Walls, Tool::Scatter };
-		for (int i = 0; i < 9; i++) {
-			if (!ImGui::IsKeyPressed(ImGuiKey(ImGuiKey_1 + i), false)) continue;
+		const Tool keys[] = { Tool::Move, Tool::Place, Tool::Floor, Tool::Height, Tool::Plateau, Tool::Paint, Tool::Water, Tool::Walls, Tool::Ramp, Tool::Scatter };
+		for (int i = 0; i < 10; i++) {
+			const ImGuiKey key = i == 9 ? ImGuiKey_0 : ImGuiKey(ImGuiKey_1 + i);
+			if (!ImGui::IsKeyPressed(key, false)) continue;
 			const bool terrain = keys[i] != Tool::Move && keys[i] != Tool::Place && keys[i] != Tool::Walls && keys[i] != Tool::Scatter;
 			if (courseMode() && (keys[i] == Tool::Walls || keys[i] == Tool::Scatter))
 				notify(1, tr("En los escenarios del juego todavía no se pueden poner muros ni decoración."));
-			else if (!terrain || ensureTerrain()) tool_ = keys[i];
+			else if (!terrain || ensureTerrain()) {
+				tool_ = keys[i];
+				if (tool_ != Tool::Ramp) drawingRamp_ = false;
+			}
 		}
 	}
 }
@@ -2581,6 +3624,142 @@ bool App::project(const V3& p, const ImVec2& origin, const ImVec2& size, ImVec2&
 	if (cw <= 0) return false;
 	out = ImVec2(origin.x + (cx / cw * 0.5f + 0.5f) * size.x, origin.y + (1 - (cy / cw * 0.5f + 0.5f)) * size.y);
 	return true;
+}
+
+bool App::selectionPivot(V3& pivot) const
+{
+	if (ed_.selection.empty()) return false;
+	pivot = V3();
+	int count = 0;
+	for (const ItemRef& r : ed_.selection) {
+		if (!itemExists(ed_.doc, r)) continue;
+		const Xform x = getXform(ed_.doc, r);
+		pivot.x += float(x.x);
+		pivot.z += float(x.z);
+		count++;
+	}
+	if (!count) return false;
+	pivot.x /= float(count);
+	pivot.z /= float(count);
+	pivot.y = docHeight(pivot.x, pivot.z) + 55.0f;
+	return true;
+}
+
+bool App::selectionCanRotate() const
+{
+	if (ed_.selection.size() > 1) return true;
+	for (const ItemRef& r : ed_.selection) {
+		if (itemExists(ed_.doc, r) && itemCaps(r.type).rotateY) return true;
+	}
+	return false;
+}
+
+bool App::selectionCanScale() const
+{
+	if (ed_.selection.empty()) return false;
+	for (const ItemRef& r : ed_.selection) {
+		if (!itemExists(ed_.doc, r) || !itemCaps(r.type).scale) return false;
+	}
+	return true;
+}
+
+V3 App::moveAxis(int axis) const
+{
+	if (!cfg_.localGizmo || ed_.selection.empty()) return axis == 1 ? V3(1, 0, 0) : V3(0, 0, 1);
+	const ItemRef& primary = ed_.selection.back();
+	if (!itemExists(ed_.doc, primary)) return axis == 1 ? V3(1, 0, 0) : V3(0, 0, 1);
+	const float a = float(getXform(ed_.doc, primary).ry * 3.14159265358979323846 / 180.0);
+	return axis == 1 ? V3(std::cos(a), 0, -std::sin(a)) : V3(std::sin(a), 0, std::cos(a));
+}
+
+int App::moveGizmoAxis(const ImVec2& origin, const ImVec2& size, const ImVec2& mouse) const
+{
+	V3 pivot;
+	if (tool_ != Tool::Move || !selectionPivot(pivot)) return 0;
+	ImVec2 c, x, z;
+	if (!project(pivot, origin, size, c)) return 0;
+	if (transformMode_ == TransformMode::Rotate) {
+		if (!selectionCanRotate()) return 0;
+		const float radius = 58.0f;
+		return std::fabs(std::hypot(mouse.x - c.x, mouse.y - c.y) - radius) <= 10.0f ? 3 : 0;
+	}
+	if (transformMode_ == TransformMode::Scale) {
+		if (!selectionCanScale()) return 0;
+		const ImVec2 end(c.x + 52.0f, c.y - 52.0f), start(c.x + 13.0f, c.y - 13.0f);
+		return pointSegmentDistance(mouse, start, end) <= 10.0f ? 4 : 0;
+	}
+	const float length = std::max(90.0f, (cam_.topDown ? cam_.topZoom : cam_.distance) * 0.16f);
+	const bool hasX = project(pivot + moveAxis(1) * length, origin, size, x);
+	const bool hasZ = project(pivot + moveAxis(2) * length, origin, size, z);
+	auto distance = [&](const ImVec2& end, bool visible) {
+		if (!visible) return 1e9f;
+		const float vx = end.x - c.x, vy = end.y - c.y;
+		const float len = std::hypot(vx, vy);
+		if (len < 28.0f) return 1e9f;
+		const ImVec2 start(c.x + vx / len * 16.0f, c.y + vy / len * 16.0f);
+		return pointSegmentDistance(mouse, start, end);
+	};
+	const float dx = distance(x, hasX), dz = distance(z, hasZ);
+	if (std::min(dx, dz) > 9.0f) return 0;
+	return dx <= dz ? 1 : 2;
+}
+
+void App::drawMoveGizmo(const ImVec2& origin, const ImVec2& size)
+{
+	V3 pivot;
+	if (tool_ != Tool::Move || boxSelecting_ || !selectionPivot(pivot)) return;
+	const float length = std::max(90.0f, (cam_.topDown ? cam_.topZoom : cam_.distance) * 0.16f);
+	ImVec2 c, ends[2];
+	if (!project(pivot, origin, size, c)) return;
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	const int hover = moveGizmoAxis(origin, size, ImGui::GetIO().MousePos);
+	if (transformMode_ == TransformMode::Rotate) {
+		if (!selectionCanRotate()) return;
+		const bool hot = dragAxis_ == 3 || hover == 3;
+		const ImU32 gold = hot ? IM_COL32(255, 226, 91, 255) : IM_COL32(220, 188, 69, 255);
+		dl->AddCircle(c, 58.0f, IM_COL32(16, 22, 14, 225), 64, hot ? 8.0f : 7.0f);
+		dl->AddCircle(c, 58.0f, gold, 64, hot ? 5.0f : 3.5f);
+		const float a = -0.62f;
+		const ImVec2 tip(c.x + std::cos(a) * 58.0f, c.y + std::sin(a) * 58.0f);
+		const ImVec2 tangent(-std::sin(a), std::cos(a));
+		const ImVec2 radial(std::cos(a), std::sin(a));
+		dl->AddTriangleFilled(ImVec2(tip.x + tangent.x * 8.0f, tip.y + tangent.y * 8.0f), ImVec2(tip.x - tangent.x * 8.0f + radial.x * 7.0f, tip.y - tangent.y * 8.0f + radial.y * 7.0f),
+		                      ImVec2(tip.x - tangent.x * 8.0f - radial.x * 7.0f, tip.y - tangent.y * 8.0f - radial.y * 7.0f), gold);
+		dl->AddCircleFilled(c, 6.0f, IM_COL32(224, 216, 130, 255));
+		dl->AddCircle(c, 7.0f, IM_COL32(20, 30, 16, 240), 16, 2.0f);
+		return;
+	}
+	if (transformMode_ == TransformMode::Scale) {
+		if (!selectionCanScale()) return;
+		const bool hot = dragAxis_ == 4 || hover == 4;
+		const ImU32 violet = hot ? IM_COL32(232, 139, 255, 255) : IM_COL32(187, 104, 211, 255);
+		const ImVec2 end(c.x + 52.0f, c.y - 52.0f);
+		dl->AddLine(c, end, IM_COL32(16, 22, 14, 225), hot ? 8.0f : 7.0f);
+		dl->AddLine(c, end, violet, hot ? 5.0f : 3.5f);
+		dl->AddRectFilled(ImVec2(end.x - 7.0f, end.y - 7.0f), ImVec2(end.x + 7.0f, end.y + 7.0f), violet, 2.0f);
+		dl->AddRect(ImVec2(end.x - 8.0f, end.y - 8.0f), ImVec2(end.x + 8.0f, end.y + 8.0f), IM_COL32(16, 22, 14, 240), 2.0f, 0, 2.0f);
+		dl->AddCircleFilled(c, 6.0f, IM_COL32(224, 216, 130, 255));
+		dl->AddCircle(c, 7.0f, IM_COL32(20, 30, 16, 240), 16, 2.0f);
+		return;
+	}
+	const bool visible[2] = { project(pivot + moveAxis(1) * length, origin, size, ends[0]), project(pivot + moveAxis(2) * length, origin, size, ends[1]) };
+	const ImU32 colours[2] = { IM_COL32(231, 80, 67, 255), IM_COL32(74, 154, 236, 255) };
+	const char* labels[2] = { "X", "Z" };
+	for (int axis = 0; axis < 2; axis++) {
+		if (!visible[axis]) continue;
+		const ImVec2 d(ends[axis].x - c.x, ends[axis].y - c.y);
+		const float len = std::max(0.001f, std::hypot(d.x, d.y));
+		const ImVec2 u(d.x / len, d.y / len), n(-u.y, u.x);
+		const bool hot = dragAxis_ == axis + 1 || hover == axis + 1;
+		const float thickness = hot ? 6.0f : 4.0f;
+		dl->AddLine(c, ends[axis], IM_COL32(16, 22, 14, 225), thickness + 3.0f);
+		dl->AddLine(c, ends[axis], colours[axis], thickness);
+		const ImVec2 base(ends[axis].x - u.x * 13.0f, ends[axis].y - u.y * 13.0f);
+		dl->AddTriangleFilled(ends[axis], ImVec2(base.x + n.x * 7.0f, base.y + n.y * 7.0f), ImVec2(base.x - n.x * 7.0f, base.y - n.y * 7.0f), colours[axis]);
+		dl->AddText(ImVec2(ends[axis].x + u.x * 6.0f - 4.0f, ends[axis].y + u.y * 6.0f - 8.0f), colours[axis], labels[axis]);
+	}
+	dl->AddCircleFilled(c, 6.0f, IM_COL32(224, 216, 130, 255));
+	dl->AddCircle(c, 7.0f, IM_COL32(20, 30, 16, 240), 16, 2.0f);
 }
 
 void App::drawViewport(const Rect& r)
@@ -2606,6 +3785,9 @@ void App::drawViewport(const Rect& r)
 	renderScene(vw, vh);
 	ImGui::Image(ImTextureID(std::intptr_t(target_.color)), avail, ImVec2(0, 1), ImVec2(1, 0));
 	viewportHovered_ = ImGui::IsItemHovered();
+	ImDrawList* dl   = ImGui::GetWindowDrawList();
+	// Marco fino de musgo: integra el visor 3D con los paneles sin robarle área.
+	dl->AddRect(origin, ImVec2(origin.x + avail.x, origin.y + avail.y), IM_COL32(112, 137, 57, 210), 0.0f, 0, 2.0f);
 
 	// Soltar decoración arrastrada desde la izquierda.
 	if (ImGui::BeginDragDropTarget()) {
@@ -2613,22 +3795,50 @@ void App::drawViewport(const Rect& r)
 		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("NM_ASSET")) {
 			if (terrainRay(mouseRay, hit)) {
 				place_ = { ItemType::Prop, static_cast<const char*>(p->Data), "" };
+				cfg_.recents.erase(std::remove(cfg_.recents.begin(), cfg_.recents.end(), place_.asset), cfg_.recents.end());
+				cfg_.recents.insert(cfg_.recents.begin(), place_.asset);
+				if (cfg_.recents.size() > 16) cfg_.recents.resize(16);
+				cfg_.save();
 				placeAt(hit);
 			}
 		}
 		ImGui::EndDragDropTarget();
 	}
 
-	drawLabels(origin, avail);
+	if (showLabels_) drawLabels(origin, avail);
 	viewportMouse(mouseRay, origin, avail);
+	if (tool_ == Tool::Ramp && rampPreviewValid_) {
+		auto rampTag = [&](const V3& world, const char* label, ImU32 colour) {
+			ImVec2 p;
+			if (!project(world + V3(0, 28, 0), origin, avail, p)) return;
+			const ImVec2 textSize = ImGui::CalcTextSize(label);
+			const ImVec2 lo(p.x - textSize.x * 0.5f - 7, p.y - textSize.y - 7), hi(p.x + textSize.x * 0.5f + 7, p.y + 5);
+			dl->AddRectFilled(lo, hi, IM_COL32(25, 35, 20, 230), 5.0f);
+			dl->AddRect(lo, hi, colour, 5.0f, 0, 2.0f);
+			dl->AddText(ImVec2(p.x - textSize.x * 0.5f, p.y - textSize.y - 2), IM_COL32(255, 250, 220, 255), label);
+		};
+		if (drawingRamp_) {
+			rampTag(rampStart_, tr("INICIO"), IM_COL32(255, 205, 55, 255));
+			rampTag(rampEnd_, tr("FINAL · CLIC PARA CREAR"), IM_COL32(100, 255, 100, 255));
+		} else
+			rampTag(rampEnd_, tr("CLIC: MARCAR INICIO"), IM_COL32(255, 205, 55, 255));
+	}
+	drawMoveGizmo(origin, avail);
+	if (boxSelecting_) {
+		const ImVec2 a(std::min(pressX_, boxEndX_), std::min(pressY_, boxEndY_));
+		const ImVec2 b(std::max(pressX_, boxEndX_), std::max(pressY_, boxEndY_));
+		dl->AddRectFilled(a, b, IM_COL32(171, 196, 76, 38));
+		dl->AddRect(a, b, IM_COL32(215, 222, 98, 245), 3.0f, 0, 2.0f);
+	}
 
 	// Ayuda de la herramienta, arriba.
-	ImDrawList* dl   = ImGui::GetWindowDrawList();
 	const char* help = toolHelp();
 	const ImVec2 ts  = ImGui::CalcTextSize(help);
-	dl->AddRectFilled(ImVec2(origin.x + avail.x * 0.5f - ts.x * 0.5f - 12, origin.y + 8), ImVec2(origin.x + avail.x * 0.5f + ts.x * 0.5f + 12, origin.y + 16 + ts.y),
-	                  IM_COL32(15, 18, 24, 200), 6);
-	dl->AddText(ImVec2(origin.x + avail.x * 0.5f - ts.x * 0.5f, origin.y + 12), IM_COL32(240, 240, 245, 255), help);
+	dl->AddRectFilled(ImVec2(origin.x + avail.x * 0.5f - ts.x * 0.5f - 14, origin.y + 8), ImVec2(origin.x + avail.x * 0.5f + ts.x * 0.5f + 14, origin.y + 17 + ts.y),
+	                  IM_COL32(20, 39, 20, 222), 10);
+	dl->AddRect(ImVec2(origin.x + avail.x * 0.5f - ts.x * 0.5f - 14, origin.y + 8), ImVec2(origin.x + avail.x * 0.5f + ts.x * 0.5f + 14, origin.y + 17 + ts.y),
+	            IM_COL32(139, 158, 68, 185), 10);
+	dl->AddText(ImVec2(origin.x + avail.x * 0.5f - ts.x * 0.5f, origin.y + 12), IM_COL32(239, 231, 194, 255), help);
 
 	// Botones de cámara, abajo a la derecha.
 	ImGui::SetCursorScreenPos(ImVec2(origin.x + avail.x - 410, origin.y + avail.y - 44));
@@ -2640,7 +3850,7 @@ void App::drawViewport(const Rect& r)
 		cam_.distance   = float(std::max(d.maxX - d.minX, d.maxZ - d.minZ));
 		cam_.topZoom    = float(std::max((d.maxX - d.minX) / viewAspect_, d.maxZ - d.minZ)) * 0.55f;
 	}
-	dl->AddText(ImVec2(origin.x + 10, origin.y + avail.y - 24), IM_COL32(230, 232, 240, 170), tr("Botón derecho: girar la vista  ·  Rueda: acercar  ·  Botón central: desplazar"));
+	dl->AddText(ImVec2(origin.x + 12, origin.y + avail.y - 25), IM_COL32(230, 226, 191, 190), tr("Botón derecho: girar la vista  ·  Rueda: acercar  ·  Botón central: desplazar"));
 
 	// Avisos.
 	float ty = origin.y + avail.y - 60;
@@ -2665,10 +3875,42 @@ void App::viewportMouse(const Ray& ray, const ImVec2& origin, const ImVec2& size
 	const bool leftDown = ImGui::IsMouseDown(ImGuiMouseButton_Left), leftClick = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
 	const bool brushTool = tool_ == Tool::Floor || tool_ == Tool::Height || tool_ == Tool::Plateau || tool_ == Tool::Paint || tool_ == Tool::Water
 	                    || tool_ == Tool::Scatter;
+	rampPreviewValid_ = tool_ == Tool::Ramp && hovered && terrainRay(ray, rampEnd_);
+	if (rampPreviewValid_ && leftClick) {
+		if (!drawingRamp_) {
+			rampStart_ = rampEnd_;
+			drawingRamp_ = true;
+			notify(0, tr("Inicio marcado. Ahora haz clic en una zona más alta."));
+		} else {
+			const float distance = std::hypot(rampEnd_.x - rampStart_.x, rampEnd_.z - rampStart_.z);
+			const float height = std::fabs(rampEnd_.y - rampStart_.y);
+			if (distance < std::max(25.0, ed_.doc.cell * 0.25))
+				notify(1, tr("El final está demasiado cerca. Alarga la rampa y vuelve a hacer clic."));
+			else if (height < 5.0f)
+				notify(1, tr("Los dos extremos están a la misma altura. Elige una zona más alta."));
+			else if (height / distance > 0.577f)
+				notify(1, tr("La rampa es demasiado empinada. Aleja el extremo hasta que el rectángulo sea verde."));
+			else if (applyRamp(rampStart_, rampEnd_)) {
+				drawingRamp_ = false;
+				notify(0, tr("Rampa creada. Puedes deshacerla con Ctrl+Z."));
+			} else
+				notify(1, tr("La rampa no alcanzó ningún punto del terreno. Prueba con más anchura o longitud."));
+		}
+	}
 
 	// Pinceles de terreno.
 	brushValid_ = brushTool && hovered && terrainRay(ray, brushPos_);
-	if (brushValid_ && leftDown) {
+	const bool pickingMaterial = brushValid_ && tool_ == Tool::Paint && io.KeyAlt && leftClick;
+	if (pickingMaterial && ed_.doc.terrain.grid && !ed_.doc.terrain.layers.empty()) {
+		const nectar::DocTerrain& terrain = ed_.doc.terrain;
+		const int ix = std::max(0, std::min(terrain.nx, int(std::lround((brushPos_.x - ed_.doc.minX) / ed_.doc.cell))));
+		const int iz = std::max(0, std::min(terrain.nz, int(std::lround((brushPos_.z - ed_.doc.minZ) / ed_.doc.cell))));
+		const std::size_t vertex = std::size_t(terrain.vertexIndex(ix, iz));
+		paintMaterial_ = 0;
+		for (std::size_t k = 1; k < terrain.layers.size(); k++) if (terrain.layers[k][vertex] > terrain.layers[std::size_t(paintMaterial_)][vertex]) paintMaterial_ = int(k);
+		notify(0, tr("Material tomado del terreno."));
+	}
+	if (brushValid_ && leftDown && !pickingMaterial) {
 		// Mayús hace lo contrario mientras se pinta.
 		const bool erase = floorErase_, raise = heightOp_ == HeightOp::Raise, wErase = waterErase_, up = plateauUp_, sErase = scatterErase_;
 		if (io.KeyShift) {
@@ -2691,7 +3933,7 @@ void App::viewportMouse(const Ray& ray, const ImVec2& origin, const ImVec2& size
 		plateauUp_  = up;
 		if (heightOp_ == HeightOp::Raise || heightOp_ == HeightOp::Lower) heightOp_ = raise ? HeightOp::Raise : HeightOp::Lower;
 	}
-	brushWasDown_ = brushValid_ && leftDown;
+	brushWasDown_ = brushValid_ && leftDown && !pickingMaterial;
 	if (hovered && brushTool && io.KeyCtrl && io.MouseWheel != 0) {
 		brushRadius_  = std::max(25.0f, std::min(1000.0f, brushRadius_ * std::pow(1.15f, io.MouseWheel)));
 		io.MouseWheel = 0; // Ctrl + rueda: tamaño del pincel, no zoom
@@ -2734,9 +3976,21 @@ void App::viewportMouse(const Ray& ray, const ImVec2& origin, const ImVec2& size
 	// Mover: clic para elegir y arrastrar por el suelo.
 	if (tool_ == Tool::Move) {
 		if (hovered && leftClick) {
+			bool emptyClick = false;
 			dragHandle_ = -1;
+			dragAxis_   = moveGizmoAxis(origin, size, io.MousePos);
+			if (dragAxis_ == 3) {
+				V3 onPlane;
+				if (!selectionPivot(transformPivot_) || !rayPlaneY(ray, transformPivot_.y, onPlane)) dragAxis_ = 0;
+				else rotateStartAngle_ = std::atan2(onPlane.z - transformPivot_.z, onPlane.x - transformPivot_.x);
+			}
+			if (dragAxis_ == 4) {
+				ImVec2 pivotScreen;
+				if (!selectionPivot(transformPivot_) || !project(transformPivot_, origin, size, pivotScreen)) dragAxis_ = 0;
+				else scaleStartDistance_ = std::max(1.0f, std::hypot(io.MousePos.x - pivotScreen.x, io.MousePos.y - pivotScreen.y));
+			}
 			// ¿Un extremo del muro elegido?
-			if (ed_.selection.size() == 1 && ed_.selection[0].type == ItemType::Wall && !ed_.doc.walls[std::size_t(ed_.selection[0].index)].isArc) {
+			if (dragAxis_ == 0 && ed_.selection.size() == 1 && ed_.selection[0].type == ItemType::Wall && !ed_.doc.walls[std::size_t(ed_.selection[0].index)].isArc) {
 				const nectar::DocWall& w = ed_.doc.walls[std::size_t(ed_.selection[0].index)];
 				for (int e = 0; e < 2; e++) {
 					const float ex = float(e ? w.bx : w.ax), ez = float(e ? w.bz : w.az);
@@ -2747,22 +4001,112 @@ void App::viewportMouse(const Ray& ray, const ImVec2& origin, const ImVec2& size
 			}
 			ItemRef hit;
 			float t = 0;
-			if (dragHandle_ < 0) {
-				if (pick(ray, hit, t)) {
+			if (dragAxis_ == 0 && dragHandle_ < 0) {
+				int cycle = 0;
+				if (io.KeyAlt) {
+					if (std::hypot(io.MousePos.x - lastAltPickX_, io.MousePos.y - lastAltPickY_) <= 6.0f) altPickCycle_++;
+					else altPickCycle_ = 0;
+					lastAltPickX_ = io.MousePos.x;
+					lastAltPickY_ = io.MousePos.y;
+					cycle = altPickCycle_;
+				} else {
+					altPickCycle_ = 0;
+				}
+				if (pick(ray, hit, t, cycle)) {
 					if (io.KeyCtrl) ed_.select(hit, true);
 					else if (!ed_.selected(hit)) ed_.select(hit, false);
-				} else if (!io.KeyCtrl) {
-					ed_.clearSelection();
+				} else {
+					emptyClick = true;
+					if (!io.KeyCtrl) ed_.clearSelection();
 				}
 			}
-			dragArmed_ = !ed_.selection.empty() && terrainRay(ray, dragGrab_);
 			pressX_    = io.MousePos.x;
 			pressY_    = io.MousePos.y;
+			boxEndX_   = pressX_;
+			boxEndY_   = pressY_;
+			boxSelecting_ = emptyClick;
+			boxSelectionBase_ = ed_.selection;
+			dragArmed_ = !boxSelecting_ && !ed_.selection.empty()
+			          && (dragAxis_ == 3 || dragAxis_ == 4 || (transformMode_ == TransformMode::Move && terrainRay(ray, dragGrab_)));
 			dragStart_.clear();
 			for (const ItemRef& r : ed_.selection) dragStart_.push_back({ r, getXform(ed_.doc, r) });
 		}
+		if (boxSelecting_) {
+			boxEndX_ = io.MousePos.x;
+			boxEndY_ = io.MousePos.y;
+			if (!leftDown) {
+				const float x0 = std::min(pressX_, boxEndX_), x1 = std::max(pressX_, boxEndX_);
+				const float y0 = std::min(pressY_, boxEndY_), y1 = std::max(pressY_, boxEndY_);
+				if (x1 - x0 > 4.0f || y1 - y0 > 4.0f) {
+					ed_.selection = boxSelectionBase_;
+					for (const ItemRef& candidate : allItems(ed_.doc)) {
+						if (itemHidden(candidate) || itemLocked(candidate)) continue;
+						if (cfg_.ignoreDecorSelection && (candidate.type == ItemType::Prop || candidate.type == ItemType::Gen)) continue;
+						const Xform x = getXform(ed_.doc, candidate);
+						ImVec2 screen;
+						bool inside = project(V3(float(x.x), docHeight(float(x.x), float(x.z)) + 20.0f, float(x.z)), origin, size, screen)
+						           && screen.x >= x0 && screen.x <= x1 && screen.y >= y0 && screen.y <= y1;
+						if (!inside && showTwins_ && ed_.doc.symmetric && itemCaps(candidate.type).twinned) {
+							inside = project(V3(float(-x.x), docHeight(float(-x.x), float(-x.z)) + 20.0f, float(-x.z)), origin, size, screen)
+							      && screen.x >= x0 && screen.x <= x1 && screen.y >= y0 && screen.y <= y1;
+						}
+						if (inside && !ed_.selected(candidate)) ed_.selection.push_back(candidate);
+					}
+				}
+				boxSelecting_ = false;
+				boxSelectionBase_.clear();
+			}
+		}
 		if (dragArmed_ && leftDown && !dragging_ && std::hypot(io.MousePos.x - pressX_, io.MousePos.y - pressY_) > 4) dragging_ = true;
-		if (dragging_) {
+		if (dragging_ && dragAxis_ == 4) {
+			ImVec2 pivotScreen;
+			if (project(transformPivot_, origin, size, pivotScreen)) {
+				float factor = std::hypot(io.MousePos.x - pivotScreen.x, io.MousePos.y - pivotScreen.y) / scaleStartDistance_;
+				factor = std::max(0.1f, std::min(10.0f, factor));
+				if (cfg_.snap) factor = std::max(0.1f, std::round(factor * 10.0f) / 10.0f);
+				MapDoc& d = ed_.doc;
+				for (const auto& st : dragStart_) {
+					if (!itemExists(d, st.first) || !itemCaps(st.first.type).scale) continue;
+					Xform x = st.second;
+					x.scale = std::max(0.05, std::min(20.0, st.second.scale * factor));
+					if (dragStart_.size() > 1) {
+						x.x = transformPivot_.x + (st.second.x - transformPivot_.x) * factor;
+						x.z = transformPivot_.z + (st.second.z - transformPivot_.z) * factor;
+						x.y = st.second.y - docHeight(float(st.second.x), float(st.second.z)) + docHeight(float(x.x), float(x.z));
+					}
+					setXform(d, st.first, x);
+					ItemRef other;
+					if (mirrorEdits_ && d.symmetric && counterpart(st.first, other) && !ed_.selected(other)) mirrorToCounterpart(d, st.first);
+				}
+				ed_.touch();
+			}
+		} else if (dragging_ && dragAxis_ == 3) {
+			V3 onPlane;
+			if (rayPlaneY(ray, transformPivot_.y, onPlane)) {
+				float delta = -(std::atan2(onPlane.z - transformPivot_.z, onPlane.x - transformPivot_.x) - rotateStartAngle_) * 180.0f / float(3.14159265358979323846);
+				while (delta > 180.0f) delta -= 360.0f;
+				while (delta < -180.0f) delta += 360.0f;
+				if (cfg_.snap && cfg_.snapAngle > 0.0f) delta = std::round(delta / cfg_.snapAngle) * cfg_.snapAngle;
+				const float a = delta * float(3.14159265358979323846 / 180.0), cs = std::cos(a), sn = std::sin(a);
+				MapDoc& d = ed_.doc;
+				for (const auto& st : dragStart_) {
+					if (!itemExists(d, st.first)) continue;
+					Xform x = st.second;
+					if (dragStart_.size() > 1) {
+						const double ox = st.second.x - transformPivot_.x, oz = st.second.z - transformPivot_.z;
+						x.x = transformPivot_.x + cs * ox + sn * oz;
+						x.z = transformPivot_.z - sn * ox + cs * oz;
+						if (st.first.type == ItemType::Prop || st.first.type == ItemType::Gen)
+							x.y = st.second.y - docHeight(float(st.second.x), float(st.second.z)) + docHeight(float(x.x), float(x.z));
+					}
+					if (itemCaps(st.first.type).rotateY) x.ry = st.second.ry + delta;
+					setXform(d, st.first, x);
+					ItemRef other;
+					if (mirrorEdits_ && d.symmetric && counterpart(st.first, other) && !ed_.selected(other)) mirrorToCounterpart(d, st.first);
+				}
+				ed_.touch();
+			}
+		} else if (dragging_) {
 			V3 at;
 			if (terrainRay(ray, at)) {
 				MapDoc& d = ed_.doc;
@@ -2771,12 +4115,23 @@ void App::viewportMouse(const Ray& ray, const ImVec2& origin, const ImVec2& size
 					(dragHandle_ ? w.bx : w.ax) = snap(at.x);
 					(dragHandle_ ? w.bz : w.az) = snap(at.z);
 				} else {
-					const double dx = at.x - dragGrab_.x, dz = at.z - dragGrab_.z;
+					double dx = at.x - dragGrab_.x, dz = at.z - dragGrab_.z;
+					bool relativeSnap = false;
+					if (dragAxis_ == 1 || dragAxis_ == 2) {
+						const V3 axis = moveAxis(dragAxis_);
+						double along = dx * axis.x + dz * axis.z;
+						if (cfg_.localGizmo && cfg_.snap && cfg_.snapStep > 0.0f) {
+							along = std::round(along / cfg_.snapStep) * cfg_.snapStep;
+							relativeSnap = true;
+						}
+						dx = along * axis.x;
+						dz = along * axis.z;
+					}
 					for (const auto& st : dragStart_) {
 						if (!itemExists(d, st.first)) continue;
 						Xform x = st.second;
-						x.x     = snap(st.second.x + dx);
-						x.z     = snap(st.second.z + dz);
+						x.x     = relativeSnap ? st.second.x + dx : snap(st.second.x + dx);
+						x.z     = relativeSnap ? st.second.z + dz : snap(st.second.z + dz);
 						// La decoración sigue el suelo sin perder su altura sobre él.
 						if (st.first.type == ItemType::Prop || st.first.type == ItemType::Gen)
 							x.y = st.second.y - docHeight(float(st.second.x), float(st.second.z)) + docHeight(float(x.x), float(x.z));
@@ -2792,7 +4147,12 @@ void App::viewportMouse(const Ray& ray, const ImVec2& origin, const ImVec2& size
 			dragging_   = false;
 			dragArmed_  = false;
 			dragHandle_ = -1;
+			dragAxis_   = 0;
 		}
+	} else {
+		boxSelecting_ = false;
+		boxSelectionBase_.clear();
+		dragAxis_ = 0;
 	}
 
 	// Cámara.
@@ -2831,11 +4191,14 @@ void App::renderScene(int w, int h)
 	if (baseGpu_) renderer_.drawModel(*baseGpu_, M4());
 
 	for (const ItemRef& r : allItems(d)) {
+		if (itemHidden(r)) continue;
 		drawItem(r, false);
 		if (showTwins_ && d.symmetric && itemCaps(r.type).twinned) drawItem(r, true);
 	}
-	drawWater();
-	if (tool_ == Tool::Height) drawSlopes();
+	if (showWaterOverlay_) drawWater();
+	if (showCollision_ && !collisionTris_.empty()) renderer_.drawTriangles(collisionTris_, Rgba { 0.95f, 0.25f, 0.16f, 0.24f }, false);
+	if (showRoutes_) drawRoutes();
+	if (tool_ == Tool::Height || showSlopesOverlay_) drawSlopes();
 	// Hacia dónde va cada bloque que se empuja (y el del otro lado).
 	{
 		std::vector<V3> lines;
@@ -2856,11 +4219,23 @@ void App::renderScene(int w, int h)
 	// Pincel.
 	if (brushValid_) {
 		std::vector<V3> ring;
-		for (int k = 0; k < 64; k++) {
-			for (int e = 0; e < 2; e++) {
-				const float a = (k + e) * 6.2831853f / 64;
-				const float x = brushPos_.x + std::cos(a) * brushRadius_, z = brushPos_.z + std::sin(a) * brushRadius_;
-				ring.push_back(V3(x, docHeight(x, z) + 4, z));
+		if (brushShape_ == BrushShape::Circle) {
+			for (int k = 0; k < 64; k++) {
+				for (int e = 0; e < 2; e++) {
+					const float a = (k + e) * 6.2831853f / 64;
+					const float x = brushPos_.x + std::cos(a) * brushRadius_, z = brushPos_.z + std::sin(a) * brushRadius_;
+					ring.push_back(V3(x, docHeight(x, z) + 4, z));
+				}
+			}
+		} else {
+			const V3 corners[] = { { brushPos_.x - brushRadius_, 0, brushPos_.z - brushRadius_ }, { brushPos_.x + brushRadius_, 0, brushPos_.z - brushRadius_ },
+			                       { brushPos_.x + brushRadius_, 0, brushPos_.z + brushRadius_ }, { brushPos_.x - brushRadius_, 0, brushPos_.z + brushRadius_ } };
+			for (int k = 0; k < 4; k++) {
+				for (int e = 0; e < 2; e++) {
+					V3 p = corners[(k + e) % 4];
+					p.y = docHeight(p.x, p.z) + 4;
+					ring.push_back(p);
+				}
 			}
 		}
 		renderer_.drawLines(ring, Rgba { 1, 0.85f, 0.2f, 1 });
@@ -2888,6 +4263,24 @@ void App::renderScene(int w, int h)
 		renderer_.drawBox(segmentMatrix(s, (wallStart_.y + placePos_.y) * 0.5f) * M4::translate(V3(0, wallHeight_ * 0.5f, 0)) * M4::scale(len, wallHeight_, wallThickness_),
 		                  Rgba { 0.85f, 0.75f, 0.55f, 0.7f });
 	}
+	if (drawingRamp_ && rampPreviewValid_) {
+		const float dx = rampEnd_.x - rampStart_.x, dz = rampEnd_.z - rampStart_.z;
+		const float length = std::hypot(dx, dz);
+		if (length > 1.0f) {
+			const float px = -dz / length * rampWidth_ * 0.5f, pz = dx / length * rampWidth_ * 0.5f;
+			const V3 a(rampStart_.x + px, rampStart_.y + 8, rampStart_.z + pz), b(rampStart_.x - px, rampStart_.y + 8, rampStart_.z - pz);
+			const V3 c(rampEnd_.x - px, rampEnd_.y + 8, rampEnd_.z - pz), e(rampEnd_.x + px, rampEnd_.y + 8, rampEnd_.z + pz);
+			std::vector<V3> outline { a, b, b, c, c, e, e, a, rampStart_ + V3(0, 10, 0), rampEnd_ + V3(0, 10, 0) };
+			const float height = std::fabs(rampEnd_.y - rampStart_.y);
+			const bool level = height < 5.0f, safe = !level && height / length <= 0.577f;
+			const Rgba colour = safe ? Rgba { 0.35f, 1.0f, 0.35f, 1.0f } : level ? Rgba { 1.0f, 0.78f, 0.18f, 1.0f } : Rgba { 1.0f, 0.25f, 0.15f, 1.0f };
+			std::vector<V3> fill { a, b, c, a, c, e };
+			renderer_.drawTriangles(fill, Rgba { colour.r, colour.g, colour.b, 0.22f }, false);
+			renderer_.drawLines(outline, colour);
+			renderer_.drawCylinder(M4::translate(rampStart_ + V3(0, 6, 0)) * M4::scale(22, 12, 22), Rgba { 1.0f, 0.82f, 0.18f, 1.0f });
+			renderer_.drawCylinder(M4::translate(rampEnd_ + V3(0, 6, 0)) * M4::scale(22, 12, 22), colour);
+		}
+	}
 	renderer_.end();
 }
 
@@ -2896,6 +4289,45 @@ void App::drawWater()
 	// El agua del juego son capas transparentes con efectos que el editor no
 	// dibuja (se ve solo el fondo): aquí, una capa azul con su misma forma.
 	if (!waterTris_.empty()) renderer_.drawTriangles(waterTris_, Rgba { 0.25f, 0.55f, 0.95f, 0.5f }, false);
+}
+
+void App::drawRoutes()
+{
+	if (compiled_.generation != ed_.liveGeneration || compiled_.routes.points.empty()) return;
+	std::map<int, V3> points;
+	for (const nectar::RoutePoint& p : compiled_.routes.points) points[p.index] = V3(p.pos.x, p.pos.y + 12.0f, p.pos.z);
+	const std::map<int, int> components = routeComponents(compiled_.routes);
+	const Rgba colours[] = { { 0.25f, 1.0f, 0.45f, 1.0f }, { 1.0f, 0.45f, 0.20f, 1.0f }, { 0.30f, 0.65f, 1.0f, 1.0f }, { 0.85f, 0.35f, 1.0f, 1.0f } };
+	std::vector<V3> linksByComponent[4];
+	for (const auto& link : compiled_.routes.links) {
+		const auto a = points.find(link.first), b = points.find(link.second);
+		if (a == points.end() || b == points.end()) continue;
+		const int component = components.count(link.first) ? components.at(link.first) : 0;
+		linksByComponent[component % 4].push_back(a->second);
+		linksByComponent[component % 4].push_back(b->second);
+	}
+	for (int k = 0; k < 4; k++) if (!linksByComponent[k].empty()) renderer_.drawLines(linksByComponent[k], colours[k]);
+	for (const nectar::RoutePoint& p : compiled_.routes.points) {
+		const V3 at(p.pos.x, p.pos.y + 12.0f, p.pos.z);
+		const float radius = std::max(7.0f, p.width * 0.08f);
+		const int component = components.count(p.index) ? components.at(p.index) : 0;
+		renderer_.drawCylinder(M4::translate(at) * M4::scale(radius, 18.0f, radius), colours[component % 4]);
+	}
+	if (!ed_.selection.empty()) {
+		const Xform target = getXform(ed_.doc, ed_.selection.back());
+		const int start = nearestRoutePoint(compiled_.routes, ed_.doc.bases[0].x, ed_.doc.bases[0].z);
+		const int goal = nearestRoutePoint(compiled_.routes, target.x, target.z);
+		const std::vector<int> path = routePath(compiled_.routes, start, goal);
+		std::vector<V3> highlighted;
+		for (std::size_t k = 1; k < path.size(); k++) {
+			if (!points.count(path[k - 1]) || !points.count(path[k])) continue;
+			highlighted.push_back(points[path[k - 1]] + V3(0, 10, 0));
+			highlighted.push_back(points[path[k]] + V3(0, 10, 0));
+		}
+		if (!highlighted.empty()) renderer_.drawLines(highlighted, Rgba { 1.0f, 1.0f, 1.0f, 1.0f });
+		if (path.empty() && goal >= 0 && points.count(goal))
+			renderer_.drawCylinder(M4::translate(points[goal]) * M4::scale(24.0f, 45.0f, 24.0f), Rgba { 1.0f, 0.12f, 0.08f, 1.0f });
+	}
 }
 
 void App::drawSlopes()
@@ -2997,6 +4429,7 @@ void App::drawLabels(const ImVec2& origin, const ImVec2& size)
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 	dl->PushClipRect(origin, ImVec2(origin.x + size.x, origin.y + size.y), true);
 	for (const ItemRef& r : allItems(ed_.doc)) {
+		if (itemHidden(r)) continue;
 		if (!itemCaps(r.type).perPlayer && r.type != ItemType::BigPiece) continue;
 		const Xform x = getXform(ed_.doc, r);
 		ImVec2 s;
@@ -3015,19 +4448,24 @@ void App::drawLabels(const ImVec2& origin, const ImVec2& size)
 
 bool App::groundHit(const Ray& ray, V3& hit) const { return terrainRay(ray, hit); }
 
-bool App::pick(const Ray& ray, ItemRef& out, float& bestT)
+bool App::pick(const Ray& ray, ItemRef& out, float& bestT, int cycle)
 {
 	bestT           = -1;
-	bool found      = false;
 	const MapDoc& d = ed_.doc;
+	std::vector<std::pair<float, ItemRef>> hits;
 	auto consider   = [&](const ItemRef& r, float t) {
-        if (t >= 0 && (!found || t < bestT)) {
-            bestT = t;
-            out   = r;
-            found = true;
-        }
+		if (t < 0) return;
+		for (auto& hit : hits) {
+			if (hit.second == r) {
+				hit.first = std::min(hit.first, t);
+				return;
+			}
+		}
+		hits.push_back({ t, r });
 	};
 	for (const ItemRef& r : allItems(d)) {
+		if (itemHidden(r) || itemLocked(r)) continue;
+		if (cfg_.ignoreDecorSelection && (r.type == ItemType::Prop || r.type == ItemType::Gen)) continue;
 		if (r.type == ItemType::Wall) {
 			const nectar::DocWall& w = d.walls[std::size_t(r.index)];
 			for (const Segment& s : wallSegments(w)) {
@@ -3062,7 +4500,12 @@ bool App::pick(const Ray& ray, ItemRef& out, float& bestT)
 		hi.y = std::max(hi.y, 40.0f);
 		consider(r, rayBox(ray, itemMatrix(r, false), lo, hi));
 	}
-	return found;
+	if (hits.empty()) return false;
+	std::sort(hits.begin(), hits.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+	const auto& chosen = hits[std::size_t(std::max(0, cycle)) % hits.size()];
+	bestT = chosen.first;
+	out   = chosen.second;
+	return true;
 }
 
 // ── Terreno ─────────────────────────────────────────────────────────────────
@@ -3137,6 +4580,47 @@ bool App::terrainRay(const Ray& ray, V3& hit) const
 	return hit.x >= d.minX && hit.x <= d.maxX && hit.z >= d.minZ && hit.z <= d.maxZ;
 }
 
+bool App::applyRamp(const V3& from, const V3& to)
+{
+	MapDoc& d = ed_.doc;
+	nectar::DocTerrain& terrain = d.terrain;
+	if (!terrain.grid) return false;
+	bool changed = false;
+	auto applyOne = [&](const V3& a, const V3& b) {
+		const double dx = b.x - a.x, dz = b.z - a.z, length2 = dx * dx + dz * dz;
+		if (length2 < 25.0 * 25.0) return;
+		const double length = std::sqrt(length2), halfWidth = rampWidth_ * 0.5;
+		const double minX = std::min(a.x, b.x) - halfWidth, maxX = std::max(a.x, b.x) + halfWidth;
+		const double minZ = std::min(a.z, b.z) - halfWidth, maxZ = std::max(a.z, b.z) + halfWidth;
+		const int ix0 = std::max(0, int(std::floor((minX - d.minX) / d.cell))), ix1 = std::min(terrain.nx, int(std::ceil((maxX - d.minX) / d.cell)));
+		const int iz0 = std::max(0, int(std::floor((minZ - d.minZ) / d.cell))), iz1 = std::min(terrain.nz, int(std::ceil((maxZ - d.minZ) / d.cell)));
+		for (int iz = iz0; iz <= iz1; iz++) {
+			for (int ix = ix0; ix <= ix1; ix++) {
+				const double x = d.minX + ix * d.cell, z = d.minZ + iz * d.cell;
+				const double along = ((x - a.x) * dx + (z - a.z) * dz) / length2;
+				if (along < 0.0 || along > 1.0) continue;
+				const double lateral = std::fabs((x - a.x) * dz - (z - a.z) * dx) / length;
+				if (lateral > halfWidth) continue;
+				double profile = along;
+				if (rampSmooth_) profile = along * along * (3.0 - 2.0 * along);
+				const double target = a.y + (b.y - a.y) * profile;
+				const double edge = halfWidth > 1.0 ? std::min(1.0, (halfWidth - lateral) / std::max(d.cell, halfWidth * 0.2)) : 1.0;
+				const std::size_t vertex = std::size_t(terrain.vertexIndex(ix, iz));
+				const double blended = terrain.heights[vertex] + (target - terrain.heights[vertex]) * edge;
+				const std::int16_t newHeight = std::int16_t(std::max(-3000.0, std::min(3000.0, std::round(blended))));
+				const std::uint8_t newFloor = std::max(terrain.floor[vertex], std::uint8_t(std::lround(255.0 * edge)));
+				changed |= terrain.heights[vertex] != newHeight || terrain.floor[vertex] != newFloor;
+				terrain.heights[vertex] = newHeight;
+				terrain.floor[vertex] = newFloor;
+			}
+		}
+	};
+	applyOne(from, to);
+	if (d.symmetric) applyOne(V3(-from.x, from.y, -from.z), V3(-to.x, to.y, -to.z));
+	if (changed) ed_.touch();
+	return changed;
+}
+
 void App::applyBrush(const V3& at, float dt)
 {
 	if (tool_ == Tool::Scatter) {
@@ -3152,6 +4636,17 @@ void App::applyBrush(const V3& at, float dt)
 	if (d.symmetric) centres.push_back(V3(-at.x, at.y, -at.z)); // el lado del otro jugador igual
 	bool changed = false;
 	for (const V3& c : centres) {
+		auto brushDistance = [&](float x, float z) {
+			const float dx = std::fabs(x - c.x), dz = std::fabs(z - c.z);
+			return brushShape_ == BrushShape::Square ? std::max(dx, dz) : std::hypot(dx, dz);
+		};
+		auto brushWeight = [&](float x, float z) {
+			const float distance = brushDistance(x, z);
+			if (distance > r) return 0.0f;
+			if (brushFalloff_ == BrushFalloff::Hard) return 1.0f;
+			const float t = std::max(0.0f, 1.0f - distance / r);
+			return t * t * (3.0f - 2.0f * t);
+		};
 		const int x0 = std::max(0, int(std::floor((c.x - r - d.minX) / cell))), x1 = std::min(g.nx, int(std::ceil((c.x + r - d.minX) / cell)));
 		const int z0 = std::max(0, int(std::floor((c.z - r - d.minZ) / cell))), z1 = std::min(g.nz, int(std::ceil((c.z + r - d.minZ) / cell)));
 		if (tool_ == Tool::Plateau) {
@@ -3160,7 +4655,7 @@ void App::applyBrush(const V3& at, float dt)
 			for (int iz = z0; iz <= z1; iz++) {
 				for (int ix = x0; ix <= x1; ix++) {
 					const float vx = float(d.minX) + ix * cell, vz = float(d.minZ) + iz * cell;
-					if (std::hypot(vx - c.x, vz - c.z) > r) continue;
+					if (brushDistance(vx, vz) > r) continue;
 					std::int16_t& h = g.heights[std::size_t(g.vertexIndex(ix, iz))];
 					if (h != v) {
 						h       = v;
@@ -3173,7 +4668,7 @@ void App::applyBrush(const V3& at, float dt)
 			for (int iz = z0; iz <= z1; iz++) {
 				for (int ix = x0; ix <= x1; ix++) {
 					const float vx = float(d.minX) + ix * cell, vz = float(d.minZ) + iz * cell;
-					const float a  = std::max(0.0f, std::min(1.0f, (r - std::hypot(vx - c.x, vz - c.z)) / (r * 0.4f)));
+					const float a  = brushWeight(vx, vz);
 					if (a <= 0.0f) continue;
 					const std::size_t v = std::size_t(g.vertexIndex(ix, iz));
 					const std::uint8_t full = std::uint8_t(std::lround(255.0f * a)), keep = std::uint8_t(std::lround(255.0f * (1.0f - a)));
@@ -3213,10 +4708,8 @@ void App::applyBrush(const V3& at, float dt)
 			for (int iz = z0; iz <= z1; iz++) {
 				for (int ix = x0; ix <= x1; ix++) {
 					const float vx = float(d.minX) + ix * cell, vz = float(d.minZ) + iz * cell;
-					const float dd = std::hypot(vx - c.x, vz - c.z);
-					if (dd > r) continue;
-					const float t   = 1.0f - (dd / r) * (dd / r);
-					const float w   = t * t; // suave hacia el borde del pincel
+					const float w = brushWeight(vx, vz);
+					if (w <= 0.0f) continue;
 					std::int16_t& h = g.heights[std::size_t(g.vertexIndex(ix, iz))];
 					float nh        = h;
 					switch (heightOp_) {

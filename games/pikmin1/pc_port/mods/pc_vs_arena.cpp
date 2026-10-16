@@ -19,6 +19,11 @@
 
 namespace {
 
+PcVsReaction reaction(const nectar::MapReaction& r)
+{
+	return { r.kind, r.pellet, r.teki, r.boss, r.count, r.radius };
+}
+
 bool readGameFile(const std::string& path, std::vector<u8>& out)
 {
 	RandomAccessStream* s = gsys->openFile(path.c_str(), true);
@@ -170,11 +175,11 @@ void pc_vs_arena_big_piece(Vector3f& pos)
 	pos.set(s.x, groundAt(s.x, s.z), s.z);
 }
 
-int pc_vs_arena_guard_spots(Vector3f* out, int max)
+int pc_vs_arena_guard_spots(PcVsGuardSpot* out, int max)
 {
 	int n = 0;
 	for (const nectar::MapSpot& s : activeMap().guards) {
-		if (n < max) out[n++].set(s.x, groundAt(s.x, s.z), s.z);
+		if (n < max) out[n++] = { s.x, s.z, reaction(s.reaction) };
 	}
 	return n;
 }
@@ -187,6 +192,8 @@ void pc_vs_arena_gate(int player, Vector3f& pos, f32& faceDirection)
 	faceDirection = s.face;
 }
 
+PcVsReaction pc_vs_arena_gate_reaction(int player) { return reaction(activeMap().gates[player].reaction); }
+
 void pc_vs_arena_bomb_pile(int player, Vector3f& pos)
 {
 	const nectar::MapSpot& s = activeMap().bombPiles[player];
@@ -197,7 +204,7 @@ int pc_vs_arena_enemy_spots(PcVsEnemySpot* out, int max)
 {
 	int n = 0;
 	for (const nectar::MapEnemy& e : activeMap().enemies) {
-		if (n < max) out[n++] = { e.x, e.z, e.face, e.teki, e.boss };
+		if (n < max) out[n++] = { e.x, e.z, e.face, e.teki, e.boss, reaction(e.reaction) };
 	}
 	return n;
 }
@@ -206,7 +213,7 @@ int pc_vs_arena_object_spots(PcVsObjectSpot* out, int max)
 {
 	int n = 0;
 	for (const nectar::MapObject& o : activeMap().objects) {
-		if (n < max) out[n++] = { o.x, o.z, o.face, o.push, o.kind, o.work, o.y };
+		if (n < max) out[n++] = { o.x, o.z, o.face, o.push, o.kind, o.work, o.y, reaction(o.reaction) };
 	}
 	return n;
 }

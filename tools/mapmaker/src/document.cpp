@@ -112,6 +112,10 @@ ItemCaps itemCaps(ItemType t)
 		break;
 	case ItemType::Wall:
 	case ItemType::Enemy:
+		c.removable = true;
+		c.twinned   = true;
+		c.rotateY   = true;
+		break;
 	case ItemType::Object:
 		c.height    = true;
 		c.removable = true;

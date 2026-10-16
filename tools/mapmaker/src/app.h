@@ -41,8 +41,11 @@ public:
 
 private:
 	enum class Screen { Setup, Building, Welcome, Editor };
-	enum class Tool { Move, Place, Floor, Height, Plateau, Paint, Water, Walls, Scatter };
+	enum class Tool { Move, Place, Floor, Height, Plateau, Paint, Water, Walls, Ramp, Scatter };
+	enum class TransformMode { Move, Rotate, Scale };
 	enum class HeightOp { Raise, Lower, Flatten, Smooth };
+	enum class BrushShape { Circle, Square };
+	enum class BrushFalloff { Smooth, Hard };
 
 	struct Rect {
 		float x = 0, y = 0, w = 0, h = 0;
@@ -52,11 +55,13 @@ private:
 		std::string text;
 		double until;
 	};
+	enum class IssueFix { None, ClampInside, NearestGround, DeleteItem, NormalizeScale };
 	struct Issue {
 		bool blocking;
 		std::string text;
 		bool hasItem;
 		ItemRef item;
+		IssueFix fix = IssueFix::None;
 	};
 	/// Lo que se coloca con «Poner cosas».
 	struct PlaceChoice {
@@ -82,7 +87,9 @@ private:
 	void drawSelected();
 	void drawMapPanel();
 	void drawMinimap();
+	void drawHierarchy();
 	void drawChecklist();
+	void drawTechnicalReport();
 	void drawModals();
 	void drawTutorial();
 	void drawHelp();
@@ -95,7 +102,9 @@ private:
 	void drawPaintOptions();
 	void drawWaterOptions();
 	void drawWallOptions();
+	void drawRampOptions();
 	void drawScatterOptions();
+	void drawBrushSettings();
 	void scatter(const V3& at);
 	void drawSwatches(bool allowAdd);
 	void handleShortcuts();
@@ -107,9 +116,16 @@ private:
 	void drawSelection();
 	void drawSlopes();
 	void drawWater();
+	void drawRoutes();
 	void drawLabels(const ImVec2& origin, const ImVec2& size);
+	void drawMoveGizmo(const ImVec2& origin, const ImVec2& size);
 	void viewportMouse(const Ray& ray, const ImVec2& origin, const ImVec2& size);
-	bool pick(const Ray& ray, ItemRef& hit, float& t);
+	bool selectionPivot(V3& pivot) const;
+	bool selectionCanRotate() const;
+	bool selectionCanScale() const;
+	V3 moveAxis(int axis) const;
+	int moveGizmoAxis(const ImVec2& origin, const ImVec2& size, const ImVec2& mouse) const;
+	bool pick(const Ray& ray, ItemRef& hit, float& t, int cycle = 0);
 	bool groundHit(const Ray& ray, V3& hit) const;
 	bool terrainRay(const Ray& ray, V3& hit) const;
 	float docHeight(float x, float z) const;
@@ -119,6 +135,7 @@ private:
 	// ── Terreno ──
 	bool ensureTerrain();
 	void applyBrush(const V3& at, float dt);
+	bool applyRamp(const V3& from, const V3& to);
 	void growMap(int dx, int dz);
 	std::shared_ptr<nectar::Model> courseModel(const std::string& source);
 	unsigned swatch(const std::string& source, int index);
@@ -155,8 +172,17 @@ private:
 	void focusSelection();
 	void rotateSelection(double degrees);
 	void liftSelection(double dy);
+	void placeSelectionOnGround();
+	bool selectionCanGround() const;
+	bool itemHidden(const ItemRef& r) const;
+	bool itemLocked(const ItemRef& r) const;
+	void toggleHidden(const ItemRef& r);
+	void toggleLocked(const ItemRef& r);
+	void remapSessionItemsAfterRemoval(const std::vector<ItemRef>& removed);
 	void placeAt(const V3& at);
 	std::vector<Issue> checkMap() const;
+	void applyIssueFix(const Issue& issue);
+	void createGroundUnder(const ItemRef& item);
 	double snap(double v) const;
 
 	Config cfg_;
@@ -179,6 +205,7 @@ private:
 	std::map<std::string, unsigned> thumbs_;
 	int thumbLoadsThisFrame_ = 0;
 	char search_[128]        = {};
+	char hierarchySearch_[128] = {};
 
 	// Modelos ya subidos a la GPU (marcadores y decoración).
 	std::map<std::string, std::shared_ptr<GpuModel>> models_;
@@ -188,10 +215,14 @@ private:
 	EditorDoc ed_;
 	nectar::MapDoc clipboard_;
 	bool hasClipboard_ = false;
+	Xform transformClipboard_;
+	ItemCaps transformClipboardCaps_;
+	bool hasTransformClipboard_ = false;
 	Preview preview_;
 	PreviewResult compiled_;
 	std::shared_ptr<GpuModel> baseGpu_;
 	std::vector<V3> waterTris_; ///< superficie del agua del mapa compilado
+	std::vector<V3> collisionTris_; ///< geometría compilada que usa el juego
 	CourseField courseField_;   ///< suelo del escenario del juego (mapas con escenario)
 	int requestedLive_  = -1;
 	double lastRequest_ = 0;
@@ -200,7 +231,10 @@ private:
 
 	// Herramientas
 	Tool tool_         = Tool::Move;
+	TransformMode transformMode_ = TransformMode::Move;
 	HeightOp heightOp_ = HeightOp::Raise;
+	BrushShape brushShape_ = BrushShape::Circle;
+	BrushFalloff brushFalloff_ = BrushFalloff::Smooth;
 	float brushRadius_ = 150.0f, brushStrength_ = 150.0f, flattenTarget_ = 0.0f;
 	bool floorErase_ = false, brushValid_ = false, brushWasDown_ = false;
 	bool waterErase_ = false, plateauUp_ = true;
@@ -218,12 +252,25 @@ private:
 	unsigned scatterSeed_ = 12345u;
 	bool drawingWall_ = false;
 	V3 wallStart_;
+	bool drawingRamp_ = false, rampPreviewValid_ = false;
+	V3 rampStart_, rampEnd_;
+	float rampWidth_ = 250.0f;
+	bool rampSmooth_ = true;
 	// Arrastre con «Mover»
 	bool dragging_ = false, dragArmed_ = false;
+	bool boxSelecting_ = false;
 	int dragHandle_ = -1; // extremo del muro que se arrastra (0 A, 1 B) o -1
+	int dragAxis_ = 0; ///< 0 libre, 1 eje X, 2 eje Z, 3 giro Y, 4 escala uniforme
 	V3 dragGrab_;
-	float pressX_ = 0, pressY_ = 0;
+	V3 transformPivot_;
+	float rotateStartAngle_ = 0;
+	float scaleStartDistance_ = 1;
+	float pressX_ = 0, pressY_ = 0, boxEndX_ = 0, boxEndY_ = 0;
+	float lastAltPickX_ = -1000, lastAltPickY_ = -1000;
+	int altPickCycle_ = 0;
 	std::vector<std::pair<ItemRef, Xform>> dragStart_;
+	std::vector<ItemRef> boxSelectionBase_;
+	std::vector<ItemRef> hiddenItems_, lockedItems_; ///< solo sesión; nunca se guardan en map.json
 
 	// Materiales
 	bool openMatBrowser_  = false;
@@ -235,7 +282,9 @@ private:
 
 	// Vista
 	bool showTwins_ = true, mirrorEdits_ = true;
+	bool showCollision_ = false, showRoutes_ = false, showSlopesOverlay_ = false, showWaterOverlay_ = true, showLabels_ = true;
 	bool viewportHovered_ = false;
+	int splitterDrag_     = 0; ///< 0 ninguno, 1 herramientas, 2 propiedades
 	float viewAspect_     = 1.0f;
 	Rect viewRect_, toolboxRect_, checklistRect_, testButtonRect_, floorButtonRect_, placeButtonRect_;
 

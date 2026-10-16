@@ -6,6 +6,20 @@
 class RandomAccessStream;
 struct Vector3f;
 
+enum {
+	PC_VS_REACT_NONE,
+	PC_VS_REACT_ENEMY,
+	PC_VS_REACT_PELLET,
+	PC_VS_REACT_BOMB,
+	PC_VS_REACT_NECTAR,
+};
+struct PcVsReaction {
+	int kind;
+	u32 pelletId;
+	int teki, boss, count;
+	f32 radius;
+};
+
 /*
  * Arena del modo VS: un rectángulo llano con muretes, una base en cada
  * extremo del eje X y el centro libre para la pieza gorda.
@@ -69,10 +83,15 @@ struct PcVsPieceSpot {
 /// Piezas que están desde el principio (la gorda va aparte).
 int pc_vs_arena_piece_spots(PcVsPieceSpot* out, int max);
 void pc_vs_arena_big_piece(Vector3f& pos);
-/// Dónde duerme cada Bulborb custodio.
-int pc_vs_arena_guard_spots(Vector3f* out, int max);
+/// Dónde duerme cada Bulborb custodio y qué ocurre al derrotarlo.
+struct PcVsGuardSpot {
+	f32 x, z;
+	PcVsReaction reaction;
+};
+int pc_vs_arena_guard_spots(PcVsGuardSpot* out, int max);
 /// Compuerta de roca-bomba del hueco central de la base de cada jugador.
 void pc_vs_arena_gate(int player, Vector3f& pos, f32& faceDirection);
+PcVsReaction pc_vs_arena_gate_reaction(int player);
 /// Montón de rocas-bomba de cada base (para los amarillos).
 void pc_vs_arena_bomb_pile(int player, Vector3f& pos);
 
@@ -80,6 +99,7 @@ void pc_vs_arena_bomb_pile(int player, Vector3f& pos);
 struct PcVsEnemySpot {
 	f32 x, z, face;
 	int teki, boss;
+	PcVsReaction reaction;
 };
 int pc_vs_arena_enemy_spots(PcVsEnemySpot* out, int max);
 
@@ -102,6 +122,7 @@ struct PcVsObjectSpot {
 	f32 x, z, face, push;
 	int kind, work;
 	f32 y; ///< sobre el suelo
+	PcVsReaction reaction;
 };
 int pc_vs_arena_object_spots(PcVsObjectSpot* out, int max);
 
