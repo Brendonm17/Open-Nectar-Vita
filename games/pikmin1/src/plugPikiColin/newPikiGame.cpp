@@ -2667,9 +2667,11 @@ public:
 					// Mod "Infinite Day": only the playable clock is held. The
 					// title screen keeps its own clock running, so its sky
 					// still moves. Day 1 is left alone: the tutorial only ends
-					// when its clock reaches sunset after the engine.
+					// when its clock reaches sunset after the engine. The last day is left
+					// alone too, so its sunset ends the game and plays the ending.
 					const bool pcClockHeld
-					    = pc_settings_get_infinite_day() != 0 && gameflow.mWorldClock.mCurrentDay != 1;
+					    = pc_settings_get_infinite_day() != 0 && gameflow.mWorldClock.mCurrentDay != 1
+					   && gameflow.mWorldClock.mCurrentDay != MAX_DAYS;
 					if (!pcClockHeld && !gameflow.mMoviePlayer->mIsActive && (mUpdateFlags & UPDATE_WORLD_CLOCK)
 					    && !playerState->isTutorial()) {
 						f32 tod = gameflow.mWorldClock.mTimeOfDay;
