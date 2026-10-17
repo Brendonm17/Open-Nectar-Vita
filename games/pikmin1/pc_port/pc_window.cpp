@@ -207,6 +207,9 @@ static void pc_controller_close_instance(SDL_JoystickID which)
 }
 static int sWindowWidth = 1280;
 static int sWindowHeight = 720;
+// Size last passed to SDL_SetWindowSize (see pc_window_set_window_size).
+static int sRequestedWidth = 1280;
+static int sRequestedHeight = 720;
 static int sLogicalRetraceInterval = 1;
 
 // Mouse wheel notches accumulated since the last consumer read them. The wheel
@@ -792,6 +795,8 @@ bool pc_window_init(const char* title, int width, int height) {
 
     sWindowWidth = width;
     sWindowHeight = height;
+    sRequestedWidth = width;
+    sRequestedHeight = height;
     sShouldClose = false;
 
 #if defined(__linux__) && !defined(__ANDROID__)
@@ -1686,7 +1691,27 @@ void pc_window_set_window_size(int w, int h) {
         sWindowHeight = h;
         return;
     }
+    // Compare with the size asked for last time, not with SDL's size: a display
+    // shorter than the window makes the OS shorten it, and SDL then reports the
+    // shorter size, which would look like a change on every settings apply.
+    const bool sizeChanged = w != sRequestedWidth || h != sRequestedHeight;
     SDL_SetWindowSize(sWindow, w, h);
+    sRequestedWidth = w;
+    sRequestedHeight = h;
+    if (sizeChanged) {
+        // SDL keeps the top-left corner when a window grows, so a window created
+        // centered at 1280x720 ends up off-center and past the right edge at a
+        // larger size. Re-center it on its own display, inside the usable area
+        // (below the menu bar, above the Dock). SDL_WINDOWPOS_CENTERED would move
+        // it to the primary display instead.
+        SDL_Rect usable {};
+        const int display = SDL_GetWindowDisplayIndex(sWindow);
+        if (display >= 0 && SDL_GetDisplayUsableBounds(display, &usable) == 0) {
+            SDL_SetWindowPosition(sWindow,
+                usable.x + std::max(0, (usable.w - w) / 2),
+                usable.y + std::max(0, (usable.h - h) / 2));
+        }
+    }
     sWindowWidth = w;
     sWindowHeight = h;
 }
