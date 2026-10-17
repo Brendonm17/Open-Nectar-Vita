@@ -17,6 +17,7 @@
 #include "pc_coop.h"
 #include "mods/pc_mission.h"
 #include "pc_window.h"
+#include "pc_menu_click.h"
 #include "pc_speedrun.h"
 #include "randomizer/pc_randomizer.h"
 #include "settings/pc_settings.h"
@@ -438,6 +439,12 @@ zen::ogScrTitleMgr::TitleStatus zen::ogScrTitleMgr::update(Controller* input)
 	if (input->keyDown(KBBTN_ANY)) {
 		mNoInputTimer = 0.0f;
 	}
+#if defined(PIKI_PC_PORT)
+	// Pointer motion and clicks count as input, so a mouse user is not sent back to Press Start.
+	if (pc_menu_click_take_activity()) {
+		mNoInputTimer = 0.0f;
+	}
+#endif
 
 	mNoInputTimer += gsys->getFrameTime();
 	if (mNoInputTimer >= 60.0f) {
