@@ -32,7 +32,7 @@ if [[ "${1:-}" == "--clean" ]]; then
     rm -rf "${build_dir}" "${out_dir}"
 fi
 
-version="${OPEN_NECTAR_VERSION:-$(sed -n 's/.*set(OPEN_NECTAR_VERSION "\([^"]*\)".*/\1/p' "${repo_root}/CMakeLists.txt")}"
+version="${OPEN_NECTAR_VERSION:-$(sed -n 's/.*set(OPEN_NECTAR_VERSION "\([^"]*\)".*/\1/p' "${repo_root}/CMakeLists.txt" | head -n 1)}"
 if [[ -z "${version}" ]]; then
     printf 'No se encontró OPEN_NECTAR_VERSION en CMakeLists.txt\n' >&2
     exit 1
