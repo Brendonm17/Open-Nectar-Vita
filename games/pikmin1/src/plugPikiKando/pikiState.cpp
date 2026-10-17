@@ -2877,6 +2877,42 @@ void PikiNukareState::exec(Piki* piki)
 {
 }
 
+#if defined(PIKI_PC_PORT)
+/**
+ * @brief Unlocks a yellow or blue Pikmin colour on its first whistle pluck (Whistle Pluck mod).
+ *
+ * Hand plucks unlock through PikiNukareState::cleanup, which also plays the first-time demo. The Whistle Pluck mod
+ * leaves through PikiAutoNukiState, whose cleanup used to be empty, so a whistled first yellow or blue Pikmin never
+ * unlocked its Onion. This helper runs the same yellow and blue steps, including the first-time demo. It does not
+ * cover red. The cursor nuki, interactBikkuri and interactSwallow also enter PikiAutoNukiState, so only pikis flagged
+ * mPcWhistleNuki get here.
+ *
+ * Port only. The matching build also compiles this file, so the whole helper is guarded.
+ */
+static void pcUnlockColourFromAutoPluck(Piki* piki)
+{
+	if (piki->mColor == Yellow && !playerState->mDemoFlags.isFlag(DEMOFLAG_PluckYellowPikmin)) {
+		if (piki->mNavi) naviMgr->setMovieNavi(piki->mNavi);
+		playerState->mDemoFlags.setFlag(DEMOFLAG_PluckYellowPikmin, piki);
+		pc_achievement_unlock(PC_ACH_PIKMIN_YELLOW);
+		playerState->mResultFlags.setOn(zen::RESFLAG_MeetYellowPikminNoBomb);
+		playerState->mResultFlags.setOn(zen::RESFLAG_Onyons);
+		playerState->setContainer(Yellow);
+		playerState->setDisplayPikiCount(Yellow);
+	} else if (piki->mColor == Blue && !playerState->mDemoFlags.isFlag(DEMOFLAG_PluckBluePikmin)) {
+		if (piki->mNavi) naviMgr->setMovieNavi(piki->mNavi);
+		playerState->mDemoFlags.setFlag(DEMOFLAG_PluckBluePikmin, piki);
+		pc_achievement_unlock(PC_ACH_PIKMIN_BLUE);
+		playerState->mResultFlags.setOn(zen::RESFLAG_MeetBluePikmin);
+		playerState->setContainer(Blue);
+		playerState->setDisplayPikiCount(Blue);
+		gameflow.mGamePrefs.openStage(CHALSTAGE_Practice);
+		gameflow.mGamePrefs.openStage(CHALSTAGE_Forest);
+		gameflow.mGamePrefs.openStage(CHALSTAGE_Cave);
+	}
+}
+#endif
+
 /**
  * @brief Updates tutorial flags/unlocks after a successful pluck.
  */
@@ -3017,10 +3053,17 @@ void PikiAutoNukiState::exec(Piki* piki)
 }
 
 /**
- * @brief No explicit cleanup.
+ * @brief Port only: unlocks yellow or blue Pikmin on their first whistle pluck, as a hand pluck does. Empty in the matching build.
  */
 void PikiAutoNukiState::cleanup(Piki* piki)
 {
+#if defined(PIKI_PC_PORT)
+	// Only the Whistle Pluck mod unlocks here. The cursor nuki, interactBikkuri and interactSwallow share this state and keep its empty cleanup.
+	if (piki->mPcWhistleNuki) {
+		piki->mPcWhistleNuki = false;
+		pcUnlockColourFromAutoPluck(piki);
+	}
+#endif
 }
 
 /**

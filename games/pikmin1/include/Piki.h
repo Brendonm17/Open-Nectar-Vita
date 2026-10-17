@@ -290,6 +290,7 @@ public:
 	int mPlayerId;                        // _43C
 #if defined(PIKI_PC_PORT)
 	bool mPcSieging = false; ///< VS: golpeando el cohete rival (acción suspendida)
+	bool mPcWhistleNuki = false; ///< Whistle Pluck mod: this nuki unlocks its colour when it ends
 #endif
 	Vector3f mLastAnimPosition;           // _440
 	Vector3f mShadowPos;                  // _44C
