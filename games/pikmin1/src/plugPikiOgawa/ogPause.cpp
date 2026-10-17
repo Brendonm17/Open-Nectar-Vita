@@ -12,6 +12,7 @@
 #include "pc_gfx.h"
 #include "pc_coop.h"
 #include "mods/pc_mission.h"
+#include "pc_window.h"
 #include "settings/pc_settings.h"
 #endif
 
@@ -138,6 +139,10 @@ void zen::ogScrPauseMgr::start(bool isChallengeMode)
 	mState      = PAUSE_FadeIn;
 	mFrameTimer = 0.0f;
 	mIsActive   = true;
+#if defined(PIKI_PC_PORT)
+	// A pause over a level releases the pointer so its rows can be clicked.
+	pc_window_set_menu_overlay(true);
+#endif
 }
 
 /**
@@ -151,6 +156,10 @@ zen::ogScrPauseMgr::PauseStatus zen::ogScrPauseMgr::update(Controller* controlle
 
 	if (mState >= PAUSE_EXIT_CODE) {
 		mState = PAUSE_NULL;
+#if defined(PIKI_PC_PORT)
+		// Closing the pause takes the pointer back, if the level is still running.
+		pc_window_set_menu_overlay(false);
+#endif
 		return mState;
 	}
 
