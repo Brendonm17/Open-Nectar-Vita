@@ -14,8 +14,16 @@
 #define CALLBACK __stdcall
 #endif
 #endif
+#ifdef __APPLE__
+// macOS no tiene <GL/gl.h>: gl3.h (core) trae las funciones, enums y PFNGL*PROC que usa este archivo.
+#ifndef GL_SILENCE_DEPRECATION
+#define GL_SILENCE_DEPRECATION
+#endif
+#include <OpenGL/gl3.h>
+#else
 #include <GL/gl.h>
 #include <GL/glext.h>
+#endif
 
 #define NM_GL_FUNCS(X)                                                                                                                     \
 	X(PFNGLGENBUFFERSPROC, glGenBuffers)                                                                                                   \
