@@ -239,7 +239,7 @@ if (PIKMIN_STATIC_RUNTIME AND NOT ANDROID)
     endif()
     if (WIN32)
         add_link_options(-static)
-    else()
+    elseif (NOT APPLE) # macOS: libc++ viene con el sistema; basta SDL2 estática
         # --exclude-libs: el libstdc++/SDL2 estáticos no se exportan. Si no,
         # pisan al libstdc++ del sistema en los drivers que lo usan (NVIDIA
         # egl-wayland2) y el contexto cae a llvmpipe.

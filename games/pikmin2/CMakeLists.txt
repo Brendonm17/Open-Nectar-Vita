@@ -404,7 +404,7 @@ if(PIKMIN2_ENABLE_PORT_LAYER)
         endif()
         if(WIN32)
             add_link_options(-static)
-        else()
+        elseif(NOT APPLE) # macOS: libc++ viene con el sistema; basta SDL2 estática
             # --exclude-libs: el libstdc++/SDL2 estáticos no se exportan (ver P1).
             add_link_options(-static-libstdc++ -static-libgcc -Wl,--exclude-libs,ALL)
         endif()

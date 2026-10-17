@@ -7,7 +7,8 @@
 #   p1-usa/bin/nectar            Pikmin 1 USA
 #   p1-usa/bin/nectar-launcher   launcher
 #   p1-pal/bin/nectar            Pikmin 1 PAL
-#   p2/pikmin2_pc                Pikmin 2
+#   p2/pikmin2_pc                Pikmin 2 PAL
+#   p2-usa/pikmin2_pc            Pikmin 2 USA
 # con SDL2 y el runtime de C++ dentro (solo dependen de glibc, libGL y libX11).
 set -euo pipefail
 
@@ -46,7 +47,7 @@ common=(
 printf '%s\n' '[contenedor] Pikmin 1 USA y el launcher...'
 cmake -S "${src}/games/pikmin1" -B "${out}/p1-usa" "${common[@]}" \
     -DPIKMIN_NATIVE_OPTIMIZE=OFF -DPIKMIN_ENABLE_IPO=ON -DOPEN_NECTAR_VERSION="${version}"
-cmake --build "${out}/p1-usa" --target pikmin_pc pikmin_launcher -j"${jobs}"
+cmake --build "${out}/p1-usa" --target pikmin_pc pikmin_launcher nectar_mapmaker -j"${jobs}"
 
 printf '%s\n' '[contenedor] Pikmin 1 PAL...'
 cmake -S "${src}/games/pikmin1" -B "${out}/p1-pal" "${common[@]}" \
@@ -57,3 +58,8 @@ cmake --build "${out}/p1-pal" --target pikmin_pc -j"${jobs}"
 printf '%s\n' '[contenedor] Pikmin 2...'
 cmake -S "${src}/games/pikmin2" -B "${out}/p2" "${common[@]}" -DBUILD_TESTING=OFF
 cmake --build "${out}/p2" --target pikmin2_pc -j"${jobs}"
+
+printf '%s\n' '[contenedor] Pikmin 2 USA...'
+cmake -S "${src}/games/pikmin2" -B "${out}/p2-usa" "${common[@]}" -DBUILD_TESTING=OFF \
+    -DPIKMIN_GAME_VERSION=VERSION_GPVE01
+cmake --build "${out}/p2-usa" --target pikmin2_pc -j"${jobs}"

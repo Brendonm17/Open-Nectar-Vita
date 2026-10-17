@@ -13,6 +13,7 @@
 #include <climits>
 #include <mach-o/dyld.h>
 #endif
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <sys/types.h>
@@ -452,6 +453,57 @@ bool spawnGame(const fs::path& dataRoot, const fs::path& gameBinary, const std::
     process.handle = static_cast<unsigned long long>(child);
     process.pid    = static_cast<unsigned long>(child);
     return true;
+}
+
+bool createDesktopShortcut(const fs::path& launcher)
+{
+    const char* home = std::getenv("HOME");
+    if (!home || !*home) return false;
+    std::error_code ec;
+#if defined(__APPLE__)
+    const fs::path link = fs::path(home) / "Desktop" / "Open Nectar";
+    fs::remove(link, ec);
+    fs::create_symlink(launcher, link, ec);
+    return !ec;
+#else
+    // La carpeta del escritorio va traducida ("Escritorio"): la dice
+    // user-dirs.dirs, con la línea XDG_DESKTOP_DIR="$HOME/Escritorio".
+    fs::path desktop = fs::path(home) / "Desktop";
+    const char* xdg = std::getenv("XDG_CONFIG_HOME");
+    std::ifstream dirs((xdg && *xdg ? fs::path(xdg) : fs::path(home) / ".config") / "user-dirs.dirs");
+    for (std::string line; std::getline(dirs, line);) {
+        const std::string key = "XDG_DESKTOP_DIR=\"";
+        if (line.compare(0, key.size(), key) != 0) continue;
+        std::string value = line.substr(key.size());
+        if (!value.empty() && value.back() == '"') value.pop_back();
+        if (value.compare(0, 5, "$HOME") == 0) value = std::string(home) + value.substr(5);
+        if (!value.empty()) desktop = value;
+    }
+    const fs::path icon = launcher.parent_path() / "open_nectar.png";
+    const std::string entry = "[Desktop Entry]\nType=Application\nName=Open Nectar\n"
+                              "Comment=Pikmin 1 and Pikmin 2\nExec=\"" + launcher.string() + "\"\n"
+                              "Path=" + launcher.parent_path().string() + "\n"
+                            + (fs::is_regular_file(icon, ec) ? "Icon=" + icon.string() + "\n" : std::string())
+                            + "Terminal=false\nCategories=Game;\n";
+    bool written = false;
+    // Escritorio y menú de aplicaciones.
+    for (const fs::path& file : { desktop / "open-nectar.desktop",
+                                  fs::path(home) / ".local/share/applications/open-nectar.desktop" }) {
+        fs::create_directories(file.parent_path(), ec);
+        std::ofstream out(file, std::ios::trunc);
+        if (!(out << entry)) continue;
+        out.close();
+        fs::permissions(file, fs::perms::owner_exec | fs::perms::group_exec | fs::perms::others_exec,
+                        fs::perm_options::add, ec);
+        if (!written) {
+            // GNOME no abre un .desktop del escritorio hasta marcarlo de confianza.
+            std::string ignored, error;
+            runAndCapture("gio", { "set", file.string(), "metadata::trusted", "true" }, desktop, ignored, error);
+        }
+        written = true;
+    }
+    return written;
+#endif
 }
 
 bool gameRunning(GameProcess& process, int& exitCode)

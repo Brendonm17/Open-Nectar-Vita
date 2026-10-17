@@ -27,6 +27,8 @@ constexpr const char* kLatestReleaseApi
 // queda como alternativa.
 #ifdef _WIN32
 const char* const kAssetNames[] = { "nectar-windows.zip" };
+#elif defined(__APPLE__)
+const char* const kAssetNames[] = { "nectar-macos.tar.gz" };
 #elif defined(__ANDROID__)
 // Android: el .apk del release, se llame como se llame (open_nectar_0.9.apk).
 const char* const kAssetNames[] = { ".apk" };
@@ -196,6 +198,19 @@ bool downloadRelease(const ReleaseInfo& release, const std::string& launcherName
         return false;
     }
     return true;
+}
+
+bool cachedRelease(const std::string& launcherName, fs::path& packageDirectory)
+{
+    std::error_code ec;
+    const fs::path extracted = platform::cacheDirectory() / "update" / "extracted";
+    return fs::is_directory(extracted, ec) && findPackage(extracted, launcherName, packageDirectory);
+}
+
+void forgetCachedRelease()
+{
+    std::error_code ec;
+    fs::remove_all(platform::cacheDirectory() / "update", ec);
 }
 
 } // namespace launcher

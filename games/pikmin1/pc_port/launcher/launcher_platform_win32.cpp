@@ -372,6 +372,33 @@ bool runAndCapture(const fs::path& program, const std::vector<std::string>& argu
     return true;
 }
 
+bool createDesktopShortcut(const fs::path& launcher)
+{
+    PWSTR folder = nullptr;
+    if (FAILED(SHGetKnownFolderPath(FOLDERID_Desktop, 0, nullptr, &folder))) return false;
+    const fs::path link = fs::path(folder) / L"Open Nectar.lnk";
+    CoTaskMemFree(folder);
+
+    const HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    bool ok = false;
+    IShellLinkW* shell = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_IShellLinkW,
+                                   reinterpret_cast<void**>(&shell)))) {
+        shell->SetPath(launcher.wstring().c_str());
+        shell->SetWorkingDirectory(launcher.parent_path().wstring().c_str());
+        shell->SetIconLocation(launcher.wstring().c_str(), 0);
+        shell->SetDescription(L"Open Nectar - Pikmin 1 and Pikmin 2");
+        IPersistFile* file = nullptr;
+        if (SUCCEEDED(shell->QueryInterface(IID_IPersistFile, reinterpret_cast<void**>(&file)))) {
+            ok = SUCCEEDED(file->Save(link.wstring().c_str(), TRUE));
+            file->Release();
+        }
+        shell->Release();
+    }
+    if (SUCCEEDED(init)) CoUninitialize();
+    return ok;
+}
+
 void relaunch(const fs::path& program, const std::vector<std::string>& arguments)
 {
     // Sin exec(): se arranca el nuevo y este termina.

@@ -94,6 +94,11 @@ bool runAndCapture(const std::filesystem::path& program, const std::vector<std::
 // nueva carpeta tras mover la instalación). No retorna si lo consigue.
 void relaunch(const std::filesystem::path& program, const std::vector<std::string>& arguments);
 
+// Acceso directo "Open Nectar" en el escritorio que abre `launcher` (un .lnk
+// en Windows, un .desktop en Linux, un enlace en macOS). Lo sustituye si ya
+// existía. false si no hay escritorio o no se pudo escribir.
+bool createDesktopShortcut(const std::filesystem::path& launcher);
+
 // Entra en dataRoot y sustituye el proceso actual por el juego. No retorna
 // si tiene éxito; si falla, escribe el motivo y termina el proceso.
 // `arguments` van tras el ejecutable (vacío: ninguno, como siempre).

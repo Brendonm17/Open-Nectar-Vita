@@ -21,7 +21,7 @@ if ! command -v x86_64-w64-mingw32-g++ >/dev/null 2>&1; then
     printf 'Instala g++-mingw-w64-x86-64 (no está x86_64-w64-mingw32-g++).\n' >&2
     exit 1
 fi
-launcher_version="$(python3 -c "import json;print(json.load(open('${root}/versions.json'))['launcher'])")"
+launcher_version="$(python3 -c "import json;print(json.load(open('${root}/versions.json'))['release'])")"
 jobs="$(nproc)"
 
 # PIKMIN_NATIVE_OPTIMIZE=OFF: -march=native compilaría para la CPU de esta
@@ -32,7 +32,7 @@ common=(-DCMAKE_BUILD_TYPE=Release -DPIKMIN_NATIVE_JAUDIO=ON -DPIKMIN_STATIC_RUN
 printf '[1/4] Pikmin 1 USA y el launcher...\n'
 cmake -S "${p1}" -B "${build_dir}/p1-usa" "${common[@]}" \
     -DCMAKE_TOOLCHAIN_FILE="${p1}/cmake/toolchain-mingw64.cmake" -DOPEN_NECTAR_VERSION="${launcher_version}"
-cmake --build "${build_dir}/p1-usa" --target pikmin_pc pikmin_launcher -j"${jobs}"
+cmake --build "${build_dir}/p1-usa" --target pikmin_pc pikmin_launcher nectar_mapmaker -j"${jobs}"
 
 printf '[2/4] Pikmin 1 PAL...\n'
 cmake -S "${p1}" -B "${build_dir}/p1-pal" "${common[@]}" \
@@ -53,6 +53,7 @@ usa="${build_dir}/p1-usa/bin/nectar.exe"
 pal="${build_dir}/p1-pal/bin/nectar.exe"
 p2exe="${build_dir}/p2/pikmin2_pc.exe"
 p2usa="${build_dir}/p2-usa/pikmin2_pc.exe"
+mapmaker="${build_dir}/p1-usa/bin/nectar-mapmaker.exe"
 
 printf '[4/4] Montando los archivos de la release...\n'
 stripped="${build_dir}/stripped"
@@ -62,6 +63,7 @@ cp "${usa}" "${stripped}/nectar.exe"
 cp "${pal}" "${stripped}/nectar-pal.exe"
 cp "${p2exe}" "${stripped}/pikmin2_pc.exe"
 cp "${p2usa}" "${stripped}/pikmin2_pc-usa.exe"
+cp "${mapmaker}" "${stripped}/nectar-mapmaker.exe"
 x86_64-w64-mingw32-strip "${stripped}"/*.exe
 
 # Nada de DLL propias: cada .exe debe pedir solo DLL del sistema.
@@ -78,4 +80,5 @@ done
 python3 "${root}/scripts/release/make_release.py" --os windows --out "${out_dir}" \
     --launcher "${stripped}/nectar-launcher.exe" --p1-usa "${stripped}/nectar.exe" \
     --p1-pal "${stripped}/nectar-pal.exe" --p2 "${stripped}/pikmin2_pc.exe" --p2-usa "${stripped}/pikmin2_pc-usa.exe" \
+    --mapmaker "${stripped}/nectar-mapmaker.exe" \
     --extra "${p1}/packaging/windows/README.txt"

@@ -16,7 +16,7 @@ instalado y descarga solo lo que ha cambiado. Las versiones salen de
 versions.json, en la raíz del repo: es lo único que se edita al publicar.
 
 Uso:
-  make_release.py --os linux|windows --out DIR
+  make_release.py --os linux|windows|macos --out DIR
                   --launcher F --p1-usa F --p1-pal F --p2 F [--extra F ...]
 """
 import argparse
@@ -36,7 +36,7 @@ def asset_name(part, os_name):
 
 
 def bundle_name(os_name):
-    return "nectar-windows.zip" if os_name == "windows" else "nectar-linux.tar.gz"
+    return "nectar-windows.zip" if os_name == "windows" else f"nectar-{os_name}.tar.gz"
 
 
 def manifest(versions):
@@ -46,7 +46,7 @@ def manifest(versions):
         "parts": {
             part: {
                 "version": versions[part],
-                "assets": {os_name: asset_name(part, os_name) for os_name in ("linux", "windows")},
+                "assets": {os_name: asset_name(part, os_name) for os_name in ("linux", "windows", "macos")},
             }
             for part in PARTS
         },
@@ -82,7 +82,7 @@ def stage(folder, files):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--os", required=True, choices=("linux", "windows"))
+    ap.add_argument("--os", required=True, choices=("linux", "windows", "macos"))
     ap.add_argument("--out", required=True)
     ap.add_argument("--versions", default=os.path.join(os.path.dirname(__file__), "..", "..", "versions.json"))
     ap.add_argument("--launcher", required=True)
@@ -90,6 +90,7 @@ def main():
     ap.add_argument("--p1-pal", required=True)
     ap.add_argument("--p2", required=True)
     ap.add_argument("--p2-usa", help="build USA (GPVE01) de Pikmin 2; --p2 es la europea")
+    ap.add_argument("--mapmaker", help="editor de mapas VS; viaja con el launcher")
     ap.add_argument("--extra", action="append", default=[], help="archivo que va junto al launcher (README, icono)")
     args = ap.parse_args()
 
@@ -106,6 +107,8 @@ def main():
     work = os.path.join(out, "staging")
 
     launcher_files = [(args.launcher, "nectar-launcher" + exe, True)]
+    if args.mapmaker:
+        launcher_files.append((args.mapmaker, "nectar-mapmaker" + exe, True))
     launcher_files += [(f, os.path.basename(f), False) for f in args.extra]
     p1_files = [(args.p1_usa, "nectar" + exe, True), (args.p1_pal, "nectar-pal" + exe, True)]
     p2_files = [(args.p2, "pikmin2_pc" + exe, True)]

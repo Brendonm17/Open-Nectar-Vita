@@ -32,5 +32,12 @@ bool isNewerVersion(const std::string& candidate, const std::string& current);
 bool downloadRelease(const ReleaseInfo& release, const std::string& launcherName,
                      std::filesystem::path& packageDirectory, std::string& error);
 
+// El paquete que dejó en la caché la última actualización descargada (por
+// este launcher o por uno anterior). false si no queda ninguno.
+bool cachedRelease(const std::string& launcherName, std::filesystem::path& packageDirectory);
+
+// Borra lo descargado para actualizar, una vez instalado.
+void forgetCachedRelease();
+
 } // namespace launcher
 } // namespace pikmin

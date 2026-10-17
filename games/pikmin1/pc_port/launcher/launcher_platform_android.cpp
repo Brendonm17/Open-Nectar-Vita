@@ -118,6 +118,8 @@ bool runAndCapture(const fs::path&, const std::vector<std::string>&, const fs::p
 
 void relaunch(const fs::path&, const std::vector<std::string>&) { }
 
+bool createDesktopShortcut(const fs::path&) { return false; } // el icono es el de la APK
+
 [[noreturn]] void launchGame(const fs::path&, const fs::path&, const std::vector<std::string>&)
 {
     // launcher_android_main.cpp arranca el juego por JNI; esto no se usa.
