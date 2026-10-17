@@ -76,8 +76,8 @@ zen::ogScrTitleMgr::ogScrTitleMgr()
 	const PcMenuExtend extMain = { 3, 30, -50, 'yoko', 40, false, 150 };
 	mMenuNoChallenge   = new DrawMenu("screen/blo/m_select.blo", false, false, &extMain);
 	mMenuWithChallenge = mMenuNoChallenge; // Challenge Mode va en Extra Modes
-	// Left clicks land on these rows only. Options, sound, and the other
-	// panels stay on the controller.
+	// Left clicks land on these rows only. The Options menus opt in where they are built,
+	// and the pause and other screens stay on the controller.
 	mMenuNoChallenge->setPointerClicks(true);
 	pcSetupMainMenus();
 	pcSetupAdvancedMenu();
@@ -92,12 +92,19 @@ zen::ogScrTitleMgr::ogScrTitleMgr()
 	const PcMenuExtend extOptions = { 2, 36, -40, 'yoko', 40, true };
 	mOptionsMenu  = new DrawMenu("screen/blo/option.blo", false, false, &extOptions);
 	pcInsertAdvancedItem(mOptionsMenu);
+	mOptionsMenu->setPointerClicks(true);
 #else
 	mOptionsMenu  = new DrawMenu("screen/blo/option.blo", false, false);
 #endif
 	mSoundMenu    = new DrawMenu("screen/blo/s_select.blo", false, false);
 	mRumbleMenu   = new DrawMenu("screen/blo/v_select.blo", false, false);
 	mLanguageMenu = new DrawMenu("screen/blo/ms_selec.blo", false, false);
+#if defined(PIKI_PC_PORT)
+	// The Options sub-pages take pointer clicks too. Pause and the other screens do not yet.
+	mSoundMenu->setPointerClicks(true);
+	mRumbleMenu->setPointerClicks(true);
+	mLanguageMenu->setPointerClicks(true);
+#endif
 
 	mInput = new ZenController(nullptr);
 	mInput->setRepeatTime(0.2f);
@@ -355,6 +362,7 @@ void zen::ogScrTitleMgr::pcSetupAdvancedMenu()
 	// más, con el paso compactado y el cristal estirado (PcMenuExtend).
 	const PcMenuExtend ext = { 4, 30, -59, 'yoko', 0 };
 	mAdvancedMenu  = new DrawMenu("screen/blo/option.blo", false, false, &ext);
+	mAdvancedMenu->setPointerClicks(true);
 	P2DScreen* scr = mAdvancedMenu->getScreenPtr();
 	// Fondo negro del .blo fuera, como hace el título con los demás menús.
 	if (P2DPane* back = scr->search('back', false)) static_cast<P2DPicture*>(back)->setAlpha(0);
