@@ -1169,6 +1169,11 @@ void MoviePlayer::drawLoading(Graphics& gfx)
 void MoviePlayer::skip()
 {
 #ifdef PIKI_PC_PORT
+	// La pantalla de resultados del día tiene que pasar por su guardado antes
+	// de que esta demo pueda terminar: no se salta.
+	if (mCurrentConfig && mCurrentConfig->is("s02_dayend_result")) {
+		return;
+	}
 	if (pcMovieGameplayTransitionPending(this)) {
 		sPcDeferredGameplaySkip = true;
 		return;
