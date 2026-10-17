@@ -21,8 +21,8 @@
 //
 // The game TUs (src/, built into the pikmin_legacy library, which never sees
 // PIKI_NETPLAY_BUILD) reach pc_netplay_diag_bad_action_target through a weak
-// declaration, as System::run reaches pc_netplay_session_drive: null in the
-// default build, so the call is skipped there.
+// declaration, as System::run reaches pc_netplay_session_drive. The default
+// build defines it as a no-op (pc_netplay_stubs.cpp).
 
 class Creature;
 class Piki;

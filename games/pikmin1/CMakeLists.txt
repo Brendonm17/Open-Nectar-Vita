@@ -768,6 +768,12 @@ if(PIKMIN_NETPLAY_BUILD)
     target_compile_definitions(${NECTAR_GAME} PRIVATE PIKI_NETPLAY_PORTMAP=1)
 endif()
 
+# Default build: the netplay hooks are no-op stubs, so the weak call sites link
+# on Mach-O too (see pc_port/netplay/pc_netplay_stubs.cpp).
+if(NOT PIKMIN_NETPLAY_BUILD)
+    target_sources(${NECTAR_GAME} PRIVATE pc_port/netplay/pc_netplay_stubs.cpp)
+endif()
+
 option(PIKMIN_ENABLE_IPO "Enable portable interprocedural/link-time optimization" ON)
 if(PIKMIN_ENABLE_IPO)
     include(CheckIPOSupported)
