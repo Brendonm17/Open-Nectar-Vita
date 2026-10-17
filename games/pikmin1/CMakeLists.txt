@@ -316,6 +316,7 @@ set(PC_PORT_SOURCES
     pc_port/pc_menu_pad.cpp
     pc_port/pc_menu_mode.cpp
     pc_port/pc_menu_repeat.cpp
+    pc_port/pc_menu_click.cpp
     pc_port/pc_photo_mode.cpp
     pc_port/pc_record.cpp
     pc_port/pc_permadeath.cpp
@@ -1312,6 +1313,12 @@ if(PIKMIN_BUILD_TESTS)
     target_compile_definitions(pc_host_readable_test PRIVATE PC_HOST_READABLE_TEST_P1)
     target_compile_options(pc_host_readable_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
     add_test(NAME pc_host_readable_test COMMAND pc_host_readable_test)
+
+    # Title screen and main menu clicks (no window, no disc)
+    add_executable(pc_menu_click_test pc_port/pc_menu_click_test.cpp pc_port/pc_menu_click.cpp)
+    target_include_directories(pc_menu_click_test PRIVATE pc_port)
+    target_compile_options(pc_menu_click_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+    add_test(NAME pc_menu_click_test COMMAND pc_menu_click_test)
 
     # Host software DSP test (not linked into main game)
     add_executable(pc_dsp_host_test

@@ -286,6 +286,10 @@ public:
 	bool checkSelectMenuCancel() { return mIsSelectMenuCancel; }
 	void setCancelKeyAssign(u32 key) { mKeyCancel = key; }
 	void setDecideKeyAssign(u32 key) { mKeyDecide = key; }
+#if defined(PIKI_PC_PORT)
+	// Left clicks select and confirm a row. Off except on the title's main menu.
+	void setPointerClicks(bool enabled) { mPointerClicks = enabled; }
+#endif
 
 protected:
 	void updateMenuPanes();
@@ -321,6 +325,9 @@ protected:
 	int mCancelSoundID;                // _1CC
 	int mCancelSelectMenuNo;           // _1D0
 	bool mIsSelectMenuCancel;          // _1D4
+#if defined(PIKI_PC_PORT)
+	bool mPointerClicks = false;
+#endif
 };
 
 } // namespace zen

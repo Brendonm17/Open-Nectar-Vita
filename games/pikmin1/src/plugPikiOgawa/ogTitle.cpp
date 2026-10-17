@@ -75,6 +75,9 @@ zen::ogScrTitleMgr::ogScrTitleMgr()
 	const PcMenuExtend extMain = { 3, 30, -50, 'yoko', 40, false, 150 };
 	mMenuNoChallenge   = new DrawMenu("screen/blo/m_select.blo", false, false, &extMain);
 	mMenuWithChallenge = mMenuNoChallenge; // Challenge Mode va en Extra Modes
+	// Left clicks land on these rows only. Options, sound, and the other
+	// panels stay on the controller.
+	mMenuNoChallenge->setPointerClicks(true);
 	pcSetupMainMenus();
 	pcSetupAdvancedMenu();
 #else
