@@ -1196,6 +1196,8 @@ void pc_window_poll_events(PADStatus* pad) {
                 if (event.type != SDL_MOUSEBUTTONDOWN)
                     break;
                 if (event.button.which != SDL_TOUCH_MOUSEID) pc_menu_click_disarm_hover();
+                if (event.button.button == SDL_BUTTON_RIGHT && event.button.which != SDL_TOUCH_MOUSEID)
+                    pc_menu_click_post_back();
                 // Menú F1 abierto: el clic izquierdo es un toque (misma lógica
                 // que la pantalla táctil: seleccionar fila / pulsar la ya elegida).
                 // (También en el mapa de zonas de las campañas: elegir zona con el ratón.)
