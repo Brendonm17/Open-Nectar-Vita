@@ -355,6 +355,11 @@ if(PIKMIN2_ENABLE_PORT_LAYER)
     endif()
 
     find_package(Threads REQUIRED)
+    if(NOT ANDROID)
+        # Find SDL2 as Pikmin 1 does. Without it, the pkg-config fallback below
+        # passes -lSDL2 with no library directory.
+        find_package(SDL2 QUIET)
+    endif()
     if(ANDROID)
         # Como Pikmin 1: android/app/jni/CMakeLists.txt añade SDL2 como target
         # antes de este árbol. El port incluye <SDL2/SDL.h>; un enlace en el
