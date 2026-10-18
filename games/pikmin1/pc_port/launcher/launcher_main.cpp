@@ -1,3 +1,10 @@
+// El online está apagado en todo el proyecto (pc_online_switch.h): sin
+// botones de co-op/VS online aunque el launcher se compile con ellos.
+#include "../netplay/pc_online_switch.h"
+#if !PC_ONLINE_ENABLED
+#undef PIKMIN_LAUNCHER_NETPLAY
+#endif
+
 #include "gamecube_image.h"
 #include "asset_finalize.h"
 #include "prepared_image.h"
