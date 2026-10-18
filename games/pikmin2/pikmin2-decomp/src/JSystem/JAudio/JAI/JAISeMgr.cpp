@@ -1,3 +1,6 @@
+#ifdef PIKI_PC_PORT
+#include "audio/pc_audio_drops.h"
+#endif
 #include "JSystem/JAudio/JAI/JAIBasic.h"
 #include "JSystem/JAudio/JAI/JAIConst.h"
 #include "JSystem/JAudio/JAI/JAIGlobalParameter.h"
@@ -652,6 +655,9 @@ void storeSeBuffer(JAISe** soundHandlePtr, JAInter::Actor* actor, u32 soundID, u
 
 	u32 category = (soundID >> 12) & 0xFF;
 	u8 idx       = category;
+#ifdef PIKI_PC_PORT
+	pc_audio_drop(PCAD_SeRequest);
+#endif
 
 	u32 isFree;
 	JSULink<JAISound>* link;
@@ -713,10 +719,16 @@ void storeSeBuffer(JAISe** soundHandlePtr, JAInter::Actor* actor, u32 soundID, u
 
 	if (bufferCount == max) {
 		if (seBuffer[0]->getInfoPriority() > soundInfo->mPriority) {
+#ifdef PIKI_PC_PORT
+			pc_audio_drop(PCAD_SeLowPriority);
+#endif
 			return;
 		}
 
 		if (soundInfo->mPriority == seBuffer[0]->getInfoPriority() && seBuffer[0]->mState == SOUNDSTATE_Fadeout) {
+#ifdef PIKI_PC_PORT
+			pc_audio_drop(PCAD_SeLowPriority);
+#endif
 			return;
 		}
 		releaseSeRegist(seBuffer[0]);
@@ -737,6 +749,9 @@ void storeSeBuffer(JAISe** soundHandlePtr, JAInter::Actor* actor, u32 soundID, u
 			newSe->stop(0);
 			se = static_cast<JAISe*>(seRegist[idx].getSound());
 		} else {
+#ifdef PIKI_PC_PORT
+			pc_audio_drop(PCAD_SeNoObject);
+#endif
 			if (soundHandlePtr) {
 				*soundHandlePtr = nullptr;
 			}

@@ -92,6 +92,15 @@ void pc_dsp_host_render_frame_planar(DSPchannel_* channels, u32 channelCount,
 /// fundir a silencio al parar el sonido.
 void pc_dsp_host_set_mixer_level(float level);
 
+/**
+ * Línea FX del DSP (las cuatro "reverb" de JASDsp::setFXLine): lo que las
+ * voces mandan a su bus de entrada (0x0DC0, 0x0E20, 0x0E80, 0x0EE0 para las
+ * líneas 0-3) pasa por un buffer circular de `subframes` x 80 muestras, un
+ * FIR de 8 coeficientes Q15 y sale a dos buses con su volumen Q15.
+ */
+void pc_dsp_host_set_fx_line(u32 index, bool enabled, u32 subframes, const u16 dest[2], const s16 volume[2],
+                             const s16 coeffs[8]);
+
 /// True once pc_dsp_host_init has run.
 bool pc_dsp_host_ready(void);
 

@@ -4723,7 +4723,12 @@ void online_guest_send_input(double now)
 		PcNetplayInput p1 = build_local_input();
 		if (sOnline->catchingUp) p1 = pc_netplay_input_neutral(); // not on screen yet: do not play blind
 		uint64_t tick     = sOnline->clock.hostTickAt((std::uint64_t)now) + sOnline->lead;
-		if (tick <= sOnline->lastInputTick) tick = sOnline->lastInputTick + 1;
+		// Ticks crecientes, pero sin arrastrar para siempre una estimación que
+		// salió alta (un primer pong lento al cargar): si va muy por detrás de
+		// lo ya enviado, se resincroniza. Sin esto el host descartaba toda la
+		// entrada del invitado como "futura" (issue #95).
+		const uint64_t resync = nnet::InputPolicy{}.maxFutureTicks / 2;
+		if (tick <= sOnline->lastInputTick && sOnline->lastInputTick - tick < resync) tick = sOnline->lastInputTick + 1;
 		// Test triggers fire once, like a real request.
 		const bool testLeave = sOnline->testLeaveAt != 0 && sOnline->nextTick >= sOnline->testLeaveAt;
 		if ((sOnline->leaveRequested || testLeave) && !sOnline->spectator && !sOnline->leaveSent) {

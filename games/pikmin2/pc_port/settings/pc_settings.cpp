@@ -4868,7 +4868,38 @@ void ngrInput()
     down   |= (sTouchFrameButtons & PAD_BUTTON_DOWN) != 0;
     accept |= (sTouchFrameButtons & PAD_BUTTON_A) != 0;
     cancel |= (sTouchFrameButtons & PAD_BUTTON_B) != 0;
-    sTouchTapPending = false;
+    // Táctil: el primer toque elige la fila; otro sobre la elegida la usa
+    // (Start empieza, Seed sortea otra, el resto cambia; a la izquierda del
+    // valor retrocede). Fuera de la ventana, atrás. Misma geometría que ngrDraw.
+    if (sTouchTapPending) {
+        sTouchTapPending = false;
+        int sw, sh;
+        ngScreen(&sw, &sh);
+        const float x = sTouchTapX * sw;
+        const float y = sTouchTapY * sh;
+        const int panelW = 600, panelH = 466, rowH = 24;
+        const int panelX = sw / 2 - panelW / 2;
+        const int panelY = sh / 2 - panelH / 2;
+        const int top = panelY + 52;
+        const int valueX = panelX + 290;
+        if (x >= panelX && x <= panelX + panelW && y >= panelY && y <= panelY + panelH) {
+            for (int row = 0; row < NGR_Count; row++) {
+                const int rowY = top + row * rowH + (row == NGR_Start ? 8 : 0);
+                if (y < rowY - 4 || y >= rowY + rowH - 4) continue;
+                if (row != sNgrRow) {
+                    sNgrRow = row;
+                    sNgrMessage[0] = '\0';
+                } else if (row != NGR_Start && row != NGR_Seed && x >= valueX && x < valueX + 24) {
+                    left = true;
+                } else {
+                    accept = true;
+                }
+                break;
+            }
+        } else {
+            cancel = true;
+        }
+    }
 
     SDL_GameController* ctl = pc_window_get_controller();
     if (ctl) {
@@ -4963,8 +4994,13 @@ void ngrDraw(DGXGraphics* gfx, int screenW, int screenH)
     const char* detail = sNgrMessage[0] ? sNgrMessage : ngrDetail(sNgrRow);
     const int detailY = top + NGR_Count * rowH + 16;
     f1Text(panelX + panelW / 2 - f1TextW(detail, 11) / 2, detailY, detail, sNgrMessage[0] ? gold : pale, 11, 16);
+#ifdef __ANDROID__
+    drawHelpLine(panelX + panelW / 2, panelY + panelH - 34, "Tap a row to pick it, tap it again to change it    Tap outside: back",
+                 dim, panelW - 40);
+#else
     drawHelpLine(panelX + panelW / 2, panelY + panelH - 34, "Up/Down: row    Left/Right: change    A: select    B: back",
                  dim, panelW - 40);
+#endif
 }
 
 void pcNewGamePromptInput()

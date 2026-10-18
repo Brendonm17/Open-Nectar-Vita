@@ -1,6 +1,7 @@
 #include "audio/p2_audio_host.h"
 
 #include "audio/pc_aram.h"
+#include "audio/pc_audio_drops.h"
 #include "audio/pc_dsp_host.h"
 #ifndef BEGIN_SCOPE_EXTERN_C
 #define BEGIN_SCOPE_EXTERN_C extern "C" {
@@ -16,6 +17,10 @@
 
 namespace {
 bool sOpened = false;
+void* sFrameChannels    = nullptr;
+s16* sFrameOutput       = nullptr;
+u32 sFrameSamples       = 0;
+u32 sFrameSubframes     = 0;
 }
 
 void pc_p2_audio_init()
@@ -52,6 +57,42 @@ void pc_p2_audio_render(void* channels, s16* planarOutput, u32 frameSamples)
 	pc_p2_audio_init();
 	pc_dsp_host_render_frame_planar(reinterpret_cast<DSPchannel_*>(channels), 64,
 	                                planarOutput, frameSamples);
+	pc_audio_drop_report();
+}
+
+void pc_p2_audio_set_fx_line(u32 index, bool enabled, u32 subframes, const u16 dest[2], const s16 volume[2],
+                             const s16 coeffs[8])
+{
+	pc_dsp_host_set_fx_line(index, enabled, subframes, dest, volume, coeffs);
+}
+
+void pc_p2_audio_begin_frame(void* channels, s16* planarOutput, u32 frameSamples, u32 subframes)
+{
+	sFrameChannels  = channels;
+	sFrameOutput    = planarOutput;
+	sFrameSamples   = frameSamples;
+	sFrameSubframes = subframes ? subframes : 1;
+}
+
+void pc_p2_audio_render_subframe(u32 index)
+{
+	if (!sFrameOutput || index >= sFrameSubframes) return;
+	pc_p2_audio_init();
+	const u32 length = sFrameSamples / sFrameSubframes;
+	const u32 offset = index * length;
+	if (length == 0 || offset + length > sFrameSamples) return;
+	// La salida es planar (derecha y luego izquierda, ver pc_dsp_host.h): se
+	// mezcla el trozo aparte y se copia a su sitio en cada plano.
+	static s16 part[2 * 1024];
+	if (length > 1024) return;
+	pc_dsp_host_render_frame_planar(reinterpret_cast<DSPchannel_*>(sFrameChannels), 64, part, length);
+	for (u32 i = 0; i < length; ++i) {
+		sFrameOutput[offset + i]                 = part[i];
+		sFrameOutput[sFrameSamples + offset + i] = part[length + i];
+	}
+	if (index + 1 == sFrameSubframes) {
+		pc_audio_drop_report();
+	}
 }
 
 void pc_p2_audio_queue(const s16* interleaved, size_t frames)

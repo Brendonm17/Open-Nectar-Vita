@@ -346,6 +346,7 @@ if(PIKMIN2_ENABLE_PORT_LAYER)
         ${PC_PORT_DIR}/dolphin_stubs/p2_cpp_link.cpp
         ${PC_PORT_DIR}/audio/pc_aram.cpp
         ${PC_PORT_DIR}/audio/pc_dsp_host.cpp
+        ${PC_PORT_DIR}/audio/pc_audio_drops.cpp
         ${PC_PORT_DIR}/audio/p2_audio_host.cpp
         $<$<BOOL:${PIKMIN_TOUCH}>:${PC_PORT_DIR}/touch/pc_touch.cpp>
         ${PC_PORT_DIR}/audio/jaudio_sink.cpp
@@ -418,7 +419,11 @@ if(PIKMIN2_ENABLE_PORT_LAYER)
             add_link_options(-static)
         elseif(NOT APPLE) # macOS: libc++ viene con el sistema; basta SDL2 estática
             # --exclude-libs: el libstdc++/SDL2 estáticos no se exportan (ver P1).
-            add_link_options(-static-libstdc++ -static-libgcc -Wl,--exclude-libs,ALL)
+            # libgcc va dinámica: OSCancelThread usa pthread_cancel, que
+            # desenrolla con el libgcc_s del sistema; con una copia estática
+            # el personality de C++ usaba la otra y abortaba (issue #123, al
+            # entrar en Story se cancela el hilo del e-Reader).
+            add_link_options(-static-libstdc++ -Wl,--exclude-libs,ALL)
         endif()
     endif()
     if(P2_SDL_LIBS)

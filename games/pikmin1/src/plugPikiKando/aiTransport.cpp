@@ -465,7 +465,10 @@ bool ActTransport::gotoLiftPos()
 	f32 totalDist          = slotDirection.normalise();
 	f32 distToCentre       = totalDist - pellet->getCentreSize();
 
-	if (horizontalDist < 100.0f && ++mStateProgress >= 60) {
+	// 60 frames a 30 Hz (2 s). Sin escalar, a 120 fps eran 0,5 s: con el
+	// atasco normal alrededor de la pieza se rendían y se quedaban parados
+	// (issue #97).
+	if (horizontalDist < 100.0f && ++mStateProgress >= 60 * PC_TICKS30) {
 		int previousSlot = mSlotIndex;
 		mSlotIndex       = pellet->getNearestFreeSlotIndex(mPiki->mSRT.t);
 		if (previousSlot == mSlotIndex) {

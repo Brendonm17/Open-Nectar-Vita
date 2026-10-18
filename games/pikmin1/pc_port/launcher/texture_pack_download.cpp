@@ -106,6 +106,32 @@ void runTexturePackDownload(HubWindow& hub, int game, const fs::path& gameDirect
         return;
     }
 
+    // El zip que el jugador ya tiene (Google Drive tiene un límite diario de
+    // descargas; issue #128). Mismo instalador que el de la descarga.
+    const auto installLocalZip = [&]() {
+        const fs::path local = platform::askForFile("Choose the texture pack zip", "Texture pack zip", "*.zip *.ZIP");
+        if (local.empty()) return;
+        std::string localError;
+        const bool done = runPainting(hub, "Installing HD textures", [&] {
+            return install(local, localError);
+        }, [](std::string&) { return std::uint32_t(101); });
+        if (!done) {
+            hub.ask("Install failed",
+                    "Could not install that zip" + (localError.empty() ? std::string(".") : " (" + localError + ")."),
+                    "OK", "", true);
+            return;
+        }
+        std::error_code markEc;
+        if (fs::is_directory(folder, markEc)) {
+            std::ofstream(installedMarker) << pack.label << '\n';
+            std::ofstream(textures / ".activate") << texturePackFolder(game) << '\n';
+        }
+        hub.ask("HD textures installed",
+                "The pack is active the next time you play " + gameName
+                    + ". You can turn it off in the game's settings (Graphics > Texture packs).",
+                "OK");
+    };
+
     const fs::path zip = gameDirectory / "Load" / "hd-textures-download.zip";
     const fs::path partial = zip.string() + ".part";
     fs::create_directories(zip.parent_path(), ec);
@@ -121,7 +147,11 @@ void runTexturePackDownload(HubWindow& hub, int game, const fs::path& gameDirect
     });
     if (!ok) {
         fs::remove(zip, ec);
-        hub.ask("Download failed", "Could not download the pack (" + error + "). Try again later.", "OK", "", true);
+        if (hub.ask("Download failed",
+                    "Could not download the pack (" + error + "). Try again later, or install a zip you already have.",
+                    "OK", "Use a .zip I have", true) == 1) {
+            installLocalZip();
+        }
         return;
     }
     // Si Google Drive llega a su límite de descargas responde con una página
@@ -133,10 +163,12 @@ void runTexturePackDownload(HubWindow& hub, int game, const fs::path& gameDirect
     }
     if (magic[0] != 'P' || magic[1] != 'K') {
         fs::remove(zip, ec);
-        hub.ask("Download failed",
-                "Google Drive did not hand out the pack (it may have reached its download limit for today). "
-                "Try again later.",
-                "OK", "", true);
+        if (hub.ask("Download failed",
+                    "Google Drive did not hand out the pack (it may have reached its download limit for today). "
+                    "Try again later, or install a zip you already have.",
+                    "OK", "Use a .zip I have", true) == 1) {
+            installLocalZip();
+        }
         return;
     }
 

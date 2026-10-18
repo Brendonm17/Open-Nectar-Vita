@@ -1388,8 +1388,21 @@ void Navi::pcUpdateLockOn()
 		fflush(stderr);
 	}
 
+	// Al soltar el objetivo, por la causa que sea, el cursor vuelve a donde
+	// apuntaba el jugador; si no, se quedaba a la distancia del enemigo
+	// (issue #122: solo se hacía al perderlo solo en modo automático).
+	auto releaseLock = [this]() {
+		if (!mPcLockTarget) {
+			return;
+		}
+		mPcLockTarget         = nullptr;
+		mCursorPosition       = mPcAimOffset;
+		mCursorTargetPosition = mPcAimOffset;
+		mCursorNaviDist       = mPcAimOffset.length();
+	};
+
 	if (!mode) {
-		mPcLockTarget = nullptr;
+		releaseLock();
 		mPcLockIgnore = nullptr;
 		pc_settings_note_lock_on(0);
 		return;
@@ -1412,13 +1425,7 @@ void Navi::pcUpdateLockOn()
 			stillValid     = away.length() < keep;
 		}
 		if (!stillValid) {
-			mPcLockTarget = nullptr;
-			if (mode == 2) {
-				// El cursor vuelve a donde apuntaba el jugador.
-				mCursorPosition       = mPcAimOffset;
-				mCursorTargetPosition = mPcAimOffset;
-				mCursorNaviDist       = mPcAimOffset.length();
-			}
+			releaseLock();
 		}
 	}
 
@@ -1466,7 +1473,7 @@ void Navi::pcUpdateLockOn()
 			if (mode == 2) {
 				mPcLockIgnore = mPcLockTarget;
 			}
-			mPcLockTarget = nullptr;
+			releaseLock();
 		} else {
 			acquired = pickNearest();
 		}

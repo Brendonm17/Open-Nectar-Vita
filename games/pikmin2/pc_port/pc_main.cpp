@@ -173,7 +173,12 @@ static void pc_install_crash_handler()
 {
 	// Sin consola (abierto desde el launcher) la salida del juego se perdería:
 	// va a pikmin2.log, junto a los datos.
-	if (GetConsoleWindow() == nullptr || std::getenv("PIKMIN2_LOG_TO_FILE")) {
+	// Si stdout ya es una tubería o un archivo (el launcher lee así la
+	// respuesta de --settings-dump), se respeta: redirigirlo dejaba al
+	// launcher sin ajustes (issue #127).
+	const DWORD outType = GetFileType(GetStdHandle(STD_OUTPUT_HANDLE));
+	const bool outCaptured = outType == FILE_TYPE_PIPE || outType == FILE_TYPE_DISK;
+	if ((GetConsoleWindow() == nullptr && !outCaptured) || std::getenv("PIKMIN2_LOG_TO_FILE")) {
 		if (freopen("pikmin2.log", "w", stdout)) {
 			_dup2(_fileno(stdout), _fileno(stderr));
 			setvbuf(stderr, NULL, _IONBF, 0);

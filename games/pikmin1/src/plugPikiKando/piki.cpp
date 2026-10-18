@@ -1802,7 +1802,7 @@ bool Piki::mayIstick()
 static const f32 kPcShoreMargin     = 40.0f; ///< distancia a la orilla al sacarlo del agua
 static const int kPcShoreHoldFrames = 20;   ///< frames en seco antes de soltar el ancla
 
-bool Piki::pcStepOutOfWater()
+bool Piki::pcStepOutOfWater(int state)
 {
 	if (!pc_settings_get_blues_only_water()) {
 		return false;
@@ -1816,7 +1816,8 @@ bool Piki::pcStepOutOfWater()
 	// demás -- andar, venir al silbato (LookAt), seguir en formación -- es el
 	// Pikmin moviéndose por su cuenta, y ahí es donde el mod actúa. Antes solo
 	// cubría PIKISTATE_Normal, así que al silbarlos se ahogaban igual.
-	switch (getState()) {
+	// `state` permite pasar el de antes de un rebote (ver bounceCallback).
+	switch (state >= 0 ? state : getState()) {
 	case PIKISTATE_Flying:
 	case PIKISTATE_Flown:
 	case PIKISTATE_Flick:
@@ -1897,6 +1898,12 @@ void Piki::stickToCallback(Creature*)
  */
 void Piki::bounceCallback()
 {
+#if defined(PIKI_PC_PORT)
+	// MsgBounce saca al lanzado del estado Flying antes de mirar el agua: sin
+	// este estado previo el rescate lo trataba como si hubiera entrado andando
+	// y lo teletransportaba lejos, perdido del grupo (issue #125).
+	const int stateBeforeBounce = getState();
+#endif
 	MsgBounce msg(Vector3f(0.0f, 1.0f, 0.0f));
 	sendMsg(&msg);
 
@@ -1923,7 +1930,7 @@ void Piki::bounceCallback()
 	}
 
 #if defined(PIKI_PC_PORT)
-	if (isDrownSurface && pcStepOutOfWater()) {
+	if (isDrownSurface && pcStepOutOfWater(stateBeforeBounce)) {
 		return;
 	}
 #endif

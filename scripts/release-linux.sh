@@ -44,7 +44,7 @@ p2usa="${build_dir}/p2-usa/pikmin2_pc"
 mapmaker="${build_dir}/p1-usa/bin/nectar-mapmaker"
 
 # Solo glibc, libGL y libX11: cualquier otra dependencia es un error de empaquetado.
-allowed='^(libc|libm|libdl|libpthread|librt|ld-linux-x86-64)\.so|^libGL\.so\.1$|^libX11\.so\.6$'
+allowed='^(libc|libm|libdl|libpthread|librt|libgcc_s|ld-linux-x86-64)\.so|^libGL\.so\.1$|^libX11\.so\.6$'
 for exe in "${launcher}" "${usa}" "${pal}" "${p2}" "${p2usa}" "${mapmaker}"; do
     [[ -f "${exe}" ]] || { printf 'No se generó %s\n' "${exe}" >&2; exit 1; }
     while read -r lib; do

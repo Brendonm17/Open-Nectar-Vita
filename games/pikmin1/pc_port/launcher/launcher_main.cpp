@@ -944,6 +944,11 @@ bool installSharedParts(const fs::path& package, const fs::path& install, std::s
         if (fs::is_regular_file(game) && !replaceExecutable(game, gameDirectory / kPikmin2Executable, failure)) return false;
         if (fs::is_regular_file(usa) && !replaceExecutable(usa, gameDirectory / kPikmin2UsaExecutable, failure)) return false;
     }
+    // La build europea de Pikmin 1 también se queda en la instalación: si se
+    // instaló antes Pikmin 2, Pikmin 1 se instala luego desde el launcher de
+    // la instalación, y sin ella un disco PAL no se podía instalar (issue #126).
+    const fs::path palBuild = package / gameFileName("nectar-pal", "");
+    if (fs::is_regular_file(palBuild) && !replaceExecutable(palBuild, install / palBuild.filename(), failure)) return false;
     const fs::path mapEditor = package / kMapEditorExecutable;
     if (fs::is_regular_file(mapEditor) && !replaceExecutable(mapEditor, install / kMapEditorExecutable, failure)) return false;
     const fs::path icon = package / "open_nectar.png";

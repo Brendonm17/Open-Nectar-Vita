@@ -121,7 +121,7 @@ public:
 	virtual void offwallCallback(DynCollObject*);              // _B8
 	virtual void stickToCallback(Creature*);                   // _C4
 #if defined(PIKI_PC_PORT)
-	bool pcStepOutOfWater();
+	bool pcStepOutOfWater(int state = -1);
 	void pcChargeAt(Creature* target);
 	Vector3f mPcLastDryPos;
 	bool mPcHasDryPos = false;
