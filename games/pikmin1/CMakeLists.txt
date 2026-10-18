@@ -455,6 +455,9 @@ set(SYSDOLPHIN_SOURCES
     src/sysDolphin/sysNew.cpp
     src/sysDolphin/system.cpp
     src/sysDolphin/texture.cpp
+    # Octagon, dead zone and trigger range. The rest of src/pad stays out;
+    # pad_stubs.cpp still owns the hardware calls.
+    src/pad/Padclamp.c
 )
 
 # JAudio uses NextOS's host boundary, never the GameCube DSP boot/mailboxes.
@@ -543,7 +546,7 @@ file(GLOB PLUGPIKI_YAMASHITA_SOURCES "src/plugPikiYamashita/*.cpp")
 #   src/os/          — Dolphin OS implementation (replaced by os_stubs)
 #   src/gx/          — GX hardware driver (replaced by gx_stubs)
 #   src/dvd/         — DVD hardware driver (replaced by dvd_stubs)
-#   src/pad/         — PAD hardware driver (replaced by pad_stubs)
+#   src/pad/         — PAD hardware driver (replaced by pad_stubs), except Padclamp.c
 #   src/vi/          — VI hardware driver (replaced by vi_stubs)
 #   src/card/        — Memory card driver (replaced by card_stubs)
 #   src/dsp/         — DSP driver (replaced by audio_stubs)
@@ -605,6 +608,7 @@ add_library(${NECTAR_LEGACY} STATIC
     # legacy flags, not the strict ones the port's own sources build with.
     ${JAUDIO_TARGET_SOURCES}
 )
+set_source_files_properties(src/pad/Padclamp.c PROPERTIES LANGUAGE CXX)
 target_compile_options(${NECTAR_LEGACY} PRIVATE ${LEGACY_COMPILE_OPTIONS})
 
 # Native executable with strict flags. En Android es una biblioteca
@@ -1241,6 +1245,11 @@ if(PIKMIN_BUILD_TESTS)
     target_include_directories(pc_menu_pad_test PRIVATE ${SDL2_INCLUDE_DIRS} pc_port)
     target_compile_options(pc_menu_pad_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
     add_test(NAME pc_menu_pad_test COMMAND pc_menu_pad_test)
+
+    # GameCube PADClamp (no window). Links the decomp translation unit.
+    add_executable(pc_pad_clamp_test pc_port/pc_pad_clamp_test.cpp src/pad/Padclamp.c)
+    target_compile_options(pc_pad_clamp_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+    add_test(NAME pc_pad_clamp_test COMMAND pc_pad_clamp_test)
 
     # Permadeath save block (no game needed)
     add_executable(pc_permadeath_test pc_port/pc_permadeath_test.cpp pc_port/pc_permadeath.cpp src/sysCommon/stream.cpp src/sysCommon/string.cpp)
