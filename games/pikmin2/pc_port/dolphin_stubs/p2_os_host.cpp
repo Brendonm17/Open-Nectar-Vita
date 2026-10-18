@@ -1004,6 +1004,8 @@ u32 SIProbe(s32) { return 0; }
 
 extern "C" u32 gPcSectionTicks;
 extern "C" int pc_p2_retrace_hz(void); // sysGCU/system.cpp: 120 con FPS Mode 120, si no 60
+extern "C" bool pc_window_monitor_vsync_locked(void);
+extern "C" void pc_window_monitor_vsync_fallback(void);
 u32 gPcSectionTicks = 0;
 void VIInit() { printf("[PC Port] VIInit()\n"); }
 void VIFlush() {}
@@ -1114,6 +1116,26 @@ void VIWaitForRetrace()
 		if (sRetraceCount % swapEvery == 0) {
 			SDL_GL_SwapWindow(window);
 		}
+		// Some drivers accept interval 1 but do not actually block. In that
+		// case the game would race far above the monitor and its adaptive delta
+		// would clamp, so detect it over a stable half-second window and return
+		// to software pacing. This mirrors Pikmin 1's monitor-mode watchdog.
+		if (pc_window_monitor_vsync_locked()) {
+			static auto sLockStart = std::chrono::steady_clock::now();
+			static u32 sLockFrames = 0;
+			sLockFrames++;
+			const auto lockNow = std::chrono::steady_clock::now();
+			const double seconds = std::chrono::duration<double>(lockNow - sLockStart).count();
+			if (seconds >= 0.5) {
+				if ((double)sLockFrames > 1.25 * (double)pc_p2_retrace_hz() * seconds) {
+					printf("[PC Port] VSync is not pacing swap (%u frames in %.2fs); using software monitor pacing\n",
+					       (unsigned)sLockFrames, seconds);
+					pc_window_monitor_vsync_fallback();
+				}
+				sLockStart  = lockNow;
+				sLockFrames = 0;
+			}
+		}
 		// PIKMIN_SHOW_FPS=1: en el titulo de la ventana, actualizaciones de la
 		// seccion por segundo (frames nuevos del juego) y presentaciones.
 		static const bool sShowFps = getenv("PIKMIN_SHOW_FPS") != nullptr;
@@ -1138,7 +1160,7 @@ void VIWaitForRetrace()
 	// not guaranteed to hold the loop here (PRIME offload, Wayland), so pace
 	// the retrace ourselves; PIKMIN_FPS overrides the 60 Hz field rate, and
 	// FPS Mode 120 doubles it (System::setFrameRate compensates the menus).
-	{
+	if (!pc_window_monitor_vsync_locked()) {
 		static double sPeriodUs = 0.0;
 		static std::chrono::steady_clock::time_point sNext;
 		static bool sInit = false;

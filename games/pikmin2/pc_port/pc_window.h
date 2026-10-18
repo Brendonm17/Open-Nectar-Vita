@@ -12,6 +12,12 @@ bool pc_window_init(const char* title, int width, int height);
 void pc_window_poll_events(PADStatus* pad);
 void pc_window_swap_buffers(void);
 void pc_window_set_swap_interval(int interval);
+// Pikmin 2's host loop presents directly instead of going through
+// pc_window_swap_buffers. Monitor mode therefore controls the real GL swap
+// interval explicitly and exposes whether that swap is currently the clock.
+void pc_window_set_monitor_vsync_mode(bool enabled);
+bool pc_window_monitor_vsync_locked(void);
+void pc_window_monitor_vsync_fallback(void);
 void pc_window_shutdown(void);
 bool pc_window_should_close(void);
 int  pc_window_get_width(void);

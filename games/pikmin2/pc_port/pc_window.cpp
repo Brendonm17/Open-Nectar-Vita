@@ -181,6 +181,9 @@ static std::chrono::steady_clock::time_point sNextPresentDeadline;
 // Settings-menu video state (PC only).
 static int sDisplayMode = PC_WINDOW_FULLSCREEN_WINDOWED;
 static bool sVsyncEnabled = true;   // presentation pacing on/off
+static bool sMonitorVsyncMode = false;
+static bool sMonitorVsyncFallback = false;
+static int sDriverSwapInterval = 0;
 static char sLastVideoError[256] = { 0 };
 
 // Keyboard remapping state (PC only).
@@ -1534,6 +1537,42 @@ void pc_window_set_swap_interval(int interval) {
     sNextPresentDeadline = std::chrono::steady_clock::time_point {};
 }
 
+static void pc_window_apply_monitor_vsync(void) {
+    const int wanted = sMonitorVsyncMode && sVsyncEnabled && !sMonitorVsyncFallback ? 1 : 0;
+    if (wanted == sDriverSwapInterval) return;
+    if (SDL_GL_SetSwapInterval(wanted) == 0) {
+        sDriverSwapInterval = wanted;
+        return;
+    }
+    sDriverSwapInterval = 0;
+    if (wanted != 0) {
+        sMonitorVsyncFallback = true;
+        SDL_GL_SetSwapInterval(0);
+        printf("[PC Port] Driver VSync unavailable: %s; using software monitor pacing\n", SDL_GetError());
+    }
+}
+
+void pc_window_set_monitor_vsync_mode(bool enabled) {
+    if (enabled != sMonitorVsyncMode) {
+        sMonitorVsyncMode = enabled;
+        // A genuine mode change is allowed to retry a driver which may now be
+        // attached to another display. Repeated setFrameRate calls do not keep
+        // defeating the watchdog fallback.
+        sMonitorVsyncFallback = false;
+    }
+    pc_window_apply_monitor_vsync();
+}
+
+bool pc_window_monitor_vsync_locked(void) {
+    return sMonitorVsyncMode && sVsyncEnabled && !sMonitorVsyncFallback && sDriverSwapInterval == 1;
+}
+
+void pc_window_monitor_vsync_fallback(void) {
+    if (!sMonitorVsyncMode || sMonitorVsyncFallback) return;
+    sMonitorVsyncFallback = true;
+    pc_window_apply_monitor_vsync();
+}
+
 void pc_window_shutdown(void) {
 #if !PIKI_P2_HOST
 #if PIKI_USE_JAUDIO
@@ -1646,6 +1685,7 @@ double pc_window_get_refresh_rate(void) {
 
 void pc_window_set_vsync_enabled(bool enabled) {
     sVsyncEnabled = enabled;
+    pc_window_apply_monitor_vsync();
     sNextPresentDeadline = std::chrono::steady_clock::time_point {};
 }
 

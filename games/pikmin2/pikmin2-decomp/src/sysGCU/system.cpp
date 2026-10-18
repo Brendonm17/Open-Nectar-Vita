@@ -30,6 +30,7 @@
 #include "LoadResource.h"
 #include "Dolphin/__start.h"
 #ifdef PIKI_PC_PORT
+#include "timing/pc_anim_timing.h"
 #include <cstdio>
 #include <execinfo.h>
 #endif
@@ -1326,6 +1327,7 @@ static void pcAdaptDeltaTime()
 extern "C" void pc_orig_tick_begin(void)
 {
 	pcAdaptDeltaTime();
+	pc_p2_anim_clock_tick(sys ? sys->mDeltaTime : 0.0f);
 	// PIKMIN_ORIG_TICK_ALWAYS=1: diagnostico, todo avanza en cada tick.
 	static const bool sAlways = getenv("PIKMIN_ORIG_TICK_ALWAYS") != nullptr;
 	if (sAlways) {
@@ -1365,6 +1367,7 @@ extern "C" float pc_orig_tick_fraction(void)
 }
 
 extern "C" double pc_window_get_refresh_rate(void);
+extern "C" void pc_window_set_monitor_vsync_mode(bool enabled);
 // FPS Mode 3 ("Monitor"): la frecuencia de la pantalla (30..360 Hz).
 static int pcMonitorHz()
 {
@@ -1399,6 +1402,7 @@ void System::setFrameRate(int newFactor)
 	sPcRequestedFrameRate = newFactor;
 	sPcOrigTickAcc        = 0.0f;
 	const int fpsMode     = pc_settings_get_fps_mode();
+	pc_window_set_monitor_vsync_mode(fpsMode == 3);
 	// Retraces por frame de 60 Hz: los menus conservan su velocidad. En modo
 	// Monitor es la proporcion entera mas cercana (exacta a 60/120/180/240 Hz).
 	int retraceMul = (fpsMode == 2) ? 2 : 1;
