@@ -1435,6 +1435,14 @@ void System::setFrameRate(int newFactor)
 	mFrameRate = (f32)newFactor;
 	mDeltaTime = mFrameRate / 60.0f;
 #endif
+#ifdef PIKI_PC_PORT
+	// Port: no hay retraces de VI que despierten waitForTick(), así que con
+	// mTickRate = 0 (USA, JP y PAL 60 Hz) el arranque se quedaba esperando
+	// para siempre. Todas las regiones duermen mTickRate por frame, como PAL
+	// estándar; el periodo sale del deltaTime real (1/60, 1/120...).
+	display->setTickRate((u32)(OS_TIMER_CLOCK * deltaTime * (60.0f / 59.94f)) - 100);
+	return;
+#endif
 #if defined(VERSION_PAL)
 	switch (mRenderMode) {
 	case RM_PAL_Standard:
