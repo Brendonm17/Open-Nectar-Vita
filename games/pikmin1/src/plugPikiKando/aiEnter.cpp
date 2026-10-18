@@ -20,7 +20,7 @@ DEFINE_PRINT("Enter")
 #if defined(PIKI_PC_PORT)
 // Netplay failure-path diagnostic, strong-defined by pc_netplay_diag.cpp in
 // netplay builds only. Null otherwise, and the halt below is unchanged.
-__attribute__((weak)) void pc_netplay_diag_bad_action_target(const char* site, Piki* piki, Creature* target);
+void pc_netplay_diag_bad_action_target(const char* site, Piki* piki, Creature* target);
 #endif
 
 /**

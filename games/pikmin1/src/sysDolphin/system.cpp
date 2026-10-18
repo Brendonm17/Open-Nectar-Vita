@@ -310,7 +310,7 @@ void System::waitRetrace()
 // netplay builds only. Null in the default build, so the loop below runs the
 // normal path there.
 class BaseApp;
-__attribute__((weak)) bool pc_netplay_session_drive(System* sys, BaseApp* app);
+bool pc_netplay_session_drive(System* sys, BaseApp* app);
 
 // Read once; see the call site below for why this is not the 60 FPS switch.
 static bool pc_replay_test_enabled()

@@ -61,7 +61,7 @@ void testCodec()
 void testLead()
 {
     check(inputLeadTicks(0, 0) == 1, "LAN: one tick of lead");
-    check(inputLeadTicks(150, 30) == 6, "RTT 150, jitter 30: 135 ms -> 5 ticks + 1");
+    check(inputLeadTicks(150, 30) == 5, "RTT 150, jitter 30: 135 ms -> 5 ticks");
     check(inputLeadTicks(2000, 500) == 8, "lead is capped at 8 ticks");
 }
 

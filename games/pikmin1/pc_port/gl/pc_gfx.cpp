@@ -39,7 +39,7 @@
 
 // Netplay keep-alive (pc_netplay_loadguard.h): strong-defined by
 // pc_netplay_session.cpp in netplay builds only, null otherwise.
-__attribute__((weak)) void pc_netplay_load_keepalive(int site);
+void pc_netplay_load_keepalive(int site);
 
 #include "pc_opengl.h"
 #ifdef __ANDROID__

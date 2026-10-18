@@ -22,6 +22,7 @@ enum class MessageType : std::uint8_t {
     CompatibilityOffer   = 9,
     InputBundle          = 16,
     AppliedInputs        = 17,
+    AppliedRepairRequest = 18, // guest -> host: resend applied ticks [from, from + count)
     WorldDelta           = 32,
     WorldSnapshot        = 33,
     StateHash            = 34,

@@ -221,32 +221,68 @@ int main()
 		CHECK(ice_sdp_has_relay("a=candidate:3 1 UDP 1 10.0.0.5 9 typ relay\r\n"), "relay SDP detected");
 	}
 
-	// 3. In-process loopback pair.
+	// 3. In-process loopback pair. Blocks 4 and 5 need a live pair, so the
+	// first failure here stops the run with the original error instead of
+	// cascading into dozens of derived failures and timeouts.
 	IceNetConfig cfg;
 	cfg.bindAddress = "127.0.0.1";
 	IceSocket hostSock, joinSock;
-	{
+	bool linked = false;
+	do {
 		SessionBundle bundle;
 		bundle.seed       = 7;
 		bundle.configText = "fpsMode=0;";
+		// The joiner unpacks the packed settings against its own key list
+		// (the game sets it in pc_netplay_launch); without it the answer fails.
+		ice_set_local_config_text(bundle.configText);
 		std::string offer, answer, err;
-		CHECK(hostSock.host_create_offer(cfg, bundle, &offer, &err), "host offer gathers");
+		const bool offered = hostSock.host_create_offer(cfg, bundle, &offer, &err);
+		CHECK(offered, "host offer gathers");
 		if (!err.empty()) std::printf("ice_test: %s\n", err.c_str());
+		if (!offered) break;
 		std::printf("ice_test: offer chars=%llu\n", (unsigned long long)offer.size());
 		SessionBundle got;
-		CHECK(joinSock.join_create_answer(cfg, offer, &answer, &err, std::function<void()>(), &got),
-		      "join answer gathers");
+		err.clear();
+		const bool answered = joinSock.join_create_answer(cfg, offer, &answer, &err, std::function<void()>(), &got);
+		CHECK(answered, "join answer gathers");
+		if (!answered) {
+			std::printf("ice_test: join_create_answer: %s\n", err.c_str());
+			break;
+		}
 		CHECK(got.seed == 7 && got.configText == "fpsMode=0;", "the joiner gets the bundle");
 		std::printf("ice_test: answer chars=%llu\n", (unsigned long long)answer.size());
 		CHECK(!hostSock.host_apply_answer(offer, &err), "an offer is not an answer");
-		CHECK(hostSock.host_apply_answer(answer, &err), "host applies answer");
+		err.clear();
+		const bool applied = hostSock.host_apply_answer(answer, &err);
+		CHECK(applied, "host applies answer");
+		if (!applied) {
+			std::printf("ice_test: host_apply_answer: %s\n", err.c_str());
+			break;
+		}
 		double hostMs = -1, joinMs = -1;
-		CHECK(hostSock.wait_connected(30000, &hostMs, &err), "host completed");
-		CHECK(joinSock.wait_connected(30000, &joinMs, &err), "join completed");
+		const bool hostUp = hostSock.wait_connected(30000, &hostMs, &err);
+		CHECK(hostUp, "host completed");
+		if (!hostUp) {
+			std::printf("ice_test: host wait_connected: %s\n", err.c_str());
+			break;
+		}
+		const bool joinUp = joinSock.wait_connected(30000, &joinMs, &err);
+		CHECK(joinUp, "join completed");
+		if (!joinUp) {
+			std::printf("ice_test: join wait_connected: %s\n", err.c_str());
+			break;
+		}
 		std::printf("ice_test: completed host=%.0fms join=%.0fms pair=[%s]\n", hostMs, joinMs,
 		            hostSock.selected_local().c_str());
 		CHECK(hostMs >= 0 && joinMs >= 0, "completed times reported");
 		CHECK(hostSock.selected_local().find("127.0.0.1") != std::string::npos, "the selected pair is loopback");
+		linked = true;
+	} while (false);
+	if (!linked) {
+		hostSock.close();
+		joinSock.close();
+		std::printf("pc_netplay_ice_test: %d FAILURES (loopback pair never linked; skipped blocks 4-5)\n", sFailures);
+		return 1;
 	}
 
 	// 4. 64 KiB through the gekko channel + handshake ping-pong.

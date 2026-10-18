@@ -502,7 +502,8 @@ void pc_state_dump_capture(uint64_t tick, const uint64_t subs[7])
 	}
 }
 
-bool pc_state_dump_test_nudge(int kind, int ord)
+namespace {
+Creature* find_creature(int kind, int ord)
 {
 	Creature* target = nullptr;
 	int at           = 0;
@@ -525,8 +526,41 @@ bool pc_state_dump_test_nudge(int kind, int ord)
 			if (*it != nullptr && at++ == ord) target = *it;
 		}
 	}
+	return target;
+}
+} // namespace
+
+bool pc_state_dump_test_nudge(int kind, int ord)
+{
+	Creature* target = find_creature(kind, ord);
 	if (target == nullptr) return false;
 	target->mSRT.t.x += 1.0f;
+	return true;
+}
+
+bool pc_state_dump_apply_motion(const std::vector<fx::ObjRec>& recs)
+{
+	std::vector<Creature*> targets;
+	for (const fx::ObjRec& r : recs) {
+		Creature* c = find_creature(r.kind, r.ord);
+		if (c == nullptr) return false;
+		targets.push_back(c);
+	}
+	for (size_t i = 0; i < recs.size(); ++i) {
+		const fx::ObjRec& r = recs[i];
+		Creature* c         = targets[i];
+		auto put = [&](Vector3f& v, int at) {
+			v.x = r.f[at];
+			v.y = r.f[at + 1];
+			v.z = r.f[at + 2];
+		};
+		put(c->mSRT.t, 0);
+		put(c->mSRT.r, 3);
+		put(c->mVelocity, 6);
+		put(c->mTargetVelocity, 9);
+		c->mFaceDirection = r.f[12];
+		c->mHealth        = r.health;
+	}
 	return true;
 }
 

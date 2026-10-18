@@ -25,7 +25,7 @@
 #include "netplay/pc_netplay_present.h"
 
 // Defined by the session TU in netplay builds only, so it is weak here.
-__attribute__((weak)) bool pc_netplay_session_active(void);
+bool pc_netplay_session_active(void);
 
 inline int& pc_audio_source_captain_slot()
 {

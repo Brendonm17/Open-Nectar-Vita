@@ -39,7 +39,7 @@ EntityRecord captainRecord(std::uint16_t sceneEpoch, const CaptainState& state);
 
 // How many ticks the guest must run ahead of the host so its input arrives
 // before the host simulates that tick: one-way delay plus two jitters,
-// rounded up, plus one tick of margin, within [1, 8].
+// rounded up, within [1, 8].
 std::uint32_t inputLeadTicks(std::uint32_t rttMs, std::uint32_t jitterMs);
 
 // Guest-side correction of the locally predicted captain. History entries

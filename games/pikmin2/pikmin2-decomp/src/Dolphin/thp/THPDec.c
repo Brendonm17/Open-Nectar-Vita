@@ -2030,7 +2030,7 @@ static void __THPHuffDecodeDCTCompY(register THPFileInfo* info, THPCoeff* block)
 #ifdef __MWERKS__ // clang-format off
 			asm { _RECV_END: }
 #else // clang-format on
-		_RECV_END: // Exists just to shut up VSCode
+		_RECV_END:; // Exists just to shut up VSCode (el ; para gcc 10: etiqueta al final de bloque)
 #endif
 		}
 		info->cnt      = cnt;

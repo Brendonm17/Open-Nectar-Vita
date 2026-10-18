@@ -37,6 +37,8 @@ add_subdirectory("${NECTAR_ROOT}" nectar-pal)
 # desarrollo y queda apagado, como en escritorio.
 set(PIKMIN2_ROOT "${NECTAR_ROOT}/../pikmin2")
 set(PIKMIN_NATIVE_JAUDIO OFF CACHE BOOL "" FORCE)
+# El online es solo de Pikmin 1: Pikmin 2 aún no lo tiene y se niega a compilarlo.
+set(NECTAR_ONLINE OFF CACHE BOOL "" FORCE)
 set(PIKMIN_GAME_VERSION "VERSION_GPVE01" CACHE STRING "" FORCE)
 set(PIKMIN_TARGET_SUFFIX "" CACHE STRING "" FORCE)
 add_subdirectory("${PIKMIN2_ROOT}" nectar2-usa)

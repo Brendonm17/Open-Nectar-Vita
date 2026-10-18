@@ -322,6 +322,7 @@ set(PC_PORT_SOURCES
     # Two-pass sim/presentation frame and the session lead camera.
     pc_port/netplay/pc_netplay_present.cpp
     pc_port/netplay/pc_netplay_camlead.cpp
+    pc_port/netplay/pc_netplay_navilead.cpp
     # Co-op switch and direct boot (--coop-direct, netplay).
     pc_port/netplay/pc_coop_switch.cpp
     pc_port/audio/pc_audio.cpp
@@ -714,8 +715,9 @@ if(PIKMIN_NETPLAY_BUILD)
     target_sources(${NECTAR_GAME} PRIVATE
         pc_port/netplay/pc_netplay_session.cpp
         pc_port/netplay/pc_netplay_udp.cpp
-        # Title Local/Online choice: the host-authoritative room with
-        # NECTAR_ONLINE, otherwise the lockstep ICE (NPIX) room.
+        # Title Local/Online choice: rooms are host-authoritative (NECTAR1)
+        # with NECTAR_ONLINE, the lockstep ICE (NPIX) room otherwise or with
+        # PIKMIN_ONLINE_LEGACY_ICE=1; joining follows the pasted code.
         pc_port/netplay/pc_online_menu.cpp
         pc_port/netplay/pc_online_relaunch.cpp)
     target_link_libraries(${NECTAR_GAME} PRIVATE gekkonet)
@@ -911,7 +913,7 @@ if(ANDROID AND NOT TARGET nectar_launcher)
         "${LAUNCHER_EMBED_DIR}"
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb
         ${SDL2_INCLUDE_DIRS})
-    set(OPEN_NECTAR_VERSION "0.9.2" CACHE STRING "Open Nectar version of this build (GitHub release tag)")
+    set(OPEN_NECTAR_VERSION "0.9.3" CACHE STRING "Open Nectar version of this build (GitHub release tag)")
     target_compile_definitions(nectar_launcher PRIVATE OPEN_NECTAR_VERSION="${OPEN_NECTAR_VERSION}")
     target_compile_options(nectar_launcher PRIVATE ${NATIVE_COMPILE_OPTIONS})
     target_link_libraries(nectar_launcher PRIVATE launcher_imgui_android pikmin_disc_image ${SDL2_LIBRARIES} GLESv3 EGL log android)
@@ -981,7 +983,7 @@ if(PIKMIN_BUILD_LAUNCHER)
     target_link_libraries(pikmin_launcher PRIVATE launcher_imgui)
     # Versión que el launcher compara con el último release de GitHub para
     # avisar y actualizarse. Súbela en cada release (la etiqueta de GitHub).
-    set(OPEN_NECTAR_VERSION "0.9.2" CACHE STRING "Open Nectar version of this build (GitHub release tag)")
+    set(OPEN_NECTAR_VERSION "0.9.3" CACHE STRING "Open Nectar version of this build (GitHub release tag)")
     target_compile_definitions(pikmin_launcher PRIVATE OPEN_NECTAR_VERSION="${OPEN_NECTAR_VERSION}")
     if (WIN32)
         target_sources(pikmin_launcher PRIVATE packaging/windows/nectar.rc)

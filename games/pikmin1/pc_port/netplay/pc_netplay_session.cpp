@@ -52,6 +52,7 @@
 #include "netplay/pc_netplay_adaptive.h"
 #include "netplay/pc_netplay_build_id.h"
 #include "netplay/pc_netplay_camlead.h"
+#include "netplay/pc_netplay_navilead.h"
 #include "netplay/pc_netplay_det.h"
 #include "netplay/pc_netplay_exit_codes.h"
 #include "netplay/pc_netplay_forensics.h"
@@ -1936,13 +1937,18 @@ bool handshake_pump()
 	return sSentAck && sGotAck;
 }
 
+void fx_send_due(double now);
+bool fx_on_datagram(uint8_t type, const uint8_t* p, size_t len);
+void repair_poll();
+
 // Late or duplicate handshake traffic once the session is up: a peer whose
 // last Ack was lost keeps sending Hello, so every Hello gets an Ack (never
 // an Ack for an Ack, or they would bounce for the whole session). Also the
-// peer's stall advice.
+// peer's stall advice and the desync repair messages (fx fragments).
 void answer_handshake_in_session()
 {
 	if (sIceLink == nullptr && (sLink == nullptr || sSock == nullptr)) return;
+	fx_send_due(now_ms());
 	for (auto& g : hs_drain()) {
 		uint8_t hdrType   = 0;
 		uint16_t hdrProto = 0;
@@ -1953,6 +1959,7 @@ void answer_handshake_in_session()
 			adaptive_on_advice(g.payload.data() + kHsHeaderLen, g.payload.size() - kHsHeaderLen);
 			continue;
 		}
+		if (fx_on_datagram(hdrType, g.payload.data(), g.payload.size())) continue;
 		uint8_t type   = 0;
 		uint16_t proto = 0;
 		Hello h;
@@ -1963,6 +1970,7 @@ void answer_handshake_in_session()
 		printf("[netplay] answered in-session Hello with Ack (echo=%llu)\n", (unsigned long long)h.nonce);
 		fflush(stdout);
 	}
+	repair_poll();
 }
 
 // ---- end banner ----
@@ -2310,9 +2318,18 @@ struct FxIn {
 	bool complete = false;
 };
 std::vector<FxOut> sFxOut;
-FxIn sFxIn[2]; // ring, objs
+FxIn sFxIn[4]; // ring, objs, repair plan, repair data
 
-int fx_slot(uint8_t kind) { return kind == fx::kBulkDesyncRing ? 0 : kind == fx::kBulkDesyncObjs ? 1 : -1; }
+int fx_slot(uint8_t kind)
+{
+	switch (kind) {
+	case fx::kBulkDesyncRing: return 0;
+	case fx::kBulkDesyncObjs: return 1;
+	case fx::kBulkRepairPlan: return 2;
+	case fx::kBulkRepairData: return 3;
+	default: return -1;
+	}
+}
 
 void fx_header(uint8_t* p, uint8_t type)
 {
@@ -2344,54 +2361,82 @@ void fx_queue(uint8_t kind, std::vector<uint8_t> data)
 	sFxOut.push_back(std::move(o));
 }
 
-void fx_pump(double now)
+// A message of a kind replaces any earlier one of that kind (the repair
+// sends a new plan per attempt).
+void fx_queue_replace(uint8_t kind, std::vector<uint8_t> data)
+{
+	sFxOut.erase(std::remove_if(sFxOut.begin(), sFxOut.end(), [&](const FxOut& o) { return o.kind == kind; }),
+	             sFxOut.end());
+	fx_queue(kind, std::move(data));
+}
+
+void fx_send_due(double now)
 {
 	for (FxOut& o : sFxOut) {
 		if (o.acked || now < o.nextSendMs) continue;
 		fx_send_all(o);
 		o.nextSendMs = now + kFxResendMs;
 	}
+}
+
+// One handshake datagram whose header already decoded as `type`. True when
+// it was fx traffic (consumed).
+bool fx_on_datagram(uint8_t type, const uint8_t* p, size_t len)
+{
+	if (type == kHsFxAck && len >= 8) {
+		for (FxOut& o : sFxOut)
+			if (o.kind == p[7]) o.acked = true;
+		return true;
+	}
+	if (type != kHsFxFrag) return false;
+	if (len < kFxHeader) return true;
+	const int slot = fx_slot(p[7]);
+	if (slot < 0) return true;
+	const uint32_t total = xfer::get_u32(p + 8);
+	const uint32_t off   = xfer::get_u32(p + 12);
+	const size_t chunk   = len - kFxHeader;
+	if (total == 0 || total > kFxMaxBytes || off >= total || off % kFxChunk != 0) return true;
+	if (chunk != std::min((size_t)kFxChunk, (size_t)(total - off))) return true;
+	FxIn& in = sFxIn[slot];
+	// A new message of another size restarts an incomplete slot (a repair
+	// replaced its earlier plan).
+	if (in.total != 0 && in.total != total && !in.complete) in = FxIn();
+	if (in.total == 0) {
+		in.total = total;
+		in.data.assign(total, 0);
+		in.have.assign((total + kFxChunk - 1) / kFxChunk, 0);
+	}
+	if (in.total != total) return true;
+	const size_t idx = off / kFxChunk;
+	if (!in.have[idx]) {
+		in.have[idx] = 1;
+		++in.count;
+		std::memcpy(in.data.data() + off, p + kFxHeader, chunk);
+		if (in.count == in.have.size()) in.complete = true;
+	}
+	if (in.complete) {
+		uint8_t ack[8];
+		fx_header(ack, kHsFxAck);
+		ack[7] = p[7];
+		hs_send(ack, sizeof(ack));
+	}
+	return true;
+}
+
+void fx_pump(double now)
+{
+	fx_send_due(now);
 	for (auto& g : hs_drain()) {
 		uint8_t type = 0;
 		uint16_t proto = 0;
 		if (!xfer::decode_hello_header(g.payload.data(), g.payload.size(), &type, &proto)) continue;
 		if (proto != kProtocolVersion) continue;
 		if (sCfg.isHost && sHaveRemote && (g.fromIpHostOrder != sRemoteIp || g.fromPort != sRemotePort)) continue;
-		const uint8_t* p = g.payload.data();
-		const size_t len = g.payload.size();
-		if (type == kHsFxAck && len >= 8) {
-			for (FxOut& o : sFxOut)
-				if (o.kind == p[7]) o.acked = true;
+		if (type == kHsAdvice) {
+			adaptive_on_advice(g.payload.data() + kHsHeaderLen, g.payload.size() - kHsHeaderLen);
 			continue;
 		}
-		if (type != kHsFxFrag || len < kFxHeader) continue;
-		const int slot = fx_slot(p[7]);
-		if (slot < 0) continue;
-		const uint32_t total = xfer::get_u32(p + 8);
-		const uint32_t off   = xfer::get_u32(p + 12);
-		const size_t chunk   = len - kFxHeader;
-		if (total == 0 || total > kFxMaxBytes || off >= total || off % kFxChunk != 0) continue;
-		if (chunk != std::min((size_t)kFxChunk, (size_t)(total - off))) continue;
-		FxIn& in = sFxIn[slot];
-		if (in.total == 0) {
-			in.total = total;
-			in.data.assign(total, 0);
-			in.have.assign((total + kFxChunk - 1) / kFxChunk, 0);
-		}
-		if (in.total != total) continue;
-		const size_t idx = off / kFxChunk;
-		if (!in.have[idx]) {
-			in.have[idx] = 1;
-			++in.count;
-			std::memcpy(in.data.data() + off, p + kFxHeader, chunk);
-			if (in.count == in.have.size()) in.complete = true;
-		}
-		if (in.complete) {
-			uint8_t ack[8];
-			fx_header(ack, kHsFxAck);
-			ack[7] = p[7];
-			hs_send(ack, sizeof(ack));
-		}
+		fx_on_datagram(type, g.payload.data(), g.payload.size());
 	}
 }
 
@@ -3226,12 +3271,193 @@ void start_gekko_session()
 	sPhase      = kSession;
 }
 
+// ---- partial desync repair ----
+//
+// After the forensics exchange the host picks a repair tick R a little ahead
+// of its own tick and sends it (kBulkRepairPlan). At the end of tick R the
+// host sends its object records of R (kBulkRepairData); the joiner, at the
+// end of its own tick R, waits for them, checks with fx::plan_repair that
+// only the motion or health of some navi, piki or teki differs, and writes
+// the host's values. Both then simulate R + 1 from the same state. Desync
+// events for frames up to R are leftovers of the repaired divergence and are
+// ignored. The session stops as before (report + exit 5) when the
+// difference is not repairable, a message does not arrive in time, the
+// forensics ring is off, or the desyncs keep coming (kMaxRepairs).
+constexpr unsigned kMaxRepairs        = 3;
+constexpr uint64_t kRepairLeadTicks   = 60;      // 2 s: the plan must reach the joiner before R
+constexpr double kRepairPlanWaitMs    = 10000.0; // joiner: desync seen, no plan yet
+constexpr double kRepairDataWaitMs    = 8000.0;  // joiner: at R, no data yet
+constexpr uint64_t kRepairIgnoreTicks = 2;       // stale checksums right after R
+
+struct Repair {
+	unsigned attempts      = 0;    // desyncs this peer has handled
+	uint32_t planAttempt   = 0;    // host: last plan sent; joiner: last plan taken
+	uint64_t tick          = 0;    // scheduled repair tick (0 = none)
+	bool waitingPlan       = false; // joiner: desync seen, no plan yet
+	double waitSinceMs     = 0;
+	uint64_t coveredTick   = 0;    // desyncs at or before this tick are leftovers
+	int failFrame          = -1;   // set when the repair failed: stop between ticks
+	std::string failWhy;
+};
+Repair sRepair;
+
+void desync_stop(int frame, const std::string& why);
+
+void repair_fail(int frame, const std::string& why)
+{
+	printf("[netplay] desync repair failed: %s\n", why.c_str());
+	fflush(stdout);
+	if (sRepair.failFrame < 0) {
+		sRepair.failFrame = frame;
+		sRepair.failWhy   = why;
+	}
+}
+
+uint64_t repair_current_tick()
+{
+	uint64_t total = 0, subs[7] = { 0, 0, 0, 0, 0, 0, 0 }, tick = 0;
+	pc_state_hash_current(&total, subs, &tick);
+	return tick;
+}
+
+// After the forensics: true when the session goes on with a repair pending.
+bool repair_begin()
+{
+	if (!sForensicsOn) {
+		printf("[netplay] desync repair unavailable: forensics off (PIKMIN_NETPLAY_FORENSICS=0)\n");
+		return false;
+	}
+	if (++sRepair.attempts > kMaxRepairs) {
+		printf("[netplay] desync repair: %u desyncs this session, giving up\n", sRepair.attempts);
+		return false;
+	}
+	// The ring and objs slots serve the next desync's forensics.
+	sFxIn[0] = FxIn();
+	sFxIn[1] = FxIn();
+	if (sCfg.isHost) {
+		sRepair.tick = repair_current_tick() + kRepairLeadTicks;
+		fx::RepairPlanMsg m;
+		m.attempt           = ++sRepair.planAttempt;
+		m.tick              = sRepair.tick;
+		sRepair.coveredTick = sRepair.tick + kRepairIgnoreTicks;
+		fx_queue_replace(fx::kBulkRepairPlan, fx::encode_repair_plan(m));
+		printf("[netplay] desync repair %u: host takes the joiner to its state at tick=%llu\n", m.attempt,
+		       (unsigned long long)m.tick);
+	} else if (sRepair.tick == 0) {
+		sRepair.waitingPlan = true;
+		sRepair.waitSinceMs = now_ms();
+		printf("[netplay] desync repair: waiting for the host's repair plan\n");
+	}
+	fflush(stdout);
+	return true;
+}
+
+// Every session turn: the joiner takes a plan, and times out waiting for one.
+void repair_poll()
+{
+	if (sCfg.isHost || sPhase != kSession) return;
+	FxIn& in = sFxIn[2];
+	if (in.complete) {
+		fx::RepairPlanMsg m;
+		const bool ok = fx::decode_repair_plan(in.data.data(), in.data.size(), &m);
+		in            = FxIn();
+		if (ok && m.attempt > sRepair.planAttempt) {
+			sRepair.planAttempt = m.attempt;
+			sRepair.waitingPlan = false;
+			const uint64_t now  = repair_current_tick();
+			if (now >= m.tick) {
+				repair_fail((int)sLastAdvanceFrame, "the repair plan for tick " + std::to_string(m.tick)
+				                                        + " arrived at tick " + std::to_string(now));
+			} else {
+				sRepair.tick        = m.tick;
+				sRepair.coveredTick = m.tick + kRepairIgnoreTicks;
+				printf("[netplay] desync repair %u: this game takes the host's state at tick=%llu (now %llu)\n",
+				       m.attempt, (unsigned long long)m.tick, (unsigned long long)now);
+				fflush(stdout);
+			}
+		}
+	}
+	if (sRepair.waitingPlan && now_ms() - sRepair.waitSinceMs > kRepairPlanWaitMs)
+		repair_fail((int)sLastAdvanceFrame, "no repair plan from the host");
+}
+
+// End of every simulated tick (after the forensics capture).
+void repair_tick_end(uint64_t tick)
+{
+	if (sRepair.tick == 0 || tick != sRepair.tick) return;
+	sRepair.tick = 0;
+	const std::vector<fx::ObjRec>* mine = pc_state_dump_find(tick);
+	if (mine == nullptr) {
+		repair_fail((int)sLastAdvanceFrame, "no records of tick " + std::to_string(tick));
+		return;
+	}
+	if (sCfg.isHost) {
+		fx::RepairDataMsg m;
+		m.attempt = sRepair.planAttempt;
+		m.tick    = tick;
+		m.recs    = *mine;
+		fx_queue_replace(fx::kBulkRepairData, fx::encode_repair_data(m));
+		fx_send_due(now_ms());
+		printf("[netplay] desync repair %u: sent %zu records of tick=%llu\n", m.attempt, m.recs.size(),
+		       (unsigned long long)tick);
+		fflush(stdout);
+		return;
+	}
+	// Joiner: tick R + 1 must not run before the host's state is in.
+	fx::RepairDataMsg host;
+	bool have       = false;
+	const double t0 = now_ms();
+	while (sGekko != nullptr && now_ms() - t0 < kRepairDataWaitMs) {
+		gekko_network_poll(sGekko);
+		fx_pump(now_ms());
+		FxIn& in = sFxIn[3];
+		if (in.complete) {
+			const bool ok = fx::decode_repair_data(in.data.data(), in.data.size(), &host);
+			in            = FxIn();
+			if (ok && host.attempt == sRepair.planAttempt && host.tick == tick) {
+				have = true;
+				break;
+			}
+		}
+		sleep_hires_ms(2.0, 0.0);
+	}
+	if (!have) {
+		repair_fail((int)sLastAdvanceFrame, "the host's state for tick " + std::to_string(tick) + " did not arrive");
+		return;
+	}
+	std::vector<size_t> take;
+	std::string why;
+	if (!fx::plan_repair(*mine, host.recs, &take, &why)) {
+		repair_fail((int)sLastAdvanceFrame, why);
+		return;
+	}
+	if (take.empty()) {
+		// The records agree, so the divergence is in something they do not
+		// carry: nothing here can repair it.
+		repair_fail((int)sLastAdvanceFrame, "both games agree on every object at tick " + std::to_string(tick));
+		return;
+	}
+	std::vector<fx::ObjRec> recs;
+	for (size_t i : take) recs.push_back(host.recs[i]);
+	if (!pc_state_dump_apply_motion(recs)) {
+		repair_fail((int)sLastAdvanceFrame, "an object to repair is gone");
+		return;
+	}
+	printf("[netplay] desync repair %u: took the host's motion for %zu object(s) at tick=%llu (%.0f ms wait)\n",
+	       host.attempt, recs.size(), (unsigned long long)tick, now_ms() - t0);
+	fflush(stdout);
+}
+
 // GekkoNet reported a desync: print the desynced tick's sub-hashes, swap the
 // forensics with the other game (which also keeps polling GekkoNet, so this
-// peer's own checksum reaches it and both stop with exit 5), write the
-// report, then exit 5, after the end banner when one is shown.
+// peer's own checksum reaches it), write the report, then try the partial
+// repair; when that is not possible, stop with exit 5, after the end banner
+// when one is shown.
 void handle_desync(int frame, uint32_t localCk, uint32_t remoteCk, int remoteHandle)
 {
+	if (frame >= 0 && (uint64_t)frame + 1 <= sRepair.coveredTick) return; // a leftover of the repaired divergence
+	if (sRepair.tick != 0 || sRepair.waitingPlan) return; // a repair is already under way
+
 	const uint64_t wantTick = frame >= 0 ? (uint64_t)frame + 1 : 0;
 	const HashEntry* e      = hash_ring_find(wantTick);
 	uint64_t total = 0, subs[7] = { 0, 0, 0, 0, 0, 0, 0 }, tick = 0;
@@ -3253,13 +3479,20 @@ void handle_desync(int frame, uint32_t localCk, uint32_t remoteCk, int remoteHan
 	fflush(stdout);
 	pc_state_hash_flush();
 	desync_forensics(frame, localCk, remoteCk);
-	inlog_end("desync frame=" + std::to_string(frame));
+	if (repair_begin()) return;
+	desync_stop(frame, std::string());
+}
+
+void desync_stop(int frame, const std::string& why)
+{
+	inlog_end("desync frame=" + std::to_string(frame) + (why.empty() ? "" : " repair failed: " + why));
 	stop_session();
 	sPhase = kDone;
 	printf("[netplay] session stopped: desync (exit %d)\n", npx::kDesync);
 	fflush(stdout);
 	std::vector<std::string> lines;
 	lines.push_back("The two games stopped agreeing at frame " + std::to_string(frame) + ".");
+	if (!why.empty()) lines.push_back("The automatic repair did not work: " + why + ".");
 	std::string folder = forensics_dir();
 	const size_t slash = folder.find_last_of("/\\");
 	if (slash != std::string::npos && slash + 1 < folder.size()) folder = folder.substr(slash + 1);
@@ -3308,7 +3541,8 @@ void handle_session_events()
 		case GekkoDesyncDetected:
 			handle_desync(ev[i]->data.desynced.frame, ev[i]->data.desynced.local_checksum,
 			              ev[i]->data.desynced.remote_checksum, ev[i]->data.desynced.remote_handle);
-			return; // the session is gone
+			if (sPhase != kSession) return; // the session is gone
+			break; // repairing: the session goes on
 		default:
 			break;
 		}
@@ -3367,6 +3601,7 @@ bool run_advance(System* sys, BaseApp* app, int frame, const uint8_t* inputs, bo
 		if (haveHash) {
 			if (sForensicsOn) pc_state_dump_capture(tick, subs);
 			hash_ring_store(tick, total, subs, sForensicsOn ? pc_state_dump_last_xtra() : 0);
+			if (!speculative) repair_tick_end(tick);
 		}
 		inlog_frame(frame, inputs, total, subs, haveHash);
 		if (haveHash) test_settings_save(tick);
@@ -3507,8 +3742,13 @@ int handle_game_events(System* sys, BaseApp* app)
 
 namespace nnet = nectar::net;
 
-constexpr std::uint16_t kOnlineProtocolMajor = 1;
-constexpr std::uint16_t kOnlineSceneEpoch    = 1;
+constexpr std::uint16_t kOnlineProtocolMajor = 2; // 2: applied ticks repaired on request, no per-tick reliable copy
+// Scene epoch: 1 before the first stage, +1 every time a stage goes live
+// (the navi hash column turns non-zero). Both peers derive it from their own
+// sim, so in the replica they agree tick for tick; scene-scoped messages
+// (WorldDelta) from another epoch are dropped. Tick-keyed traffic (inputs,
+// applied inputs, hashes) crosses scene changes and is not filtered.
+constexpr std::uint16_t kOnlineFirstSceneEpoch = 1;
 constexpr double kOnlineSlotMs               = 1000.0 / 30.0;
 
 struct OnlineState {
@@ -3520,7 +3760,10 @@ struct OnlineState {
 	nnet::PredictionCorrector corrector;
 	nnet::SnapshotInterpolator remote;
 	std::vector<nnet::NetInputFrame> sent; // guest: last frames, newest first
+	std::vector<nnet::NetInputFrame> leadSent; // guest: last 32 sent, oldest first (navilead)
 	uint64_t nextTick     = 0;  // next tick this peer simulates
+	uint16_t sceneEpoch   = kOnlineFirstSceneEpoch;
+	bool stageLive        = false; // the last simulated tick had a live stage
 	double startMs        = 0;  // host: wall time of tick 0
 	int reachability      = 0;  // host: nnet::Reachability of the room
 	uint16_t roomPort     = 0;  // host: the room's local port
@@ -3559,6 +3802,9 @@ struct OnlineState {
 	double nextInputMs = 0;   // guest: input sampling
 	uint64_t lastInputTick = 0;
 	uint64_t stalls    = 0;   // guest: ticks that were due but had not arrived
+	double repairNextMs = 0;  // guest: earliest time for the next repair request
+	uint64_t repairsAsked = 0; // guest: repair requests sent
+	uint64_t repairsSent  = 0; // host: ticks resent on request
 	uint64_t stalledTick = UINT64_MAX;
 	uint64_t hashesChecked = 0;
 	bool desync        = false;
@@ -3664,7 +3910,7 @@ void online_send(nnet::MessageType type, uint64_t tick, const std::vector<uint8_
 	nnet::Message message;
 	message.header.type           = type;
 	message.header.simulationTick = tick;
-	message.header.sceneEpoch     = kOnlineSceneEpoch;
+	message.header.sceneEpoch     = sOnline != nullptr ? sOnline->sceneEpoch : kOnlineFirstSceneEpoch;
 	message.payload               = payload;
 	std::vector<uint8_t> bytes;
 	if (nnet::encodeMessage(message, bytes)) link->send(delivery, bytes.data(), bytes.size());
@@ -3821,7 +4067,7 @@ void online_send_captains(uint64_t tick)
 		state.velocity      = { c.velocity[0], c.velocity[1], c.velocity[2] };
 		state.faceDirection = c.faceDirection;
 		state.player        = (uint8_t)player;
-		records.push_back(nnet::captainRecord(kOnlineSceneEpoch, state));
+		records.push_back(nnet::captainRecord(sOnline->sceneEpoch, state));
 	}
 	if (records.empty()) return;
 	online_send(nnet::MessageType::WorldDelta, tick, nnet::encodeWorldDelta(0, records), nnet::Delivery::Unreliable);
@@ -3839,6 +4085,7 @@ void online_host_set_spectator(bool on, uint64_t tick);
 void online_host_send_welcome();
 void online_guest_card_chunk(const std::vector<uint8_t>& p);
 void online_guest_card_manifest(const std::vector<uint8_t>& p);
+void online_host_repair(const std::vector<uint8_t>& payload);
 
 void online_host_events()
 {
@@ -3880,6 +4127,8 @@ void online_host_events()
 			if (!sOnline->spectator) online_host_set_spectator(true, sOnline->nextTick);
 		} else if (message.header.type == nnet::MessageType::RejoinRequest && message.payload.empty()) {
 			if (sOnline->spectator) sOnline->rejoinPending = true;
+		} else if (message.header.type == nnet::MessageType::AppliedRepairRequest) {
+			online_host_repair(message.payload);
 		} else if (message.header.type == nnet::MessageType::Ping) {
 			nnet::PingPayload ping;
 			if (!nnet::decodePing(message.payload.data(), message.payload.size(), ping)) continue;
@@ -3996,7 +4245,10 @@ void online_guest_events()
 		} else if (message.header.type == nnet::MessageType::WorldDelta) {
 			uint8_t flags = 0;
 			std::vector<nnet::EntityRecord> records;
-			if (!nnet::decodeWorldDelta(message.payload.data(), message.payload.size(), kOnlineSceneEpoch,
+			// Another scene's state (a stage the other peer already left or
+			// has not reached): dropped, never applied to this one.
+			if (message.header.sceneEpoch != sOnline->sceneEpoch) continue;
+			if (!nnet::decodeWorldDelta(message.payload.data(), message.payload.size(), sOnline->sceneEpoch,
 			                            nnet::WorldDeltaLimits{}, flags, records))
 				continue;
 			const uint64_t tick = message.header.simulationTick;
@@ -4083,8 +4335,11 @@ void online_host_set_spectator(bool on, uint64_t tick)
 }
 
 // Exact replica: what the host just simulated, with 8 ticks of redundancy
-// on the unreliable channel plus a reliable copy, so the guest never misses
-// a tick; and the state hash twice a second for desync detection.
+// on the unreliable channel. A tick lost with all its redundant copies is
+// asked for again by the guest (AppliedRepairRequest, answered reliably from
+// the applied log), so the reliable channel only carries the gaps instead of
+// every tick. Past the log (4 h) every tick gets a reliable copy as before.
+// And the state hash twice a second for desync detection.
 void online_send_applied(uint64_t tick, const PcNetplayInput& p0, const PcNetplayInput& p1)
 {
 	std::vector<uint8_t> blob(32);
@@ -4094,8 +4349,9 @@ void online_send_applied(uint64_t tick, const PcNetplayInput& p0, const PcNetpla
 	if (sOnline->appliedSent.size() > nnet::kMaxAppliedTicks) sOnline->appliedSent.pop_back();
 	online_send(nnet::MessageType::AppliedInputs, tick, nnet::encodeAppliedInputs(tick, sOnline->appliedSent),
 	            nnet::Delivery::Unreliable);
-	online_send(nnet::MessageType::AppliedInputs, tick, nnet::encodeAppliedInputs(tick, { blob }),
-	            nnet::Delivery::ReliableOrdered);
+	if (sOnline->appliedLogFull)
+		online_send(nnet::MessageType::AppliedInputs, tick, nnet::encodeAppliedInputs(tick, { blob }),
+		            nnet::Delivery::ReliableOrdered);
 	constexpr size_t kMaxLogTicks = 4u * 60u * 60u * 30u;
 	if (sOnline->appliedLog.size() == tick && sOnline->appliedLog.size() < kMaxLogTicks) {
 		std::array<uint8_t, 32> entry;
@@ -4277,6 +4533,52 @@ void online_guest_card_manifest(const std::vector<uint8_t>& p)
 	fflush(stdout);
 }
 
+// Repair request payload: from u64 LE, count u16 LE.
+constexpr size_t kRepairRequestBytes = 10;
+constexpr uint16_t kMaxRepairTicks   = 32;
+
+// Host: resends the applied ticks the guest is missing, reliably, from the log.
+void online_host_repair(const std::vector<uint8_t>& payload)
+{
+	if (payload.size() != kRepairRequestBytes) return;
+	uint64_t from = 0;
+	for (int i = 0; i < 8; ++i) from |= (uint64_t)payload[i] << (8 * i);
+	uint16_t count = (uint16_t)(payload[8] | (payload[9] << 8));
+	if (count == 0) return;
+	if (count > kMaxRepairTicks) count = kMaxRepairTicks;
+	const uint64_t end = std::min<uint64_t>(from + count, sOnline->appliedLog.size());
+	for (uint64_t first = from; first < end;) {
+		const uint64_t last = std::min<uint64_t>(end, first + nnet::kMaxAppliedTicks) - 1;
+		std::vector<std::vector<uint8_t>> blobs;
+		for (uint64_t t = last + 1; t-- > first;)
+			blobs.emplace_back(sOnline->appliedLog[t].begin(), sOnline->appliedLog[t].end());
+		online_send(nnet::MessageType::AppliedInputs, last, nnet::encodeAppliedInputs(last, blobs),
+		            nnet::Delivery::ReliableOrdered);
+		sOnline->repairsSent += blobs.size();
+		first = last + 1;
+	}
+}
+
+// Guest: the next tick to replay is missing. Asked for when later ticks are
+// already here (it was lost with its redundant copies) or when it is two
+// slots overdue, at most once per round trip.
+void online_guest_request_repair(double now)
+{
+	if (now < sOnline->repairNextMs) return;
+	const auto later = sOnline->applied.upper_bound(sOnline->nextTick);
+	const bool gap   = later != sOnline->applied.end();
+	if (!gap && now < sOnline->nextSlotMs + 2 * kOnlineSlotMs) return;
+	uint64_t count = gap ? later->first - sOnline->nextTick : nnet::kMaxAppliedTicks;
+	if (count > kMaxRepairTicks) count = kMaxRepairTicks;
+	std::vector<uint8_t> payload(kRepairRequestBytes);
+	for (int i = 0; i < 8; ++i) payload[i] = (uint8_t)(sOnline->nextTick >> (8 * i));
+	payload[8] = (uint8_t)(count & 0xFF);
+	payload[9] = (uint8_t)(count >> 8);
+	online_send(nnet::MessageType::AppliedRepairRequest, sOnline->nextTick, payload, nnet::Delivery::ReliableOrdered);
+	++sOnline->repairsAsked;
+	sOnline->repairNextMs = now + std::max(80.0, (double)sOnline->clock.rttMs() * 1.5);
+}
+
 // A guest that joined after tick 0 gets the session so far, a slice per turn
 // so neither GNS's send buffer nor the frame time explodes.
 void online_host_backfill()
@@ -4315,7 +4617,7 @@ void online_host_send_welcome()
 	                        + pc_settings_netplay_config_text();
 	online_send(nnet::MessageType::SessionRules, 0, std::vector<uint8_t>(rules.begin(), rules.end()),
 	            nnet::Delivery::ReliableOrdered);
-	online_send(nnet::MessageType::SceneStart, 0, nnet::encodeSceneStart({ kOnlineSceneEpoch, 0 }),
+	online_send(nnet::MessageType::SceneStart, 0, nnet::encodeSceneStart({ sOnline->sceneEpoch, 0 }),
 	            nnet::Delivery::ReliableOrdered);
 }
 
@@ -4370,7 +4672,16 @@ bool online_advance(System* sys, BaseApp* app, uint64_t tick, const PcNetplayInp
 	uint8_t inputs[32];
 	pc_netplay_input_encode(p0, inputs);
 	pc_netplay_input_encode(p1, inputs + 16);
-	return run_advance(sys, app, (int)tick, inputs, false);
+	if (!run_advance(sys, app, (int)tick, inputs, false)) return false;
+	uint64_t total = 0, subs[7] = { 0, 0, 0, 0, 0, 0, 0 }, hashTick = 0;
+	const bool live = pc_state_hash_current(&total, subs, &hashTick) && subs[0] != 0;
+	if (live && !sOnline->stageLive) {
+		if (++sOnline->sceneEpoch == 0) sOnline->sceneEpoch = kOnlineFirstSceneEpoch; // 0 is never an epoch
+		printf("[online] scene epoch %u at tick=%llu\n", (unsigned)sOnline->sceneEpoch, (unsigned long long)tick);
+		fflush(stdout);
+	}
+	sOnline->stageLive = live;
+	return true;
 }
 
 
@@ -4442,8 +4753,29 @@ void online_guest_send_input(double now)
 		online_send(nnet::MessageType::InputBundle, tick, nnet::encodeInputBundle(sOnline->sent),
 		            nnet::Delivery::Unreliable);
 		sOnline->lastInputTick = tick;
+		sOnline->leadSent.push_back(sOnline->sent.front());
+		if (sOnline->leadSent.size() > 32) sOnline->leadSent.erase(sOnline->leadSent.begin());
 	}
 	if (now - sOnline->nextInputMs > 500) sOnline->nextInputMs = now; // after a long load
+}
+
+// The presented frame of `tick` draws the guest's captain ahead by the inputs
+// sent for later ticks (pc_netplay_navilead.h): none while spectating or
+// catching up.
+void online_guest_navilead(uint64_t tick)
+{
+	PcNaviLeadInput pending[32];
+	int n = 0;
+	if (!sOnline->spectator && !sOnline->catchingUp) {
+		for (auto f = sOnline->leadSent.begin(); f != sOnline->leadSent.end() && n < 32; ++f) {
+			if (f->tick <= tick) continue;
+			pending[n].stickX = f->stickX;
+			pending[n].stickY = f->stickY;
+			pending[n].yaw    = (uint16_t)f->cursorDy; // to_net_input carries the control yaw there
+			++n;
+		}
+	}
+	pc_netplay_navilead_set(sLocalRole, pending, n);
 }
 
 // Exact replica turn: replays the host's ticks at 30 Hz, faster while behind.
@@ -4455,6 +4787,7 @@ int online_guest_replica_ticks(System* sys, BaseApp* app, double now)
 		auto it = sOnline->applied.find(sOnline->nextTick);
 		if (it == sOnline->applied.end()) {
 			// The host's tick is late: counted once per tick, not per turn.
+			online_guest_request_repair(now);
 			if (now >= sOnline->nextSlotMs + kOnlineSlotMs && sOnline->stalledTick != sOnline->nextTick) {
 				++sOnline->stalls;
 				sOnline->stalledTick = sOnline->nextTick;
@@ -4497,6 +4830,7 @@ int online_guest_replica_ticks(System* sys, BaseApp* app, double now)
 		pc_netplay_input_decode(it->second.data() + 16, 16, p1);
 		const uint64_t tick = sOnline->nextTick;
 		sOnline->applied.erase(it);
+		online_guest_navilead(tick);
 		if (!online_advance(sys, app, tick, p0, p1)) return -1;
 		uint64_t total = 0, hashTick = 0;
 		if (pc_state_hash_current(&total, nullptr, &hashTick) && hashTick > 0) sOnline->ownHashes[hashTick] = total;
@@ -4510,10 +4844,11 @@ int online_guest_replica_ticks(System* sys, BaseApp* app, double now)
 			// back and the replay buffer.
 			const double latencyMs = (double)(sOnline->lead + sOnline->applied.size()) * kOnlineSlotMs
 			                       + sOnline->clock.rttMs() / 2.0;
-			printf("[online] tick=%llu replica backlog=%zu stalls=%llu rtt=%u lead=%u input-latency~%.0fms "
-			       "hashes-checked=%llu%s\n",
+			printf("[online] tick=%llu replica backlog=%zu stalls=%llu repairs=%llu rtt=%u lead=%u "
+			       "input-latency~%.0fms hashes-checked=%llu%s\n",
 			       (unsigned long long)(tick + 1), sOnline->applied.size(), (unsigned long long)sOnline->stalls,
-			       sOnline->clock.rttMs(), sOnline->lead, latencyMs, (unsigned long long)sOnline->hashesChecked,
+			       (unsigned long long)sOnline->repairsAsked, sOnline->clock.rttMs(), sOnline->lead, latencyMs,
+			       (unsigned long long)sOnline->hashesChecked,
 			       sOnline->desync ? " DESYNC" : "");
 			fflush(stdout);
 		}
@@ -4537,6 +4872,17 @@ bool online_turn(System* sys, BaseApp* app)
 			const bool copy   = keys != nullptr && keys[SDL_SCANCODE_C] && (SDL_GetModState() & KMOD_CTRL);
 			if (copy && !sOnline->copyKeyDown) sOnline->codeCopied = SDL_SetClipboardText(sOnline->code.c_str()) == 0;
 			sOnline->copyKeyDown = copy;
+		}
+		if (!sOnline->guestEverJoined) {
+			// Nothing is simulated until the guest first joins: it then starts
+			// at tick 0 with the host instead of replaying everything the host
+			// played alone. The banner ("Room open") is presented meanwhile.
+			sOnline->startMs = now;
+			sys->beginRender();
+			sys->doneRender();
+			sys->waitRetrace();
+			sleep_hires_ms(16.0, 0.0);
+			return true;
 		}
 		const uint64_t due = (uint64_t)((now - sOnline->startMs) / kOnlineSlotMs);
 		while (sOnline->nextTick <= due && advances < 2) {
@@ -5027,6 +5373,7 @@ bool pc_netplay_session_drive(System* sys, BaseApp* app)
 		}
 		advances = handle_game_events(sys, app);
 		handle_session_events();
+		if (sPhase == kSession && sRepair.failFrame >= 0) desync_stop(sRepair.failFrame, sRepair.failWhy);
 		if (sPhase != kSession) return true; // stopped inside the handlers
 	}
 	// Pacing (see the top of the file). At most 2 slots of catch-up per turn,

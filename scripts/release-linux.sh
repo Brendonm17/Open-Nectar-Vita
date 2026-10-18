@@ -33,6 +33,7 @@ podman build -q -t "${image}" -f "${root}/games/pikmin1/packaging/linux/Containe
 
 printf '[2/4] Compilando el launcher, Pikmin 1 y Pikmin 2 en el contenedor...\n'
 podman run --rm --userns=keep-id -v "${root}":/src -e OPEN_NECTAR_VERSION="${launcher_version}" \
+    -e NECTAR_RELEASE_ONLINE="${NECTAR_RELEASE_ONLINE:-0}" \
     "${image}" bash /src/scripts/release/container-build-linux.sh
 
 launcher="${build_dir}/p1-usa/bin/nectar-launcher"

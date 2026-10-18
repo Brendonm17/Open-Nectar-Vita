@@ -2,7 +2,10 @@
 # Builds the pinned online transport dependencies (GameNetworkingSockets,
 # protobuf and the crypto backend) as static libraries for one target.
 #
-#   scripts/netplay-deps.sh linux|mingw64|android-arm64 [install-prefix]
+#   scripts/netplay-deps.sh linux|mingw64|android-arm64|macos [install-prefix]
+#
+# macos se ejecuta en un Mac (brew install cmake ninja coreutils) y compila
+# para la arquitectura de ese Mac.
 #
 # The prefix defaults to ~/.cache/open-nectar/netplay-deps/install/<target>.
 #
@@ -33,9 +36,9 @@ miniupnpc_version=2.3.3
 miniupnpc_sha=d52a0afa614ad6c088cc9ddff1ae7d29c8c595ac5fdd321170a05f41e634bd1a
 
 case "${target}" in
-    linux|mingw64|android-arm64) ;;
+    linux|mingw64|android-arm64|macos) ;;
     *)
-        printf 'Uso: %s linux|mingw64|android-arm64 [prefijo]\n' "$0" >&2
+        printf 'Uso: %s linux|mingw64|android-arm64|macos [prefijo]\n' "$0" >&2
         exit 2
         ;;
 esac
@@ -105,6 +108,10 @@ TOOLCHAIN
         cmake_target=(-DCMAKE_TOOLCHAIN_FILE="${ndk}/build/cmake/android.toolchain.cmake"
                       -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM="android-${android_api}")
         ;;
+    macos)
+        export MACOSX_DEPLOYMENT_TARGET="${MACOS_DEPLOYMENT_TARGET:-11.0}"
+        cmake_target=(-DCMAKE_OSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET}")
+        ;;
 esac
 cmake_common=(-G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="${prefix}"
               -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_POSITION_INDEPENDENT_CODE=ON
@@ -120,7 +127,9 @@ if [[ ! -x "${host_protoc}" ]]; then
         -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="${cache}/host/protoc-${protobuf_version}" \
         -Dprotobuf_BUILD_TESTS=OFF -Dprotobuf_WITH_ZLIB=OFF -Dprotobuf_BUILD_SHARED_LIBS=OFF
     cmake --build "${work}/protoc-host" --target protoc -j "${jobs}"
-    install -D -m 755 "${work}/protoc-host/protoc" "${host_protoc}"
+    mkdir -p "$(dirname "${host_protoc}")"
+    cp "${work}/protoc-host/protoc" "${host_protoc}"
+    chmod 755 "${host_protoc}"
 fi
 
 # 2. OpenSSL libcrypto (Linux, Android). Windows uses the system BCrypt.
@@ -134,6 +143,8 @@ if [[ "${target}" != mingw64 ]]; then
             export ANDROID_NDK_ROOT="${ndk}"
             export PATH="${ndk}/toolchains/llvm/prebuilt/linux-x86_64/bin:${PATH}"
             ./Configure android-arm64 -D__ANDROID_API__="${android_api}" "${options[@]}"
+        elif [[ "${target}" == macos ]]; then
+            ./Configure "darwin64-$(uname -m)-cc" "${options[@]}"
         else
             ./Configure linux-x86_64 "${options[@]}"
         fi

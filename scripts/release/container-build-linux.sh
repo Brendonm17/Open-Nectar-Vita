@@ -44,13 +44,30 @@ common=(
     -DOpenGL_GL_PREFERENCE=LEGACY
 )
 
+# Online de Pikmin 1 fuera de las releases hasta que funcione: sin él, Co-op
+# y VS son sólo locales. NECTAR_RELEASE_ONLINE=1 lo vuelve a compilar (mismo
+# PIKMIN_NETPLAY_SOURCE_ID en todos los sistemas y regiones; dependencias del
+# transporte compiladas aquí, con la glibc del contenedor).
+if [[ "${NECTAR_RELEASE_ONLINE:-0}" == "1" ]]; then
+    deps="${out}/netplay-deps"
+    if [[ ! -f "${deps}/.listo" ]]; then
+        printf '%s\n' '[contenedor] Dependencias del online...'
+        NECTAR_DEPS_CACHE="${out}/netplay-cache" bash "${src}/scripts/netplay-deps.sh" linux "${deps}"
+        touch "${deps}/.listo"
+    fi
+    online=(-DPIKMIN_NETPLAY_BUILD=ON -DNECTAR_ONLINE=ON -DNECTAR_NET_ENABLE_GNS=ON
+            -DPIKMIN_NETPLAY_SOURCE_ID="release-${version}" -DCMAKE_PREFIX_PATH="${out}/sdl2;${deps}")
+else
+    online=(-DPIKMIN_NETPLAY_BUILD=OFF -DNECTAR_ONLINE=OFF)
+fi
+
 printf '%s\n' '[contenedor] Pikmin 1 USA y el launcher...'
-cmake -S "${src}/games/pikmin1" -B "${out}/p1-usa" "${common[@]}" \
+cmake -S "${src}/games/pikmin1" -B "${out}/p1-usa" "${common[@]}" "${online[@]}" \
     -DPIKMIN_NATIVE_OPTIMIZE=OFF -DPIKMIN_ENABLE_IPO=ON -DOPEN_NECTAR_VERSION="${version}"
 cmake --build "${out}/p1-usa" --target pikmin_pc pikmin_launcher nectar_mapmaker -j"${jobs}"
 
 printf '%s\n' '[contenedor] Pikmin 1 PAL...'
-cmake -S "${src}/games/pikmin1" -B "${out}/p1-pal" "${common[@]}" \
+cmake -S "${src}/games/pikmin1" -B "${out}/p1-pal" "${common[@]}" "${online[@]}" \
     -DPIKMIN_NATIVE_OPTIMIZE=OFF -DPIKMIN_ENABLE_IPO=ON -DOPEN_NECTAR_VERSION="${version}" \
     -DPIKMIN_GAME_VERSION=VERSION_GPIP01_00
 cmake --build "${out}/p1-pal" --target pikmin_pc -j"${jobs}"

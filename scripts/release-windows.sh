@@ -29,14 +29,34 @@ jobs="$(nproc)"
 # (issues #41 y #77). Igual que el release de Linux.
 common=(-DCMAKE_BUILD_TYPE=Release -DPIKMIN_NATIVE_JAUDIO=ON -DPIKMIN_STATIC_RUNTIME=ON -DPIKMIN_NATIVE_OPTIMIZE=OFF)
 
+# Online de Pikmin 1 fuera de las releases hasta que funcione: sin él, Co-op
+# y VS son sólo locales y el título no ofrece «Online». NECTAR_RELEASE_ONLINE=1
+# lo vuelve a compilar (mismo PIKMIN_NETPLAY_SOURCE_ID en todos los sistemas
+# y regiones: así Windows, Linux, macOS y Android juegan entre sí).
+mkdir -p "${build_dir}"
+if [[ "${NECTAR_RELEASE_ONLINE:-0}" == "1" ]]; then
+    deps="${NECTAR_DEPS_CACHE:-${HOME}/.cache/open-nectar/netplay-deps}/install/mingw64"
+    [[ -d "${deps}" ]] || bash "${root}/scripts/netplay-deps.sh" mingw64 "${deps}"
+    p1_toolchain="${build_dir}/toolchain-mingw64-online.cmake"
+    cat > "${p1_toolchain}" <<TOOLCHAIN
+include("${p1}/cmake/toolchain-mingw64.cmake")
+list(APPEND CMAKE_FIND_ROOT_PATH "${deps}")
+TOOLCHAIN
+    online=(-DPIKMIN_NETPLAY_BUILD=ON -DNECTAR_ONLINE=ON -DNECTAR_NET_ENABLE_GNS=ON
+            -DPIKMIN_NETPLAY_SOURCE_ID="release-${launcher_version}" -DCMAKE_PREFIX_PATH="${deps}")
+else
+    p1_toolchain="${p1}/cmake/toolchain-mingw64.cmake"
+    online=(-DPIKMIN_NETPLAY_BUILD=OFF -DNECTAR_ONLINE=OFF)
+fi
+
 printf '[1/4] Pikmin 1 USA y el launcher...\n'
-cmake -S "${p1}" -B "${build_dir}/p1-usa" "${common[@]}" \
-    -DCMAKE_TOOLCHAIN_FILE="${p1}/cmake/toolchain-mingw64.cmake" -DOPEN_NECTAR_VERSION="${launcher_version}"
+cmake -S "${p1}" -B "${build_dir}/p1-usa" "${common[@]}" "${online[@]}" \
+    -DCMAKE_TOOLCHAIN_FILE="${p1_toolchain}" -DOPEN_NECTAR_VERSION="${launcher_version}"
 cmake --build "${build_dir}/p1-usa" --target pikmin_pc pikmin_launcher nectar_mapmaker -j"${jobs}"
 
 printf '[2/4] Pikmin 1 PAL...\n'
-cmake -S "${p1}" -B "${build_dir}/p1-pal" "${common[@]}" \
-    -DCMAKE_TOOLCHAIN_FILE="${p1}/cmake/toolchain-mingw64.cmake" -DOPEN_NECTAR_VERSION="${launcher_version}" \
+cmake -S "${p1}" -B "${build_dir}/p1-pal" "${common[@]}" "${online[@]}" \
+    -DCMAKE_TOOLCHAIN_FILE="${p1_toolchain}" -DOPEN_NECTAR_VERSION="${launcher_version}" \
     -DPIKMIN_GAME_VERSION=VERSION_GPIP01_00
 cmake --build "${build_dir}/p1-pal" --target pikmin_pc -j"${jobs}"
 

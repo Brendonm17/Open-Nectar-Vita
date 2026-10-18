@@ -559,6 +559,9 @@ bool runWhilePainting(pikmin::launcher::HubWindow& hub, const std::string& phase
     return ok;
 }
 
+bool installPackage(const fs::path& package, const fs::path& install, std::string& failure);
+void rememberInstallDirectory(const fs::path& directory);
+
 UpdateOutcome runUpdate(pikmin::launcher::HubWindow& hub, const fs::path& sourceDirectory, bool fromInsideInstall,
                         fs::path& playDirectory)
 {
@@ -1236,7 +1239,9 @@ int main(int argc, char** argv)
     }
     const bool openWindow = argc == 1 || (argc == 3 && !movedFrom.empty());
     // El launcher descargado de GitHub, abierto otra vez tras instalar: se
-    // abre el de la instalación, que es el que juega y actualiza.
+    // abre el de la instalación, que es el que juega y actualiza. Antes se
+    // copia a la instalación lo que trae este paquete: si es una versión
+    // nueva, la instalación queda al día (partidas y ajustes no se tocan).
     if (argc == 1 && !isInstallFolder) {
         const fs::path installed = rememberedInstallDirectory();
         std::error_code ec;
@@ -1244,6 +1249,11 @@ int main(int argc, char** argv)
             && fs::is_regular_file(installed / kLauncherExecutable, ec)
             && (assetsReady(installed)
                 || fs::is_regular_file(pikmin2GameDirectory(installed) / "assets/.pikmin2-assets", ec))) {
+            std::string failure;
+            if (fs::is_regular_file(sourceDirectory / kGameExecutable, ec)
+                && !installPackage(sourceDirectory, installed, failure)) {
+                std::cerr << "Could not update " << installed << ": " << failure << '\n';
+            }
             platform::relaunch(installed / kLauncherExecutable, {});
         }
     }

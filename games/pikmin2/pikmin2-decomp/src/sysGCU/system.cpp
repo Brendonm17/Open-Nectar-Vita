@@ -1364,8 +1364,22 @@ extern "C" float pc_orig_tick_fraction(void)
 	return f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
 }
 
-// Frecuencia del retrace del host (p2_os_host): 120 solo en el modo de 120 FPS.
-extern "C" int pc_p2_retrace_hz(void) { return pc_settings_get_fps_mode() == 2 ? 120 : 60; }
+extern "C" double pc_window_get_refresh_rate(void);
+// FPS Mode 3 ("Monitor"): la frecuencia de la pantalla (30..360 Hz).
+static int pcMonitorHz()
+{
+	const double hz = pc_window_get_refresh_rate();
+	const int rounded = (int)(hz + 0.5);
+	return rounded < 30 ? 30 : (rounded > 360 ? 360 : rounded);
+}
+
+// Frecuencia del retrace del host (p2_os_host): 120 en el modo de 120 FPS, la
+// del monitor en el modo Monitor, si no 60.
+extern "C" int pc_p2_retrace_hz(void)
+{
+	const int fpsMode = pc_settings_get_fps_mode();
+	return fpsMode == 2 ? 120 : (fpsMode == 3 ? pcMonitorHz() : 60);
+}
 
 // Reaplica la frecuencia pedida cuando cambia el ajuste (desde F1).
 extern "C" void pc_p2_frame_rate_refresh(void)
@@ -1385,11 +1399,17 @@ void System::setFrameRate(int newFactor)
 	sPcRequestedFrameRate = newFactor;
 	sPcOrigTickAcc        = 0.0f;
 	const int fpsMode     = pc_settings_get_fps_mode();
-	const int retraceMul  = (fpsMode == 2) ? 2 : 1;
+	// Retraces por frame de 60 Hz: los menus conservan su velocidad. En modo
+	// Monitor es la proporcion entera mas cercana (exacta a 60/120/180/240 Hz).
+	int retraceMul = (fpsMode == 2) ? 2 : 1;
+	if (fpsMode == 3) {
+		retraceMul = (pcMonitorHz() + 30) / 60;
+		if (retraceMul < 1) retraceMul = 1;
+	}
 	f32 deltaTime         = newFactor / 60.0f;
 	sPcAdaptiveDt = false;
 	if (newFactor == 2 && fpsMode >= 1) {
-		deltaTime        = (fpsMode == 2) ? (1.0f / 120.0f) : (1.0f / 60.0f);
+		deltaTime        = (fpsMode == 2) ? (1.0f / 120.0f) : (fpsMode == 3) ? (1.0f / (f32)pcMonitorHz()) : (1.0f / 60.0f);
 		newFactor        = 1;
 		sPcAdaptiveDt    = true;
 		sPcAdaptiveMinDt = deltaTime;

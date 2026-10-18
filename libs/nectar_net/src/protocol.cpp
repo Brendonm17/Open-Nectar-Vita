@@ -22,6 +22,7 @@ bool isKnownMessageType(MessageType type)
     case MessageType::CompatibilityOffer:
     case MessageType::InputBundle:
     case MessageType::AppliedInputs:
+    case MessageType::AppliedRepairRequest:
     case MessageType::WorldDelta:
     case MessageType::WorldSnapshot:
     case MessageType::StateHash:

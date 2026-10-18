@@ -17,6 +17,7 @@
 #include "pc_gfx.h"
 #if defined(PIKI_PC_PORT)
 #include "netplay/pc_netplay_camlead.h"
+#include "netplay/pc_netplay_navilead.h"
 #include "netplay/pc_netplay_det.h"
 #include "netplay/pc_netplay_present.h"
 #include "pc_vs.h"
@@ -348,7 +349,9 @@ int PlugPikiApp::idle()
 			gsys->mDGXGfx->resetCacheBuffer();
 			gsys->resetLFlares();
 			pc_gfx_begin_capture(pc_render_tick_serial());
+			pc_netplay_navilead_begin_presentation();
 			renderall();
+			pc_netplay_navilead_end_presentation();
 			if (profiling) {
 				pc_gfx_flush_submit_stats();
 			}

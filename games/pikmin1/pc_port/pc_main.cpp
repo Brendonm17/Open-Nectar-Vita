@@ -9,6 +9,7 @@
  * OpenGL context setup, and input polling.
  */
 #include <cstdio>
+#include "netplay/pc_online_switch.h"
 #include <cstdlib>
 #include <cstring>
 #if PIKI_USE_JAUDIO
@@ -65,9 +66,9 @@ __declspec(dllexport) int           AmdPowerXpressRequestHighPerformance = 1;
 
 // Netplay session switches: strong-defined by pc_netplay_session.cpp in
 // netplay builds only, null otherwise.
-__attribute__((weak)) void pc_netplay_session_notify_argv(int argc, char** argv);
-__attribute__((weak)) void pc_netplay_launch_preinit(int argc, char** argv);
-__attribute__((weak)) void pc_netplay_launch_post_settings(void);
+void pc_netplay_session_notify_argv(int argc, char** argv);
+void pc_netplay_launch_preinit(int argc, char** argv);
+void pc_netplay_launch_post_settings(void);
 
 int main(int argc, char* argv[])
 {
@@ -100,7 +101,9 @@ int main(int argc, char* argv[])
 
     // --netplay-host-ice / --netplay-join-ice: the run folder, the private
     // save folder and the joiner's session bundle, before anything reads them.
+#if PC_ONLINE_ENABLED // online features are off project-wide (pc_online_switch.h)
     if (pc_netplay_launch_preinit != nullptr) pc_netplay_launch_preinit(argc, argv);
+#endif
 
     // Netplay determinism switches (--netplay-deterministic and the
     // PIKMIN_NETPLAY_* variables), before the game starts. Inert unless set.
@@ -142,7 +145,9 @@ int main(int argc, char* argv[])
     }
     // --netplay-host / --netplay-join. A session also takes the co-op direct
     // boot. No-op unless a netplay switch is set.
+#if PC_ONLINE_ENABLED
     if (pc_netplay_session_notify_argv != nullptr) pc_netplay_session_notify_argv(argc, argv);
+#endif
     (void)argc;
     (void)argv;
 

@@ -41,7 +41,28 @@
 //     6   2  tick count t (0..4)
 //     8   ... t blocks, each: tick u64, n u32, then n * 25 bytes
 //             { kind u8, ord i32, type i32, hash u64, xhash u64 }
+//   kBulkRepairPlan 0x19 (host -> joiner): the partial desync repair
+//     0   4  magic 'D','R','P','1'
+//     4   1  version (1)
+//     5   3  reserved 0
+//     8   4  attempt (u32, 1-based, grows per repair)
+//     12  8  repair tick (u64): the joiner takes the host's records after it
+//   kBulkRepairData 0x1A (host -> joiner): the host's records at that tick
+//     0   4  magic 'D','R','D','1'
+//     4   1  version (1)
+//     5   3  reserved 0
+//     8   4  attempt
+//     12  8  tick
+//     20  4  n records, then n * 101 bytes
+//             { kind u8, ord i32, type i32, state i32, aux[4] i32, health f32,
+//               f[13] f32, hash u64, xhash u64 }
 // Both bounded before any allocation (kMaxRingEntries, kMaxObjsPerTick).
+//
+// Partial repair (plan_repair): the joiner overwrites the motion fields
+// (pos rot vel drive face) and health of the navi, piki and teki whose hash
+// differs, when the type, state and aux match. Anything else that differs
+// (object counts, states, items, pellets, bosses, onions, world, rng, mode)
+// cannot be repaired this way.
 
 #include <cstddef>
 #include <cstdint>
@@ -52,6 +73,8 @@ namespace pc_netplay_forensics {
 
 constexpr uint8_t kBulkDesyncRing = 0x17;
 constexpr uint8_t kBulkDesyncObjs = 0x18;
+constexpr uint8_t kBulkRepairPlan = 0x19;
+constexpr uint8_t kBulkRepairData = 0x1A;
 
 constexpr int kSubCount = 7;
 extern const char* const kSubNames[kSubCount]; // navi piki teki item world rng mode
@@ -61,6 +84,7 @@ constexpr size_t kMaxObjsPerTick = 4096;
 constexpr size_t kMaxObjTicks    = 4;
 constexpr size_t kTickSubsBytes  = 80;
 constexpr size_t kObjKeyBytes    = 25;
+constexpr size_t kObjRecBytes    = 101;
 
 struct TickSubs {
 	uint64_t tick  = 0;
@@ -128,6 +152,26 @@ std::vector<uint8_t> encode_objs(const ObjsMsg& m);
 bool decode_objs(const uint8_t* data, size_t len, ObjsMsg* out);
 
 ObjKey key_of(const ObjRec& r);
+
+struct RepairPlanMsg {
+	uint32_t attempt = 0;
+	uint64_t tick    = 0;
+};
+struct RepairDataMsg {
+	uint32_t attempt = 0;
+	uint64_t tick    = 0;
+	std::vector<ObjRec> recs;
+};
+std::vector<uint8_t> encode_repair_plan(const RepairPlanMsg& m);
+bool decode_repair_plan(const uint8_t* data, size_t len, RepairPlanMsg* out);
+std::vector<uint8_t> encode_repair_data(const RepairDataMsg& m);
+bool decode_repair_data(const uint8_t* data, size_t len, RepairDataMsg* out);
+
+// Which host records the joiner must take (indices into `host`), comparing
+// both peers' records of the same tick. False with `why` set when the
+// difference is not repairable; true with an empty list when they agree.
+bool plan_repair(const std::vector<ObjRec>& local, const std::vector<ObjRec>& host, std::vector<size_t>* take,
+                 std::string* why);
 
 // Bitmask of the seven sub-hash columns that differ between a and b.
 unsigned differing_subs(const TickSubs& a, const TickSubs& b);

@@ -90,8 +90,11 @@ EntityRecord captainRecord(std::uint16_t sceneEpoch, const CaptainState& state)
 
 std::uint32_t inputLeadTicks(std::uint32_t rttMs, std::uint32_t jitterMs)
 {
+    // One way plus two jitters, rounded up to whole ticks. A late input is
+    // not lost (the host repeats the held state for a tick), and the guest
+    // draws its captain ahead of the replica, so no extra safety tick.
     const std::uint32_t budget = rttMs / 2 + 2 * jitterMs;
-    const std::uint32_t ticks = (budget * 30 + 999) / 1000 + 1;
+    const std::uint32_t ticks = (budget * 30 + 999) / 1000;
     return ticks < 1 ? 1 : ticks > 8 ? 8 : ticks;
 }
 

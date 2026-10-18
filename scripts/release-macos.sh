@@ -7,8 +7,9 @@
 # cmake). SDL2 se compila estática aquí: los ejecutables solo dependen de lo
 # que trae macOS.
 #
-# Por defecto salen binarios universales (Apple Silicon e Intel). Para uno
-# solo: MACOS_ARCHS=arm64 scripts/release-macos.sh
+# Sale para la arquitectura de este Mac (las dependencias del online se
+# compilan para ella): en un Mac con Apple Silicon, arm64; en uno Intel,
+# x86_64. Además: brew install cmake ninja coreutils.
 #
 # Las versiones salen de versions.json (raíz del repo).
 set -euo pipefail
@@ -29,10 +30,10 @@ fi
 command -v cmake >/dev/null 2>&1 || { printf 'Falta cmake (brew install cmake).\n' >&2; exit 1; }
 version="$(python3 -c "import json;print(json.load(open('${root}/versions.json'))['release'])")"
 jobs="$(sysctl -n hw.ncpu)"
-archs="${MACOS_ARCHS:-arm64;x86_64}"
+archs="$(uname -m)"
 deployment="${MACOS_DEPLOYMENT_TARGET:-11.0}"
 
-# SDL2 estática (fuentes oficiales), universal como el resto.
+# SDL2 estática (fuentes oficiales).
 sdl_version="${SDL_VERSION:-2.32.10}"
 if [[ ! -f "${build_dir}/sdl2/lib/libSDL2.a" ]]; then
     printf '[0/4] SDL2 %s estática...\n' "${sdl_version}"
@@ -61,12 +62,25 @@ common=(
     -DPIKMIN_NATIVE_OPTIMIZE=OFF
 )
 
+# Online de Pikmin 1 (Co-op y VS dentro del juego; el launcher no lleva
+# botones). Mismo PIKMIN_NETPLAY_SOURCE_ID en todos los sistemas y regiones:
+# así Windows, Linux, macOS y Android juegan entre sí.
+# Fuera de las releases hasta que funcione; NECTAR_RELEASE_ONLINE=1 lo compila.
+if [[ "${NECTAR_RELEASE_ONLINE:-0}" == "1" ]]; then
+    deps="${NECTAR_DEPS_CACHE:-${HOME}/.cache/open-nectar/netplay-deps}/install/macos"
+    [[ -d "${deps}" ]] || bash "${root}/scripts/netplay-deps.sh" macos "${deps}"
+    online=(-DPIKMIN_NETPLAY_BUILD=ON -DNECTAR_ONLINE=ON -DNECTAR_NET_ENABLE_GNS=ON
+            -DPIKMIN_NETPLAY_SOURCE_ID="release-${version}" -DCMAKE_PREFIX_PATH="${build_dir}/sdl2;${deps}")
+else
+    online=(-DPIKMIN_NETPLAY_BUILD=OFF -DNECTAR_ONLINE=OFF -DCMAKE_PREFIX_PATH="${build_dir}/sdl2")
+fi
+
 printf '[1/4] Pikmin 1 USA, el launcher y el editor de mapas...\n'
-cmake -S "${p1}" -B "${build_dir}/p1-usa" "${common[@]}" -DOPEN_NECTAR_VERSION="${version}"
+cmake -S "${p1}" -B "${build_dir}/p1-usa" "${common[@]}" "${online[@]}" -DOPEN_NECTAR_VERSION="${version}"
 cmake --build "${build_dir}/p1-usa" --target pikmin_pc pikmin_launcher nectar_mapmaker -j"${jobs}"
 
 printf '[2/4] Pikmin 1 PAL...\n'
-cmake -S "${p1}" -B "${build_dir}/p1-pal" "${common[@]}" -DOPEN_NECTAR_VERSION="${version}" \
+cmake -S "${p1}" -B "${build_dir}/p1-pal" "${common[@]}" "${online[@]}" -DOPEN_NECTAR_VERSION="${version}" \
     -DPIKMIN_GAME_VERSION=VERSION_GPIP01_00
 cmake --build "${build_dir}/p1-pal" --target pikmin_pc -j"${jobs}"
 

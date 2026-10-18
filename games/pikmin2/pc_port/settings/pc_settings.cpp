@@ -648,7 +648,7 @@ constexpr int kSaturationStopCount = int(sizeof(kSaturationStops) / sizeof(kSatu
 // Pikmin 2 reserva modelos de los cinco colores por plaza: capacidad 500 (Game/Piki.h).
 constexpr int kPikiLimits[]   = { 50, 100, 150, 200, 300, 500 };
 #endif
-constexpr int kFpsModeCount = 3;
+constexpr int kFpsModeCount = 4; // 30, 60, 120, Monitor
 #if !PIKI_P2_HOST
 constexpr int kPikiLimits[]   = { 50, 100, 150, 200, 300, 500, 750, 999 };
 #endif
@@ -2939,7 +2939,11 @@ void mainRowValue(int row, char* out, size_t n) {
 
     const char* fpsModeNames[3] = { "30 FPS (original)", "60 FPS (experimental)", "120 FPS (experimental)" };
     char fpsModeBuf[32];
-    snprintf(fpsModeBuf, sizeof(fpsModeBuf), "%s", fpsModeNames[sPending.fpsMode >= 0 && sPending.fpsMode < 3 ? sPending.fpsMode : 0]);
+    if (sPending.fpsMode == 3) {
+        snprintf(fpsModeBuf, sizeof(fpsModeBuf), "Monitor (%.0f Hz)", pc_window_get_refresh_rate());
+    } else {
+        snprintf(fpsModeBuf, sizeof(fpsModeBuf), "%s", fpsModeNames[sPending.fpsMode >= 0 && sPending.fpsMode < 3 ? sPending.fpsMode : 0]);
+    }
 
     char valueBuf[ROW_DISPLAY_COUNT][128];
     snprintf(valueBuf[0], sizeof(valueBuf[0]), "%s",
@@ -3574,8 +3578,22 @@ void drawF1Page(DGXGraphics* gfx) {
         char value[128];
         pc_settings_row_value(sOpenGroup, sGroupSel, value, sizeof(value));
         const bool on = pc_settings_row_enabled(sOpenGroup, sGroupSel);
-        f1Plate(gfx, rx - 2, y, rw + 4, kF1OptH - 2, on ? 2 : 1);
-        f1Text(rx + (rw - f1TextW(value, 10)) / 2, y + 3, value, on ? kF1SelDark : kF1Off, 10, 15);
+        if (sOpenGroup == PC_SET_GROUP_ACHIEVEMENTS) {
+            // Progreso global de logros. La placa amarilla funciona como el
+            // relleno y deja visible de un vistazo la proporción conseguida.
+            const int unlocked = pc_achievements_unlocked_count();
+            const int total = (int)PC_ACH_COUNT;
+            const int barW = rw + 4;
+            f1Plate(gfx, rx - 2, y, barW, kF1OptH - 2, 1);
+            const int fillW = total > 0 ? barW * unlocked / total : 0;
+            if (fillW > 0) f1Plate(gfx, rx - 2, y, fillW, kF1OptH - 2, 2);
+            char progress[32];
+            snprintf(progress, sizeof(progress), "%d/%d", unlocked, total);
+            f1Text(rx + (rw - f1TextW(progress, 10)) / 2, y + 3, progress, kF1Section, 10, 15);
+        } else {
+            f1Plate(gfx, rx - 2, y, rw + 4, kF1OptH - 2, on ? 2 : 1);
+            f1Text(rx + (rw - f1TextW(value, 10)) / 2, y + 3, value, on ? kF1SelDark : kF1Off, 10, 15);
+        }
         y += kF1OptH;
         // Logros: su icono, a color si está conseguido y oscurecido si no.
         if (sOpenGroup == PC_SET_GROUP_ACHIEVEMENTS) {
@@ -6915,7 +6933,7 @@ void pc_settings_draw_achievement_toast(void) {
     char head[48], title[96];
     if (id >= 0) {
         const PcAchievementInfo& info = pc_achievement_info(id);
-        snprintf(head, sizeof(head), "Achievement unlocked  (%d pts)", info.points);
+        snprintf(head, sizeof(head), "Achievement unlocked");
         snprintf(title, sizeof(title), "%s", info.title);
     } else {
         snprintf(head, sizeof(head), "Achievements");
@@ -7904,7 +7922,7 @@ const GroupRow kDisplayRows[] = {
     { SRC_MAIN, ROW_RENDER_SCALE, "3D Resolution", "Detail of the 3D world. Higher looks sharper, lower runs faster." },
     { SRC_MAIN, ROW_REFRESH_RATE, "Refresh Rate", "How often the screen updates in fullscreen. Auto keeps your monitor's setting." },
     { SRC_MAIN, ROW_VSYNC, "Frame Sync (VSync)", "Waits for the screen before showing each frame. Stops tearing (a picture split in two), adds a little input delay." },
-    { SRC_MAIN, ROW_FPS_MODE, "FPS Mode", "Frames per second. 30 is the original and the most stable. 60 and 120 are smoother but experimental." },
+    { SRC_MAIN, ROW_FPS_MODE, "FPS Mode", "Frames per second. 30 is the original and the most stable. 60, 120 and Monitor (your screen's refresh rate) are smoother but experimental." },
 #if defined(VERSION_GPIP01)
     { SRC_MAIN, ROW_LANGUAGE, "Language", "Language of the game's text. Takes effect after a restart." },
 #endif
@@ -8329,9 +8347,8 @@ const char* pc_settings_row_help(int group, int row) {
         static char help[320];
         const PcAchievementInfo& info = pc_achievement_info(r->idx);
         const char* blocked = pc_achievements_blocked_reason();
-        snprintf(help, sizeof(help), "%s\n\n%s  %d pts.  Total: %d / %d  (%d / %d pts)%s%s", info.description,
-                 pc_achievement_unlocked(r->idx) ? "Unlocked." : "Locked.", info.points, pc_achievements_unlocked_count(),
-                 (int)PC_ACH_COUNT, pc_achievements_points(), pc_achievements_total_points(), blocked ? "\n\n" : "",
+        snprintf(help, sizeof(help), "%s\n\n%s%s%s", info.description,
+                 pc_achievement_unlocked(r->idx) ? "Unlocked." : "Locked.", blocked ? "\n\n" : "",
                  blocked ? blocked : "");
         return help;
     }
@@ -8416,7 +8433,7 @@ void pc_settings_row_value(int group, int row, char* out, unsigned long n) {
 #endif
             else snprintf(out, n, "A: reset");
             break;
-        case SRC_ACH: snprintf(out, n, "%d pts", pc_achievement_info(r->idx).points); break;
+        case SRC_ACH: break;
         case SRC_KEYS:
         case SRC_PADS: snprintf(out, n, "Open  >"); break;
         case SRC_RECENTER: {

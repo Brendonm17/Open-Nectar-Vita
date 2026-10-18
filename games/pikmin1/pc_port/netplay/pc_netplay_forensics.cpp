@@ -177,6 +177,146 @@ ObjKey key_of(const ObjRec& r)
 	return k;
 }
 
+namespace {
+void put_header(std::vector<uint8_t>& o, char c3, uint32_t attempt, uint64_t tick)
+{
+	o.push_back('D');
+	o.push_back('R');
+	o.push_back((uint8_t)c3);
+	o.push_back('1');
+	o.push_back(1);
+	o.push_back(0);
+	o.push_back(0);
+	o.push_back(0);
+	put32(o, attempt);
+	put64(o, tick);
+}
+bool get_header(const uint8_t* d, size_t len, char c3, uint32_t* attempt, uint64_t* tick)
+{
+	if (d == nullptr || len < 20) return false;
+	if (d[0] != 'D' || d[1] != 'R' || d[2] != (uint8_t)c3 || d[3] != '1' || d[4] != 1) return false;
+	*attempt = get32(d + 8);
+	*tick    = get64(d + 12);
+	return *attempt != 0;
+}
+void put_f32(std::vector<uint8_t>& o, float f)
+{
+	uint32_t v;
+	std::memcpy(&v, &f, 4);
+	put32(o, v);
+}
+float get_f32(const uint8_t* p)
+{
+	const uint32_t v = get32(p);
+	float f;
+	std::memcpy(&f, &v, 4);
+	return f;
+}
+} // namespace
+
+std::vector<uint8_t> encode_repair_plan(const RepairPlanMsg& m)
+{
+	std::vector<uint8_t> o;
+	put_header(o, 'P', m.attempt, m.tick);
+	return o;
+}
+
+bool decode_repair_plan(const uint8_t* d, size_t len, RepairPlanMsg* out)
+{
+	RepairPlanMsg m;
+	if (out == nullptr || len != 20 || !get_header(d, len, 'P', &m.attempt, &m.tick)) return false;
+	*out = m;
+	return true;
+}
+
+std::vector<uint8_t> encode_repair_data(const RepairDataMsg& m)
+{
+	std::vector<uint8_t> o;
+	const size_t n = std::min(m.recs.size(), kMaxObjsPerTick);
+	put_header(o, 'D', m.attempt, m.tick);
+	put32(o, (uint32_t)n);
+	for (size_t i = 0; i < n; ++i) {
+		const ObjRec& r = m.recs[i];
+		o.push_back(r.kind);
+		put32(o, (uint32_t)r.ord);
+		put32(o, (uint32_t)r.type);
+		put32(o, (uint32_t)r.state);
+		for (int k = 0; k < 4; ++k) put32(o, (uint32_t)r.aux[k]);
+		put_f32(o, r.health);
+		for (int k = 0; k < 13; ++k) put_f32(o, r.f[k]);
+		put64(o, r.hash);
+		put64(o, r.xhash);
+	}
+	return o;
+}
+
+bool decode_repair_data(const uint8_t* d, size_t len, RepairDataMsg* out)
+{
+	RepairDataMsg m;
+	if (out == nullptr || len < 24 || !get_header(d, len, 'D', &m.attempt, &m.tick)) return false;
+	const uint32_t n = get32(d + 20);
+	if (n > kMaxObjsPerTick || len - 24 != (size_t)n * kObjRecBytes) return false;
+	m.recs.resize(n);
+	size_t at = 24;
+	for (uint32_t i = 0; i < n; ++i) {
+		ObjRec& r = m.recs[i];
+		r.kind    = d[at];
+		r.ord     = (int32_t)get32(d + at + 1);
+		r.type    = (int32_t)get32(d + at + 5);
+		r.state   = (int32_t)get32(d + at + 9);
+		for (int k = 0; k < 4; ++k) r.aux[k] = (int32_t)get32(d + at + 13 + 4 * k);
+		r.health = get_f32(d + at + 29);
+		for (int k = 0; k < 13; ++k) r.f[k] = get_f32(d + at + 33 + 4 * k);
+		r.hash  = get64(d + at + 85);
+		r.xhash = get64(d + at + 93);
+		at += kObjRecBytes;
+	}
+	*out = std::move(m);
+	return true;
+}
+
+bool plan_repair(const std::vector<ObjRec>& local, const std::vector<ObjRec>& host, std::vector<size_t>* take,
+                 std::string* why)
+{
+	take->clear();
+	size_t nLocal[kKindCount] = {}, nHost[kKindCount] = {};
+	for (const ObjRec& r : local)
+		if (r.kind < kKindCount) ++nLocal[r.kind];
+	for (const ObjRec& r : host)
+		if (r.kind < kKindCount) ++nHost[r.kind];
+	for (int k = 0; k < kKindCount; ++k)
+		if (nLocal[k] != nHost[k]) {
+			*why = std::string(kind_name((uint8_t)k)) + " count differs (" + std::to_string(nLocal[k]) + " here, "
+			     + std::to_string(nHost[k]) + " on the host)";
+			return false;
+		}
+	if (local.size() != host.size()) {
+		*why = "record count differs";
+		return false;
+	}
+	// Both walks emit the kinds in the same order, so equal counts align the records.
+	for (size_t i = 0; i < host.size(); ++i) {
+		const ObjRec& a = local[i];
+		const ObjRec& b = host[i];
+		if (a.kind != b.kind || a.ord != b.ord) {
+			*why = "record order differs";
+			return false;
+		}
+		if (a.hash == b.hash) continue;
+		const std::string who = std::string(kind_name(b.kind)) + "#" + std::to_string(b.ord);
+		if (b.kind != kNavi && b.kind != kPiki && b.kind != kTeki) {
+			*why = who + " differs and only navi, piki and teki can be repaired";
+			return false;
+		}
+		if (a.type != b.type || a.state != b.state || std::memcmp(a.aux, b.aux, sizeof(a.aux)) != 0) {
+			*why = who + " differs in type, state or flags, not only in motion";
+			return false;
+		}
+		take->push_back(i);
+	}
+	return true;
+}
+
 unsigned differing_subs(const TickSubs& a, const TickSubs& b)
 {
 	unsigned mask = 0;

@@ -685,9 +685,9 @@ bool TRenderingProcessor::tagImage(u16 p1, const void* p2, u32 p3)
 			const char tag = kTags[firstByte];
 			if (pc_touch_has_icon_for_tag(tag) || tag == 'c') {
 				pcTouchIcon = true;
-				if (!mFlags.isSet(TProcFlag_Unk0)) {
-					pc_touch_mark_inline_icon(tag == 'c' ? 'x' : tag, mLocate.i.x + mXOffset,
-					                          mLocate.i.y + mYOffset + mFontHeightAdjusted * f32(mMainFont->getDescent()), width);
+				f32 iconX = mLocate.i.x + mXOffset, iconY = mLocate.i.y + mYOffset;
+				if (!mFlags.isSet(TProcFlag_Unk0) && pcInlineIconOrigin(iconX, iconY)) {
+					pc_touch_mark_inline_icon(tag == 'c' ? 'x' : tag, iconX, iconY + mFontHeightAdjusted * f32(mMainFont->getDescent()), width);
 				}
 				mLocate.i.x += width;
 				if (tag == 'c') snprintf(label, sizeof(label), "+drag");

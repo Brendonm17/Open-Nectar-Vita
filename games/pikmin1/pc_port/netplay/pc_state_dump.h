@@ -58,6 +58,11 @@ bool pc_state_dump_write_tick(FILE* f, uint64_t tick);
 // (pc_netplay_forensics::kNavi / kPiki / kTeki). False when there is none.
 bool pc_state_dump_test_nudge(int kind, int ord);
 
+// Partial desync repair: writes pos, rot, vel, drive, face and health from
+// each record into the live navi, piki or teki at (kind, ord). Writes nothing
+// and returns false when any record has no live object.
+bool pc_state_dump_apply_motion(const std::vector<pc_netplay_forensics::ObjRec>& recs);
+
 // Number of ticks whose rebuilt columns did not match the real hash (0 when the
 // dump covers the hash).
 unsigned pc_state_dump_coverage_mismatches(void);

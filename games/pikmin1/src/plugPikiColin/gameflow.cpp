@@ -28,7 +28,7 @@
 extern "C" float pc_gfx_get_current_aspect_ratio(void);
 // Netplay stage-load hook (pc_netplay_loadguard.h): strong-defined by
 // pc_netplay_session.cpp in netplay builds only, null otherwise.
-__attribute__((weak)) void pc_netplay_on_stage_load(void);
+void pc_netplay_on_stage_load(void);
 #endif
 
 /// Global game state.
