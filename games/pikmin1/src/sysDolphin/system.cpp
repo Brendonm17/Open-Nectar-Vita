@@ -13,6 +13,15 @@
 #include "timing/pc_render_packet.h"
 #include "mods/pc_vs_arena.h"
 #include "netplay/pc_netplay_det.h"
+#include "timing/pc_anim_timing.h"
+
+// Monitor FPS mode with vsync on, in the high-rate gameplay clamp and outside
+// netplay's own pacing.
+static bool pcVsyncLocked(int frameClamp)
+{
+	return frameClamp == 0 && pc_frame_vsync_lock() && pc_window_get_vsync_enabled() && !pc_netplay_unthrottled()
+	    && !pc_netplay_deterministic();
+}
 #include "netplay/pc_input_log.h"
 #include "netplay/pc_state_hash.h"
 #endif
@@ -397,6 +406,15 @@ void System::run(BaseApp* app)
 			schedule.interpolationAlpha = 1.0;
 			schedule.nextDeadline       = now + schedule.fixedDelta;
 			schedule.discardedTicks     = 0;
+		} else if (pcVsyncLocked(mFrameRate)) {
+			// Monitor FPS mode: one tick per loop turn; the buffer swap at the
+			// end of the tick blocks until the next refresh, so ticks land on
+			// refreshes exactly instead of drifting against them.
+			schedule.logicalTicks       = 1;
+			schedule.fixedDelta         = 1.0 / pc_frame_high_rate();
+			schedule.interpolationAlpha = 1.0;
+			schedule.nextDeadline       = now + schedule.fixedDelta;
+			schedule.discardedTicks     = 0;
 		} else {
 			schedule = frameScheduler.advance(now, mFrameRate);
 		}
@@ -564,10 +582,36 @@ void System::updateSysClock()
 	if (mDeltaTime < 0.0f) {
 		mDeltaTime = 0.0f;
 	}
-	
+#if PIKI_PC_PORT
+	if (pcVsyncLocked(mFrameRate)) {
+		// One tick per refresh, but game time stays the wall clock: not every
+		// tick ends in a swap that waits (loading, cutscene setup, a filling
+		// buffer queue), and counting those as a full refresh ran the game
+		// fast. Steady animation comes from the animation clock instead.
+		// More ticks than refreshes over half a second means the swap is not
+		// waiting for the display (Android's buffer queue can accept frames
+		// without blocking): ticks then arrive in irregular bursts, which
+		// judders worse than pacing. Drop the lock and let the scheduler pace.
+		static f32 sPcLockWindow = 0.0f;
+		static int sPcLockTicks  = 0;
+		sPcLockWindow += mDeltaTime;
+		sPcLockTicks++;
+		if (sPcLockWindow >= 0.5f) {
+			if (f32(sPcLockTicks) > 1.25f * f32(pc_frame_high_rate()) * sPcLockWindow) {
+				printf("[PC Port] vsync is not pacing the swap (%d ticks in %.2fs); monitor mode falls back to the frame scheduler\n",
+				       sPcLockTicks, sPcLockWindow);
+				pc_frame_set_vsync_lock(false);
+			}
+			sPcLockWindow = 0.0f;
+			sPcLockTicks  = 0;
+		}
+	}
+	pc_anim_clock_tick(mDeltaTime);
+#endif
+
 	int time = tick - mFpsSampleStart;
 	if (time > OS_TIMER_CLOCK) {
-		mFPS                 = (f64)(OS_TIMER_CLOCK * (mEngineFrames - mFramesAtSampleStart)) / time;
+		mFPS                 = (f64)OS_TIMER_CLOCK * (f64)(mEngineFrames - mFramesAtSampleStart) / (f64)time;
 		mFpsSampleStart      = tick;
 		mFramesAtSampleStart = mEngineFrames;
 	}

@@ -24,6 +24,7 @@
 #include "WeedsItem.h"
 #include "WorkObject.h"
 #include "settings/pc_settings.h"
+#include "timing/pc_anim_timing.h"
 #include "pc_coop.h"
 #include "bugprint.h"
 #include "gameflow.h"
@@ -2667,9 +2668,17 @@ void Piki::updateWalkAnimation()
 			enableMotionBlend();
 		}
 
+#if defined(PIKI_PC_PORT)
+		// Speed over the last 1/30 s and the motion cooldown in 30 Hz ticks, as
+		// for Olimar (pc_anim_timing.h): the original measures at 30 Hz.
+		f32 speed               = pc_anim_walk_speed(this, mLastAnimPosition.x, mLastAnimPosition.z, mSRT.t.x, mSRT.t.z, gsys->getFrameTime());
+		const int pcMotionCooldown = 4 * pc_anim_ticks_per_30hz(gsys->getFrameTime());
+#else
 		Vector3f sep = mSRT.t - mLastAnimPosition;
 		sep.y        = 0.0f;
 		f32 speed    = sep.length() / gsys->getFrameTime();
+		const int pcMotionCooldown = 4;
+#endif
 
 		int lowerMotionID = mPikiAnimMgr.getLowerAnimator().getCurrentMotionIndex();
 		if (lowerMotionID != PIKIANIM_Wait && lowerMotionID != PIKIANIM_Walk && lowerMotionID != PIKIANIM_Asibumi
@@ -2718,11 +2727,11 @@ void Piki::updateWalkAnimation()
 
 		if (newMotionID != lowerMotionID) {
 			if (lowerMotionID == PIKIANIM_Wait && newMotionID != PIKIANIM_Asibumi) {
-				_480 = 4;
+				_480 = pcMotionCooldown;
 			}
 
 			if (lowerMotionID != PIKIANIM_Asibumi && newMotionID == PIKIANIM_Wait) {
-				_480 = 4;
+				_480 = pcMotionCooldown;
 			}
 
 			if (newMotionID != _484) {
@@ -2732,7 +2741,7 @@ void Piki::updateWalkAnimation()
 				_480++;
 			}
 
-			if (_480 < 4) {
+			if (_480 < pcMotionCooldown) {
 				return;
 			}
 		}

@@ -12,6 +12,7 @@
 #include "settings/pc_settings.h"
 #include "mods/pc_hd_models.h"
 #include "gl/pc_gfx.h"
+#include "timing/pc_anim_timing.h"
 #include "netplay/pc_netplay_camlead.h"
 #include "netplay/pc_netplay_present.h"
 #if PIKI_PC_TOUCH
@@ -1050,9 +1051,17 @@ void Navi::updateWalkAnimation()
 {
 	mCollisionRadius = NAVI_PARM(mGroundCollisionRadius);
 
+#if defined(PIKI_PC_PORT)
+	// Speed over the last 1/30 s and cooldowns in 30 Hz ticks: see
+	// pc_anim_timing.h. Both are the original measure at 30 Hz.
+	f32 moveSpeed = pc_anim_walk_speed(this, mWalkAnimPrevPos.x, mWalkAnimPrevPos.z, mSRT.t.x, mSRT.t.z, gsys->getFrameTime());
+	const int pcMotionCooldown = 4 * pc_anim_ticks_per_30hz(gsys->getFrameTime());
+#else
 	Vector3f moveDelta    = mSRT.t - mWalkAnimPrevPos;
 	moveDelta.y           = 0.0f;
 	f32 moveSpeed         = moveDelta.length() / gsys->getFrameTime();
+	const int pcMotionCooldown = 4;
+#endif
 	int currLowerMotionID = mNaviAnimMgr.getLowerAnimator().getCurrentMotionIndex();
 	if (_30) {
 		moveSpeed = 0.0f;
@@ -1104,11 +1113,11 @@ void Navi::updateWalkAnimation()
 
 	if (desiredLowerMotionID != currLowerMotionID) {
 		if (currLowerMotionID == PIKIANIM_Wait && desiredLowerMotionID != PIKIANIM_Asibumi) {
-			mLowerMotionCooldown = 4;
+			mLowerMotionCooldown = pcMotionCooldown;
 		}
 
 		if (currLowerMotionID != PIKIANIM_Asibumi && desiredLowerMotionID == PIKIANIM_Wait) {
-			mLowerMotionCooldown = 4;
+			mLowerMotionCooldown = pcMotionCooldown;
 		}
 
 		if (desiredLowerMotionID != mPendingLowerMotionId) {
@@ -1118,7 +1127,7 @@ void Navi::updateWalkAnimation()
 			mLowerMotionCooldown++;
 		}
 
-		if (mLowerMotionCooldown < 4) {
+		if (mLowerMotionCooldown < pcMotionCooldown) {
 			return;
 		}
 	}
@@ -4221,6 +4230,17 @@ void Navi::draw(Graphics& gfx)
 	STACK_PAD_VAR(1);
 	Matrix4f viewMtx;
 	gfx.mCamera->mLookAtMtx.multiplyTo(mWorldMtx, viewMtx);
+#if defined(PIKI_PC_PORT)
+	// Secondary motion: Olimar leans into starts, stops and turns
+	// (pc_anim_timing.h). Only the drawn pose tilts; mWorldMtx stays as is.
+	if (!mRope) {
+		if (PcSecondaryState* pcSec = pc_anim_secondary(this, mSRT.t.x, mSRT.t.z, pc_anim_dt(gsys->getFrameTime()), gsys->mTotalFrames)) {
+			Matrix4f leaned = mWorldMtx;
+			pc_tilt_world(leaned.mMtx, pcSec->lean.tx, pcSec->lean.tz);
+			gfx.mCamera->mLookAtMtx.multiplyTo(leaned, viewMtx);
+		}
+	}
+#endif
 
 	mNaviAnimMgr.updateContext();
 	mapMgr->getLight(mSRT.t.x, mSRT.t.z);

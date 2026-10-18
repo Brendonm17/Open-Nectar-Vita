@@ -899,6 +899,12 @@ void Graphics::initRender(int screenWidth, int screenHeight)
 	mActiveLightMask = 0;
 	mLight.initCore("");
 	resetMatrixBuffer();
+#if defined(PIKI_PC_PORT)
+	// The animation presentation pose has its own matrix bank. Reset it with
+	// the normal bank every rendered frame; netplay may reset it once more when
+	// it begins its explicit second pass.
+	resetPresentBuffer();
+#endif
 	resetCacheBuffer();
 }
 

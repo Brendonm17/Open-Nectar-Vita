@@ -2,6 +2,7 @@
 #include "port/jaudio_host.h"
 #endif
 #include "pc_window.h"
+#include "timing/pc_frame_scheduler.h"
 #include "pc_speedrun.h"
 #include "pc_gyro.h"
 #include "pc_icon.h"
@@ -230,6 +231,9 @@ static std::chrono::steady_clock::time_point sNextPresentDeadline;
 // Settings-menu video state (PC only).
 static int sDisplayMode = PC_WINDOW_FULLSCREEN_WINDOWED;
 static bool sVsyncEnabled = true;   // presentation pacing on/off
+// Actual interval requested from the GL driver. This is separate from the
+// GameCube-style logical interval (0=monitor/high rate, 1=60, 2=30).
+static int sDriverSwapInterval = 0;
 static char sLastVideoError[256] = { 0 };
 
 // Keyboard remapping state (PC only).
@@ -915,6 +919,7 @@ bool pc_window_init(const char* title, int width, int height) {
     // driver VSync with that limiter caused some compositor/Mesa paths to wait
     // two or three refreshes (the world map spent ~51 ms in swap alone).
     SDL_GL_SetSwapInterval(0);
+    sDriverSwapInterval = 0;
     
     // Enable relative mouse mode for cursor control
     // We'll toggle this with a key press (e.g., Tab) or when the game starts
@@ -1552,14 +1557,17 @@ void pc_window_swap_buffers(void) {
         // unthrottled replay bypasses it too, and a netplay session owns the
         // single 30 Hz schedule (two stacked pacers would lose slots).
         const bool netplayOwnsPacing = pc_netplay_session_active != nullptr && pc_netplay_session_active();
-        if (sVsyncEnabled && !pc_netplay_unthrottled() && !netplayOwnsPacing) {
+        // Monitor mode's vsync lock: the swap itself paces one tick per refresh;
+        // a software deadline on top would only make it miss refreshes.
+        const bool vsyncLocked = sLogicalRetraceInterval == 0 && pc_frame_vsync_lock();
+        if (sVsyncEnabled && !pc_netplay_unthrottled() && !netplayOwnsPacing && !vsyncLocked) {
             // The interval is the game's setFrameClamp: retraces per logical
             // frame against a 60 Hz base, so 1 is 60 Hz and 2 is 30 Hz. The
-            // port adds 0 for 120 Hz, which has no 60 Hz divisor. Mirror
+            // port adds 0 for 120 Hz (or the monitor's rate), which has no 60 Hz divisor. Mirror
             // PcFrameScheduler::deltaForClamp, or the 120 FPS mode simulates
             // at 120 and then presents at 60.
             const auto targetDuration = std::chrono::duration<double>(
-                sLogicalRetraceInterval == 0 ? (1.0 / 120.0)
+                sLogicalRetraceInterval == 0 ? (1.0 / pc_frame_high_rate())
                                              : (sLogicalRetraceInterval / 60.0));
             const auto period = std::chrono::duration_cast<std::chrono::steady_clock::duration>(targetDuration);
             auto now = std::chrono::steady_clock::now();
@@ -1588,10 +1596,24 @@ void pc_window_set_swap_interval(int interval) {
     // 0 is meaningful here: it is the port's 120 Hz mode. Only negatives are
     // nonsense.
     if (interval < 0) interval = 1;
-    if (sLogicalRetraceInterval == interval) return;
-    // Use one pacing mechanism only. SDL_GL_SwapWindow must not add a second,
-    // driver-controlled wait on top of the emulated 60 Hz VI interval.
-    SDL_GL_SetSwapInterval(0);
+    // The monitor-rate mode is the one case where the display itself is the
+    // clock: swap interval 1 gives us phase-aligned frames instead of a timer
+    // which merely averages the same number of frames per second. Fixed 30/60
+    // modes keep the driver wait off and use the existing VI/software pacing.
+    const int driverInterval = (interval == 0 && pc_frame_vsync_lock() && sVsyncEnabled) ? 1 : 0;
+    if (sLogicalRetraceInterval == interval && sDriverSwapInterval == driverInterval) return;
+    if (SDL_GL_SetSwapInterval(driverInterval) == 0) {
+        sDriverSwapInterval = driverInterval;
+    } else {
+        // Some compositors/drivers reject swap control. Leave the real state
+        // at zero; the lock watchdog will disable monitor-vsync mode and the
+        // software deadline below will take over.
+        sDriverSwapInterval = 0;
+        if (driverInterval != 0) {
+            printf("[PC Port] Driver VSync unavailable: %s; using software monitor pacing\n", SDL_GetError());
+            pc_frame_set_vsync_lock(false);
+        }
+    }
     sLogicalRetraceInterval = interval;
     sNextPresentDeadline = std::chrono::steady_clock::time_point {};
 }
@@ -1726,6 +1748,18 @@ double pc_window_get_refresh_rate(void) {
 
 void pc_window_set_vsync_enabled(bool enabled) {
     sVsyncEnabled = enabled;
+    // Re-evaluate the driver interval even if the logical clamp did not
+    // change. This also turns real VSync off immediately when the user does.
+    const int wanted = (sLogicalRetraceInterval == 0 && pc_frame_vsync_lock() && sVsyncEnabled) ? 1 : 0;
+    if (wanted != sDriverSwapInterval) {
+        if (SDL_GL_SetSwapInterval(wanted) == 0) {
+            sDriverSwapInterval = wanted;
+        } else if (wanted != 0) {
+            sDriverSwapInterval = 0;
+            pc_frame_set_vsync_lock(false);
+            printf("[PC Port] Driver VSync unavailable: %s; using software monitor pacing\n", SDL_GetError());
+        }
+    }
     sNextPresentDeadline = std::chrono::steady_clock::time_point {};
 }
 

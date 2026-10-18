@@ -13,6 +13,7 @@
 #include "mods/pc_hd_models.h"
 #include "netplay/pc_netplay_policy.h"
 #include "netplay/pc_netplay_present.h"
+#include "timing/pc_anim_timing.h"
 #endif
 #include "PikiState.h"
 #include "Shape.h"
@@ -703,6 +704,19 @@ void ViewPiki::refresh(Graphics& gfx)
 	}
 
 	gfx.mCamera->mLookAtMtx.multiplyTo(mWorldMtx, mtx);
+#if defined(PIKI_PC_PORT)
+	// Secondary motion (pc_anim_timing.h): the Pikmin leans into starts, stops
+	// and turns, and its leaf lags behind. Drawn pose only; free on the ground.
+	PcSecondaryState* pcSec = nullptr;
+	if (!mStickTarget && !mRope && getState() != PIKISTATE_Swallowed) {
+		pcSec = pc_anim_secondary(this, mSRT.t.x, mSRT.t.z, pc_anim_dt(gsys->getFrameTime()), gsys->mTotalFrames);
+		if (pcSec) {
+			Matrix4f leaned = mWorldMtx;
+			pc_tilt_world(leaned.mMtx, pcSec->lean.tx, pcSec->lean.tz);
+			gfx.mCamera->mLookAtMtx.multiplyTo(leaned, mtx);
+		}
+	}
+#endif
 
 	if (getState() == PIKISTATE_Swallowed && mSwallowMouthPart) {
 		Matrix4f mouthMtx = mSwallowMouthPart->getJointMatrix();
@@ -720,6 +734,12 @@ void ViewPiki::refresh(Graphics& gfx)
 
 	mPikiAnimMgr.updateContext();
 	mPikiShape->mShape->updateAnim(gfx, mtx, nullptr, this);
+#if defined(PIKI_PC_PORT)
+	// Joint 6 carries the leaf, bud or flower (see Navi's Pikmin drawing).
+	if (pcSec && mPikiShape->mShape->mJointCount > 6) {
+		pc_tilt_view(mPikiShape->mShape->getAnimMatrix(6).mMtx, gfx.mCamera->mLookAtMtx.mMtx, pcSec->leaf.tx, pcSec->leaf.tz);
+	}
+#endif
 
 	if ((AIPerf::useLOD && _528 < 1200.0f && aiCullable()) || !AIPerf::useLOD) {
 		bool updateHeadPose = (mLookatPosPtr || mLookTimer) && getState() != PIKISTATE_Swallowed;

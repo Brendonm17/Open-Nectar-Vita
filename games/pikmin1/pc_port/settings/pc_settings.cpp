@@ -92,7 +92,7 @@ struct PcConfig {
     float renderScale = 2.0f / 3.0f;                 // internal 3D resolution multiplier
     int aspectRatioMode = 0;                         // 0=auto, 1=4:3, 2=16:10, 3=16:9, 4=21:9
 
-    // FPS mode (0=30fps, 1=60fps, 2=120fps experimental)
+    // FPS mode (0=30fps, 1=60fps, 2=120fps experimental, 3=monitor refresh rate)
     int fpsMode = 0;
 
     // Control mode (0=Classic, 1=Mouse Cursor)
@@ -1355,7 +1355,7 @@ void loadConfig() {
         else if (key == "fpsMode") {
             sConfig.fpsMode = atoi(val.c_str());
             if (sConfig.fpsMode < 0) sConfig.fpsMode = 0;
-            if (sConfig.fpsMode > 2) sConfig.fpsMode = 2;
+            if (sConfig.fpsMode > 3) sConfig.fpsMode = 3;
         }
         else if (key == "chainActions") {
             sConfig.chainActions = atoi(val.c_str()) ? 1 : 0;
@@ -2975,7 +2975,11 @@ void mainRowValue(int row, char* out, size_t n) {
 
     const char* fpsModeNames[3] = { "30 FPS (stable)", "60 FPS (experimental)", "120 FPS (experimental)" };
     char fpsModeBuf[32];
-    snprintf(fpsModeBuf, sizeof(fpsModeBuf), "%s", fpsModeNames[sPending.fpsMode >= 0 && sPending.fpsMode < 3 ? sPending.fpsMode : 0]);
+    if (sPending.fpsMode == 3) {
+        snprintf(fpsModeBuf, sizeof(fpsModeBuf), "Monitor (%.0f Hz)", pc_window_get_refresh_rate());
+    } else {
+        snprintf(fpsModeBuf, sizeof(fpsModeBuf), "%s", fpsModeNames[sPending.fpsMode >= 0 && sPending.fpsMode < 3 ? sPending.fpsMode : 0]);
+    }
 
     char valueBuf[ROW_DISPLAY_COUNT][128];
     snprintf(valueBuf[0], sizeof(valueBuf[0]), "%s",
@@ -3096,9 +3100,9 @@ void mainRowChange(int row, bool left, bool right, bool ok) {
         break;
     case ROW_FPS_MODE:
         if (left) {
-            sPending.fpsMode = (sPending.fpsMode - 1 + 3) % 3;
+            sPending.fpsMode = (sPending.fpsMode - 1 + 4) % 4;
         } else if (right) {
-            sPending.fpsMode = (sPending.fpsMode + 1) % 3;
+            sPending.fpsMode = (sPending.fpsMode + 1) % 4;
         }
         break;
 #if defined(VERSION_GPIP01)
@@ -7210,8 +7214,8 @@ void pc_settings_netplay_session_begin(const char* adoptConfigText) {
             sNetplayDiskConfig = sConfig;
             sNetplayAdopted    = true;
         }
-        printf("[PC Settings] netplay session: %d FPS mode -> 30 FPS for the session (the netplay tick is 30 Hz)\n",
-               sConfig.fpsMode == 1 ? 60 : 120);
+        printf("[PC Settings] netplay session: FPS mode %d -> 30 FPS for the session (the netplay tick is 30 Hz)\n",
+               sConfig.fpsMode);
         sConfig.fpsMode  = 0;
         sPending.fpsMode = 0;
     }

@@ -24,6 +24,8 @@
 #include "SoundMgr.h"
 #include "gameflow.h"
 #include "timing/pc_tick_profiler.h"
+#include "timing/pc_frame_scheduler.h"
+#include "pc_window.h"
 #include <chrono>
 
 #include "settings/pc_settings.h"
@@ -3431,9 +3433,12 @@ NewPikiGameSection::NewPikiGameSection()
 	int frameClampValue = 2;  // Default to 30 fps (clamp=2)
 	if (fpsModeValue == 1) {
 		frameClampValue = 1;  // 60 fps
-	} else if (fpsModeValue == 2) {
-		frameClampValue = 0;  // 120 Hz ticks; 0 is a port-only value, the game never sets it
+	} else if (fpsModeValue == 2 || fpsModeValue == 3) {
+		frameClampValue = 0;  // high-rate ticks; 0 is a port-only value, the game never sets it
 	}
+	// fpsMode=3 ticks at the display's refresh rate instead of a fixed 120 Hz.
+	pc_frame_set_high_rate(fpsModeValue == 3 ? pc_window_get_refresh_rate() : 120.0);
+	pc_frame_set_vsync_lock(fpsModeValue == 3);
 	gsys->setFrameClamp(frameClampValue);
 
 #if defined(WIN32) || defined(DEVELOP)

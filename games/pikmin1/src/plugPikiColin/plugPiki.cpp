@@ -373,6 +373,11 @@ int PlugPikiApp::idle()
 
 	const double renderStart = profiling ? clockNow() : 0.0;
 	renderall();
+#if defined(PIKI_PC_PORT)
+	// Character animation may have redirected shared shapes to render-only
+	// matrices. Return them to the authoritative pose before the next update.
+	pc_netplay_present_restore_all_shapes();
+#endif
 	if (profiling) {
 		pc_tick_profiler_record(kPcTickRenderAll, clockNow() - renderStart);
 		pc_gfx_flush_submit_stats();
