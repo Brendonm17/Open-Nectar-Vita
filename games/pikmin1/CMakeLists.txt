@@ -902,6 +902,7 @@ if(ANDROID AND NOT TARGET nectar_launcher)
         pc_port/launcher/bti_decode.cpp
         pc_port/launcher/settings_model.cpp
         pc_port/launcher/release_update.cpp
+        pc_port/launcher/texture_pack_download.cpp
         pc_port/launcher/installer_ui.cpp
         pc_port/launcher/launcher_platform_android.cpp
         pc_port/pc_icon.cpp
@@ -913,7 +914,7 @@ if(ANDROID AND NOT TARGET nectar_launcher)
         "${LAUNCHER_EMBED_DIR}"
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb
         ${SDL2_INCLUDE_DIRS})
-    set(OPEN_NECTAR_VERSION "0.9.3" CACHE STRING "Open Nectar version of this build (GitHub release tag)")
+    set(OPEN_NECTAR_VERSION "1.0" CACHE STRING "Open Nectar version of this build (GitHub release tag)")
     target_compile_definitions(nectar_launcher PRIVATE OPEN_NECTAR_VERSION="${OPEN_NECTAR_VERSION}")
     target_compile_options(nectar_launcher PRIVATE ${NATIVE_COMPILE_OPTIONS})
     target_link_libraries(nectar_launcher PRIVATE launcher_imgui_android pikmin_disc_image ${SDL2_LIBRARIES} GLESv3 EGL log android)
@@ -969,6 +970,7 @@ if(PIKMIN_BUILD_LAUNCHER)
         pc_port/launcher/bti_decode.cpp
         pc_port/launcher/settings_model.cpp
         pc_port/launcher/release_update.cpp
+        pc_port/launcher/texture_pack_download.cpp
         pc_port/launcher/installer_ui.cpp
         pc_port/pc_icon.cpp
         ${LAUNCHER_PLATFORM_SOURCE}
@@ -983,7 +985,7 @@ if(PIKMIN_BUILD_LAUNCHER)
     target_link_libraries(pikmin_launcher PRIVATE launcher_imgui)
     # Versión que el launcher compara con el último release de GitHub para
     # avisar y actualizarse. Súbela en cada release (la etiqueta de GitHub).
-    set(OPEN_NECTAR_VERSION "0.9.3" CACHE STRING "Open Nectar version of this build (GitHub release tag)")
+    set(OPEN_NECTAR_VERSION "1.0" CACHE STRING "Open Nectar version of this build (GitHub release tag)")
     target_compile_definitions(pikmin_launcher PRIVATE OPEN_NECTAR_VERSION="${OPEN_NECTAR_VERSION}")
     if (WIN32)
         target_sources(pikmin_launcher PRIVATE packaging/windows/nectar.rc)

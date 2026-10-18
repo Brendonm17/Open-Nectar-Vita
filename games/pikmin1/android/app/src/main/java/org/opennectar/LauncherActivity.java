@@ -143,6 +143,17 @@ public class LauncherActivity extends SDLActivity {
         }
     }
 
+    /** Instala el pack de texturas que descargó el launcher (botón HD
+     *  textures). Devuelve null si va bien o el error. */
+    public String installTexturePack(String zipPath, String gameDir) {
+        try {
+            TexturePack.installZipFile(new File(zipPath), new File(gameDir));
+            return null;
+        } catch (Exception e) {
+            return e.getMessage() == null ? e.toString() : e.getMessage();
+        }
+    }
+
     /** Abre una dirección en el navegador (el APK de una versión nueva). */
     public void openUrl(String url) {
         runOnUiThread(() -> {

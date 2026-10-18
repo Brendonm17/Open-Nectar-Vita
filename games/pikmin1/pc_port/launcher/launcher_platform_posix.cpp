@@ -276,7 +276,7 @@ bool downloadFile(const std::string& url, const fs::path& destination, std::stri
         // Sin salida: el launcher no tiene dónde mostrarla.
         const int null = open("/dev/null", O_WRONLY);
         if (null >= 0) { dup2(null, STDOUT_FILENO); dup2(null, STDERR_FILENO); }
-        execlp("curl", "curl", "-fsSL", "--max-time", "30", "-o", partial.c_str(), url.c_str(), static_cast<char*>(nullptr));
+        execlp("curl", "curl", "-fsSL", "--connect-timeout", "30", "--speed-limit", "1024", "--speed-time", "60", "-o", partial.c_str(), url.c_str(), static_cast<char*>(nullptr));
         _exit(127);
     }
     int status = 0;

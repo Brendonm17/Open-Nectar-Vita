@@ -52,12 +52,12 @@ namespace fs = std::filesystem;
 #define GL_TEXTURE_MAX_LEVEL 0x813D
 #endif
 
-// GameIDs de Pikmin 1: el launcher conoce la región; aquí se admite el id de 6
+// GameIDs de Pikmin 2: el launcher conoce la región; aquí se admite el id de 6
 // letras, el de 3 (el prefijo de región libre que Dolphin acepta, incluyendo
-// el "GPI" a secas que usan los packs de la calle) y "all" (comodín), sin
+// el "GPV" a secas que usan los packs de la calle) y "all" (comodín), sin
 // distinguir mayúsculas/minúsculas.
 static const char* const kGameIdCandidates[] = {
-    "GPIE01", "GPIP01", "GPIJ01", "GPIE", "GPIP", "GPIJ", "GPI", "all",
+    "GPVE01", "GPVP01", "GPVJ01", "GPVE", "GPVP", "GPVJ", "GPV", "all",
 };
 
 static bool sRequested = false;
@@ -282,7 +282,7 @@ void pc_texpack_init(void)
     if (packDirs.empty()) {
         printf("[PC TexPack] no GPIE01/GPI*/all folder under %s\n", root.string().c_str());
         snprintf(sStatus, sizeof(sStatus), "pack folder %s not found",
-                 sSelectedPack.empty() ? "GPI*" : sSelectedPack.c_str());
+                 sSelectedPack.empty() ? "GPV*" : sSelectedPack.c_str());
         return;
     }
 

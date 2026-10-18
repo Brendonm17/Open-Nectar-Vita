@@ -16,6 +16,7 @@ enum class HubAction {
     Install, // botón Instalar (pide la ISO)
     Update,  // botón Actualizar (pide la carpeta de la instalación anterior)
     MapEditor, // botón del editor de mapas VS (Pikmin 1 instalado)
+    TexturePack, // botón HD textures: descarga e instala el pack de ese juego
 };
 
 // Juegos que muestra la pantalla principal; los dos se instalan desde su disco.

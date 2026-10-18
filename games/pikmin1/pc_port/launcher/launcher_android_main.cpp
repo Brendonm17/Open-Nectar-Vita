@@ -14,6 +14,7 @@
 #include "fd_stream.h"
 #include "gamecube_image.h"
 #include "launcher_gui.h"
+#include "texture_pack_download.h"
 
 #include <SDL2/SDL.h>
 #include <android/log.h>
@@ -91,6 +92,44 @@ void startGame(const std::string& library, const fs::path& directory)
     }
     env->DeleteLocalRef(cls);
     env->DeleteLocalRef(activity);
+}
+
+// Botón HD textures: el zip lo extrae LauncherActivity.installTexturePack
+// (TexturePack.java), igual que el instalador del menú del juego.
+bool installTexturePackZip(const fs::path& zip, const std::string& gameDir, std::string& error)
+{
+    JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
+    jobject activity = (jobject)SDL_AndroidGetActivity();
+    if (!env || !activity) {
+        error = "no activity";
+        return false;
+    }
+    jclass cls = env->GetObjectClass(activity);
+    jmethodID method = env->GetMethodID(cls, "installTexturePack", "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
+    bool ok = false;
+    if (method) {
+        jstring jZip = env->NewStringUTF(zip.c_str());
+        jstring jDir = env->NewStringUTF(gameDir.c_str());
+        jstring jError = (jstring)env->CallObjectMethod(activity, method, jZip, jDir);
+        const bool threw = env->ExceptionCheck();
+        if (threw) env->ExceptionClear();
+        ok = !threw && jError == nullptr;
+        if (threw && !jError) error = "install failed";
+        if (jError) {
+            const char* text = env->GetStringUTFChars(jError, nullptr);
+            error = text ? text : "install failed";
+            env->ReleaseStringUTFChars(jError, text);
+            env->DeleteLocalRef(jError);
+        }
+        env->DeleteLocalRef(jZip);
+        env->DeleteLocalRef(jDir);
+    } else {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        error = "install not available";
+    }
+    env->DeleteLocalRef(cls);
+    env->DeleteLocalRef(activity);
+    return ok;
 }
 
 // ── Estado de cada juego ──────────────────────────────────────────────────
@@ -229,6 +268,14 @@ int main(int argc, char** argv)
             if (!state.games[index].installed) continue;
             startGame(state.games[index].executable, state.games[index].directory);
             return 0;
+        }
+        if (choice.action == HubAction::TexturePack) {
+            if (!state.games[index].installed) continue;
+            const std::string gameDir = state.games[index].directory;
+            runTexturePackDownload(hub, index, gameDir, [&gameDir](const fs::path& zip, std::string& failure) {
+                return installTexturePackZip(zip, gameDir, failure);
+            });
+            continue;
         }
         if (choice.action == HubAction::Update) {
             // Android: la app se actualiza entera; el APK nuevo se descarga

@@ -1,7 +1,9 @@
 #pragma once
 
 #include <filesystem>
+#include <cstdint>
 #include <string>
+#include <vector>
 
 namespace pikmin {
 namespace launcher {
@@ -38,6 +40,18 @@ bool cachedRelease(const std::string& launcherName, std::filesystem::path& packa
 
 // Borra lo descargado para actualizar, una vez instalado.
 void forgetCachedRelease();
+
+// Packs de texturas HD que el launcher descarga a petición (no van en el
+// release). `folder` es la carpeta que crean en Load/Textures.
+struct TexturePackDownload {
+    const char* label;  // "4K", "1080p" o "HD"
+    const char* url;    // descarga directa
+    std::uint64_t bytes; // tamaño del zip, para el progreso y el espacio libre
+};
+
+// Packs de este sistema para un juego (0 = Pikmin 1, 1 = Pikmin 2).
+std::vector<TexturePackDownload> texturePackDownloads(int game);
+const char* texturePackFolder(int game);
 
 } // namespace launcher
 } // namespace pikmin

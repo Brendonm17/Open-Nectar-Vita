@@ -92,6 +92,22 @@ bool findPackage(const fs::path& root, const std::string& launcherName, fs::path
 
 const char* currentVersion() { return OPEN_NECTAR_VERSION; }
 
+std::vector<TexturePackDownload> texturePackDownloads(int game)
+{
+#ifdef __ANDROID__
+    // Android: PNG, el formato que el móvil carga sin problemas.
+    if (game == 0) return { { "HD", "https://drive.usercontent.google.com/download?export=download&confirm=t&id=1870dA11T9FpuLQDnI3axoCJ_Eh5ptgWP", 925049459ull } };
+    return { { "HD", "https://drive.usercontent.google.com/download?export=download&confirm=t&id=1blzsLSFBr617h-gP7lvp_7HqsLRyQWzl", 1072944206ull } };
+#else
+    if (game == 0) return { { "4K", "https://drive.usercontent.google.com/download?export=download&confirm=t&id=1leAGZmK1Ay_W3KwtAyyyBWZzyw5Wy3Db", 1240690969ull },
+                             { "1080p", "https://drive.usercontent.google.com/download?export=download&confirm=t&id=1eZQmHBen1EuZcIUzfAEZUJl7TeL93ClX", 560393581ull } };
+    return { { "4K", "https://drive.usercontent.google.com/download?export=download&confirm=t&id=1hsm2XnnZ0e8U-Ikjuxt5NP8xc-1boIEF", 3068646745ull },
+             { "1080p", "https://drive.usercontent.google.com/download?export=download&confirm=t&id=1gcjtuP09gGoFxs41iNqfiMsaZjE4ddqS", 1116177778ull } };
+#endif
+}
+
+const char* texturePackFolder(int game) { return game == 0 ? "GPI" : "GPV"; }
+
 bool isNewerVersion(const std::string& candidate, const std::string& current)
 {
     std::vector<long> a = versionParts(candidate), b = versionParts(current);

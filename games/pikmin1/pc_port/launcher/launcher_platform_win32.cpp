@@ -253,7 +253,7 @@ bool downloadFile(const std::string& url, const fs::path& destination, std::stri
     // curl.exe viene con Windows 10 1803 y posteriores, en System32.
     const fs::path partial = destination.wstring() + L".part";
     const std::wstring wideUrl(url.begin(), url.end()); // las URL son ASCII
-    std::wstring command = L"curl.exe -fsSL --max-time 30 -o \"" + partial.wstring() + L"\" \"" + wideUrl + L"\"";
+    std::wstring command = L"curl.exe -fsSL --connect-timeout 30 --speed-limit 1024 --speed-time 60 -o \"" + partial.wstring() + L"\" \"" + wideUrl + L"\"";
     STARTUPINFOW startup {};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process {};

@@ -915,29 +915,21 @@ struct Hub {
             centredText(ImGui::GetWindowDrawList(), fonts.title, 28.0f, ImVec2(x + cardW * 0.5f, below + 14.0f),
                         col(kOrange), names[i]);
             const bool isPikmin2 = i == int(HubGame::Pikmin2);
-            const bool comingSoon = false;
-            // Ya instalado solo tiene sentido actualizar: un botón a lo ancho.
             const bool installed = state.games[i].installed;
-            // Pikmin 1 instalado y con editor: Actualizar y Editor de mapas.
-            const bool editor = installed && !isPikmin2 && !state.mapEditor.empty();
-            const float buttonW = installed && !editor ? cardW : (cardW - 12.0f) * 0.5f;
+            // Debajo de cada portada: Install o, ya instalado, HD textures
+            // (y en Pikmin 1, Map editor a su lado).
             ImGui::PushID(i);
             ImGui::SetCursorScreenPos(ImVec2(x, below + 38.0f));
-            if (!installed && glassButton("Install", ImVec2(buttonW, 44.0f), false, comingSoon)) choose(HubAction::Install, HubGame(i));
-            ImGui::SetCursorScreenPos(ImVec2(installed && !editor ? x : x + (installed ? 0.0f : buttonW + 12.0f), below + 38.0f));
-            // Con versión nueva en GitHub el botón lo dice ("Update to 1.0").
-            std::string updateLabel = isPikmin2 ? "Fusion build" : "Update";
-            if (!isPikmin2 && installed && releaseCheck && releaseCheck->done) {
-                std::lock_guard<std::mutex> lock(releaseCheck->mutex);
-                if (releaseCheck->newer) updateLabel = "Update to " + releaseCheck->latest.version;
-            }
-            if (glassButton(updateLabel.c_str(), ImVec2(buttonW, 44.0f), updateLabel != "Update",
-                            comingSoon || isPikmin2)) {
-                choose(HubAction::Update, HubGame(i));
-            }
-            if (editor) {
-                ImGui::SetCursorScreenPos(ImVec2(x + buttonW + 12.0f, below + 38.0f));
-                if (glassButton("Map editor", ImVec2(buttonW, 44.0f))) choose(HubAction::MapEditor, HubGame(i));
+            if (!installed) {
+                if (glassButton("Install", ImVec2(cardW, 44.0f))) choose(HubAction::Install, HubGame(i));
+            } else {
+                const bool editor = !isPikmin2 && !state.mapEditor.empty();
+                const float buttonW = editor ? (cardW - 12.0f) * 0.5f : cardW;
+                if (editor) {
+                    if (glassButton("Map editor", ImVec2(buttonW, 44.0f))) choose(HubAction::MapEditor, HubGame(i));
+                    ImGui::SetCursorScreenPos(ImVec2(x + buttonW + 12.0f, below + 38.0f));
+                }
+                if (glassButton("HD textures", ImVec2(buttonW, 44.0f))) choose(HubAction::TexturePack, HubGame(i));
             }
 #if PIKMIN_LAUNCHER_NETPLAY
             // Online co-op: two captains on two PCs (netplay builds).
@@ -955,6 +947,23 @@ struct Hub {
             }
 #endif
             ImGui::PopID();
+        }
+
+        // Un solo Update, centrado entre los dos juegos y debajo de sus botones.
+        if (state.games[int(HubGame::Pikmin1)].installed) {
+            float y = cardY + cardH + 22.0f + 38.0f + 44.0f + 32.0f;
+#if PIKMIN_LAUNCHER_NETPLAY
+            if (state.netplay) y += 2.0f * (44.0f + 10.0f);
+#endif
+            // Con versión nueva en GitHub el botón lo dice ("Update to 1.0").
+            std::string updateLabel = "Update";
+            if (releaseCheck && releaseCheck->done) {
+                std::lock_guard<std::mutex> lock(releaseCheck->mutex);
+                if (releaseCheck->newer) updateLabel = "Update to " + releaseCheck->latest.version;
+            }
+            ImGui::SetCursorScreenPos(ImVec2((size.x - cardW) * 0.5f, y));
+            if (glassButton(updateLabel.c_str(), ImVec2(cardW, 44.0f), updateLabel != "Update"))
+                choose(HubAction::Update, HubGame::Pikmin1);
         }
     }
 

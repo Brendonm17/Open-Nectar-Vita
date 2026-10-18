@@ -3652,6 +3652,27 @@ void pc_settings_touch_tap(float x, float y) {
     sTouchTapPending = true;
 }
 
+// El launcher deja Load/Textures/.activate al descargar un pack: se
+// activa ese pack (su carpeta) y se borra el aviso. Al arrancar el juego y
+// en las órdenes del launcher (--settings-dump...).
+static void applyLauncherPackActivation() {
+    const std::filesystem::path activate = std::filesystem::path("Load") / "Textures" / ".activate";
+    std::string name;
+    {
+        std::ifstream in(activate);
+        if (in) std::getline(in, name);
+    }
+    while (!name.empty() && (name.back() == '\r' || name.back() == ' ')) name.pop_back();
+    if (!name.empty()) {
+        sConfig.texturePack = name;
+        sConfig.texturePackEnabled = 1;
+        sPending = sConfig;
+        saveConfig();
+    }
+    std::error_code activateEc;
+    std::filesystem::remove(activate, activateEc);
+}
+
 void pc_settings_init(void) {
     PC_SETTINGS_HOST_ALLOC();
     loadConfig();
@@ -3679,6 +3700,7 @@ void pc_settings_init(void) {
     pc_gfx_set_aspect_ratio_mode(sPending.aspectRatioMode);
     applyControls(sConfig);
     applyGraphics(sConfig);
+    applyLauncherPackActivation();
     // PLAN_TEXTURAS_HD fase 2: si hay un pack activo, solicitar su
     // indexación antes de que pc_texpack_init() construya el mapa en
     // pc_gfx_init(). pc_texpack_select_pack() se llama aquí para que el
@@ -8764,6 +8786,7 @@ int pc_settings_cli(int argc, char** argv) {
     SDL_InitSubSystem(SDL_INIT_VIDEO);
     sHeadless = true;
     loadConfig();
+    applyLauncherPackActivation();
     sPending = sConfig;
     rebuildResolutionList();
     int idx = sHadConfigFile ? resolutionIndexFor(sPending.windowWidth, sPending.windowHeight) : -1;
