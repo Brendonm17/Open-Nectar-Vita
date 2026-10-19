@@ -95,6 +95,7 @@ int main()
 
 	// Float shapers span [0, max] in deterministic mode. Draws are 15-bit, so
 	// dividing by a host RAND_MAX of 0x7fffffff would pin every roll near 0.
+	check(pc_sim_rand_max() == 0x7fff, "deterministic draw range must be 0x7fff");
 	pc_sim_srand(1);
 	pc_cosmetic_srand(1);
 	float simMax = 0.0f, cosMax = 0.0f, simSum = 0.0f, cosSum = 0.0f;
@@ -127,6 +128,7 @@ int main()
 	check(pc_cosmetic_rand() == cosExpected, "cosmetic stream must passthrough to rand() when off");
 
 	// Off mode keeps the original rand() / RAND_MAX float bit for bit.
+	check(pc_sim_rand_max() == RAND_MAX, "off-mode draw range must be the host RAND_MAX");
 	std::srand(777);
 	const float simRollExpected = 3.0f * (std::rand() / float(RAND_MAX));
 	const float cosRollExpected = 3.0f * (std::rand() / float(RAND_MAX));
