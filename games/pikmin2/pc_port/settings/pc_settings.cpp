@@ -4988,18 +4988,23 @@ void ngrInput()
             ngrScreen(&sw, &sh);
             const float x = sTouchTapX * sw, y = sTouchTapY * sh;
             const int panelX = sw / 2 - kNgrPanelW / 2, panelY = sh / 2 - kNgrPanelH / 2;
+            // Solo cuenta dentro de un recuadro: al soltar un botón de la capa
+            // (confirmar, abajo a la derecha) también llega un toque en su
+            // sitio, que no debe pulsar la fila que quede a esa altura.
             for (int row = 0; row < NGR_Count; row++) {
                 const float ry = float(ngrRowY(panelY, row));
                 if (y < ry || y > ry + kNgrRowH - 4) continue;
+                const float bx = row == NGR_Start ? float(panelX + kNgrPanelW / 2 - 115) : float(ngrValueX(panelX));
+                const float bw = row == NGR_Start ? 230.0f : float(kNgrValueW);
+                if (x < bx || x >= bx + bw) continue;
                 sNgrRow        = row;
                 sNgrMessage[0] = '\0';
                 if (ngrCount(row) == 0) {
                     accept = true;
                 } else {
                     // Mitad izquierda del valor: anterior; derecha: siguiente.
-                    const float vx = float(ngrValueX(panelX));
-                    if (x >= vx && x < vx + kNgrValueW / 2) left = true;
-                    else if (x >= vx + kNgrValueW / 2) right = true;
+                    if (x < bx + bw / 2) left = true;
+                    else right = true;
                 }
             }
         }
@@ -5315,14 +5320,26 @@ void pc_newgame_prompt_draw(void)
     gfx->setOrthogonal(ortho.mMtx, RectArea(0, 0, screenW, screenH));
 
     if (pc_randomizer_menu_pending()) {
-        // Espacio virtual reducido para que la ventana quepa (móvil); la ortho
-        // también toca viewport/tijera, que se dejan en la pantalla real.
+        // Espacio virtual mayor para que la ventana quepa (móvil). El lote de
+        // la interfaz se proyecta con mScreenWidth/Height al vaciarse, así que
+        // se vacía lo anterior a escala real, se dibuja la ventana con el
+        // tamaño virtual y se vacía antes de restaurarlo.
         int vw, vh;
         ngrScreen(&vw, &vh);
+#if PIKI_P2_HOST
+        pc_settings_p2_flush();
+        gfx->mScreenWidth  = vw;
+        gfx->mScreenHeight = vh;
+        ngrDraw(gfx, vw, vh);
+        pc_settings_p2_flush();
+        gfx->mScreenWidth  = screenW;
+        gfx->mScreenHeight = screenH;
+#else
         gfx->setOrthogonal(ortho.mMtx, RectArea(0, 0, vw, vh));
         gfx->setViewport(RectArea(0, 0, screenW, screenH));
         gfx->setScissor(RectArea(0, 0, screenW, screenH));
         ngrDraw(gfx, vw, vh);
+#endif
         return;
     }
 
