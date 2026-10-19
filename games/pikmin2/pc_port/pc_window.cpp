@@ -1052,6 +1052,11 @@ void pc_window_poll_events(PADStatus* pad) {
                 printf("[Android] WARNING: low memory\n");
                 break;
 #endif
+#if PIKI_P2_HOST && defined(PIKI_PC_PORT) && defined(PIKI_PC_SETTINGS_MENU)
+            case SDL_TEXTINPUT:
+                pc_settings_text_input(event.text.text);
+                break;
+#endif
 #if PIKI_PC_TOUCH
             case SDL_FINGERDOWN:
             case SDL_FINGERMOTION:
