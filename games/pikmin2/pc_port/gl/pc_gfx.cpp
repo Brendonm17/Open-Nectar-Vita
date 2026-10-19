@@ -5729,6 +5729,30 @@ extern "C" void pc_gfx_p2_sides_static(int capture) {
     pc_gfx_set_scissor(sGxSc[0], sGxSc[1], sGxSc[2], sGxSc[3]);
 }
 
+// Pantallas que se quedan en 4:3 (el mapa): laterales en negro. Antes se
+// rellenaban con el color del borde (pc_gfx_p2_extend_edge_color), pero leer
+// el framebuffer cada frame hundia el rendimiento en GPUs moviles.
+extern "C" void pc_gfx_p2_black_sides(void) {
+    if (sP2Widen <= 1.0f || !sNativeFramebufferReady || !glBindFramebuffer_ptr) return;
+    pc_gfx_flush_batch();
+    GLint bx, by;
+    GLsizei bw, bh;
+    if (!p2_box_rows(0.0f, sGxH, bx, by, bw, bh)) return;
+    pc_gfx_note_gl_state_change();
+    invalidate_gl_pipeline_guards();
+    glBindFramebuffer_ptr(GL_FRAMEBUFFER, sNativeFramebuffer);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glEnable(GL_SCISSOR_TEST);
+    const int right = bx + bw;
+    glScissor(0, 0, bx, sRenderHeight);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glScissor(right, 0, sRenderWidth - right, sRenderHeight);
+    glClear(GL_COLOR_BUFFER_BIT);
+    invalidate_gl_pipeline_guards();
+    pc_gfx_set_scissor(sGxSc[0], sGxSc[1], sGxSc[2], sGxSc[3]);
+}
+
 // Fondos con vineta que oscurece hacia el borde del 4:3: los laterales se
 // rellenan, fila a fila, con el color medio de la franja interior del borde.
 extern "C" void pc_gfx_p2_extend_edge_color(float gxY0, float gxY1, float stripW) {
