@@ -802,7 +802,11 @@ static int pcJpaAdvance(JPABaseEmitter* emtr, JPAList<JPABaseParticle>& list, in
 		n++;
 		if (p->checkStatus(0x20)) {
 			p->mPosition.add(follow);
-		} else {
+		} else if (p->mAge > 0) {
+			// Recien nacida (edad 0): su posicion previa es la de init_p, antes
+			// de que el efecto le cambiara mOffsetPosition (TOneEmitter la pone
+			// en el contexto, p. ej. los anillos del cursor); adelantarla la
+			// dibujaria a medio camino del origen del emisor.
 			p->mPosition.x += (p->mPosition.x - p->mPcPrevPosition.x) * gPcJpaSub;
 			p->mPosition.y += (p->mPosition.y - p->mPcPrevPosition.y) * gPcJpaSub;
 			p->mPosition.z += (p->mPosition.z - p->mPcPrevPosition.z) * gPcJpaSub;
