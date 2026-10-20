@@ -1403,7 +1403,16 @@ static u64 sTexVariantClock = 0;
 constexpr size_t kTexVariantsPerObj = 16;
 constexpr u16 kTexVariantMaxSide = 256;
 // GXCopyTex: direccion de destino -> textura GL con la copia del framebuffer.
-struct PcEfbCopy { GLuint tex = 0; int w = 0, h = 0; unsigned hits = 0; };
+struct PcEfbCopy { GLuint tex = 0; int w = 0, h = 0; unsigned hits = 0; u64 fingerprint = 0; };
+// La copia solo vive en GL: la memoria de destino no se toca. Si sus primeros
+// bytes cambian, ese bloque del heap ya es otra textura (p. ej. la nave cargada
+// al salir de una cueva donde se hizo la copia) y la copia es vieja.
+static u64 pc_efb_copy_fingerprint(uintptr_t addr) {
+    const u8* p = reinterpret_cast<const u8*>(addr);
+    u64 h = 1469598103934665603ull;
+    for (int i = 0; i < 32; i++) { h ^= p[i]; h *= 1099511628211ull; } // la copia minima (4x4 RGB565) ocupa 32 bytes
+    return h;
+}
 static PcGfxHostMap<uintptr_t, PcEfbCopy> sEfbCopies;
 static PcGfxHostMap<uintptr_t, PcTlut> sTlutObjects;
 static PcGfxHostMap<u32, PcTlut> sLoadedTluts;
@@ -7165,6 +7174,13 @@ void pc_gfx_load_tex_obj(GXTexObj* obj, GXTexMapID id) {
                     if ((c->first & ~uintptr_t(31)) == block) { copy = c; break; }
                 }
             }
+            if (copy != sEfbCopies.end() && copy->second.tex
+                && pc_efb_copy_fingerprint(copy->first) != copy->second.fingerprint) {
+                // Memoria reutilizada por otra textura: la copia ya no le corresponde.
+                glDeleteTextures(1, &copy->second.tex);
+                sEfbCopies.erase(copy);
+                copy = sEfbCopies.end();
+            }
             if (copy != sEfbCopies.end() && copy->second.tex) {
                 ++copy->second.hits;
                 sActiveGLTextures[id] = copy->second.tex;
@@ -11808,6 +11824,7 @@ void pc_gfx_copy_tex(void* dest, GXBool clear) {
         pc_gfx_set_scissor(sGxSc[0], sGxSc[1], sGxSc[2], sGxSc[3]);
     }
     if (scissorWasEnabled) glEnable(GL_SCISSOR_TEST); else glDisable(GL_SCISSOR_TEST);
+    copy.fingerprint = pc_efb_copy_fingerprint(reinterpret_cast<uintptr_t>(dest));
 }
 
 // Diagnóstico (PIKMIN_WRAITH_DEBUG): ¿hay copia de GXCopyTex para esta
