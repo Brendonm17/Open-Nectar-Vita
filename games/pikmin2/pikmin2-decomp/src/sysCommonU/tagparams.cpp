@@ -97,9 +97,19 @@ template <>
 void PrimTagParm<u64>::doRead(Stream& stream)
 {
 	char* str = stream.readString(nullptr, 0);
+#ifdef PIKI_PC_PORT
+	// The console stores the 8 chars in big-endian order inside the u64, and
+	// P2JME::convertU64ToMessageID reads the value that way (item "message"
+	// IDs such as "0017_00"); a byte copy reverses them on little-endian.
+	mData = 0;
+	for (int i = 0; i < 8; i++) {
+		mData = (mData << 8) | (u8)str[i];
+	}
+#else
 	for (int i = 0; i < 8; i++) {
 		((char*)&mData)[i] = str[i];
 	}
+#endif
 }
 
 /**
@@ -111,7 +121,11 @@ void PrimTagParm<u64>::doWrite(Stream& stream)
 {
 	char data[8];
 	for (int i = 0; i < 8; i++) {
+#ifdef PIKI_PC_PORT
+		data[i] = (char)(mData >> (56 - i * 8));
+#else
 		data[i] = ((char*)&mData)[i];
+#endif
 	}
 	stream.writeString(data);
 }

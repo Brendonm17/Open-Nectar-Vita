@@ -388,8 +388,19 @@ static inline void pc_promote_j3d_anm_tex_pattern_full(J3DAnmTexPatternFullData*
 	u32 mats     = data->mExtraInfo1;
 	u32 values   = data->mExtraInfo2;
 	auto inBlock = [&](s32 off, u32 bytes) { return off > 0 && off + (s32)bytes <= blockEnd; };
-	if (inBlock(data->mTableOffset, mats * sizeof(J3DAnmTexPatternFullTable)))
-		pc_j2d_anm_swap_u16_span(base + data->mTableOffset, mats * sizeof(J3DAnmTexPatternFullTable));
+	if (inBlock(data->mTableOffset, mats * sizeof(J3DAnmTexPatternFullTable))) {
+		// Each entry is u16 maxFrame, u16 offset, u8 texMapIdx, u8 pad, u16 pad.
+		// Byte 4 is read as u8 (J2DMaterial::setAnimation), so it must not be
+		// swapped with its pad: that left the pattern on the wrong tex slot
+		// (ship icon propeller in dialogues frozen) and could index past
+		// mPatternIds[8].
+		u16* entry = (u16*)(base + data->mTableOffset);
+		for (u32 i = 0; i < mats; i++, entry += 4) {
+			entry[0] = pc_j2d_anm_bswap16(entry[0]);
+			entry[1] = pc_j2d_anm_bswap16(entry[1]);
+			entry[3] = pc_j2d_anm_bswap16(entry[3]);
+		}
+	}
 	if (inBlock(data->mValuesOffset, values * 2))
 		pc_j2d_anm_swap_u16_span(base + data->mValuesOffset, values * 2);
 	if (inBlock(data->mUpdateMaterialIDOffset, mats * 2))
