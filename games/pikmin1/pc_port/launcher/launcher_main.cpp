@@ -1368,7 +1368,9 @@ int main(int argc, char** argv)
             pikmin::launcher::offerCrashReport(*home, {
                 // El que indica el juego al fallar va primero: no depende de
                 // dónde crea este launcher que está instalado.
-                { "Pikmin 2", crashFile.parent_path(), crashFile.filename().string(), "pikmin2.log" },
+                { crashFile.filename() == "pikmin_crash.log" ? "Pikmin" : "Pikmin 2", crashFile.parent_path(),
+                  crashFile.filename().string(),
+                  crashFile.filename() == "pikmin_crash.log" ? "pikmin.log" : "pikmin2.log" },
                 { "Pikmin 2", pikmin2Directory, "pikmin2_crash.log", "pikmin2.log" },
                 { "Pikmin", pikmin1Directory, "pikmin_crash.log", "pikmin.log" },
             });

@@ -46,6 +46,7 @@ __declspec(dllexport) int           AmdPowerXpressRequestHighPerformance = 1;
 }
 #endif
 
+#include "pc_crash.h"
 #include "pc_window.h"
 #include "pc_discord.h"
 #include "pc_gpu_preference.h"
@@ -84,6 +85,9 @@ int main(int argc, char* argv[])
         return 1;
     }
 #endif
+    // Informe de crash (pikmin_crash.log) y log sin terminal (pikmin.log), en
+    // la carpeta del juego: en Android pc_android_init ya entró en ella.
+    pc_install_crash_handler();
 
     // SDL_MAIN_HANDLED is defined for this build, which means the application
     // owns main() and SDL2main is not linked. The other half of that contract
