@@ -161,7 +161,7 @@ bool THurryUp2D::doUpdate()
 		if (disp->mCurrSunRatio < disp->mDuration) {
 			disp->mCurrSunRatio = disp->mDuration;
 		}
-		mDisp->mCurrSunRatio += 0.00001f;
+		mDisp->mCurrSunRatio += 0.00001f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		disp = mDisp;
 		if (disp->mCurrSunRatio > 0.803f) {
 			disp->mCurrSunRatio = disp->mDuration;

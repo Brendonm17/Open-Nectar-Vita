@@ -97,7 +97,7 @@ void CarryInfo::update(const CarryInfoParam& param)
 			}
 			}
 			f32 modifier = 1.0f;
-			mGrowRate *= 0.88f;
+			mGrowRate *= PC_DAMP(0.88f); // FPS Mode: amortiguacion por frame
 
 			modifier        = (mScale > modifier) ? modifier : mScale;
 			f32 scaledAlpha = 255.0f * modifier;
@@ -118,7 +118,7 @@ void CarryInfo::update(const CarryInfoParam& param)
 				mGrowRate += temp;
 			}
 			mYOffset += mGrowRate;
-			mGrowRate *= 0.9f;
+			mGrowRate *= PC_DAMP(0.9f); // FPS Mode: amortiguacion por frame
 			mScale = mYOffset / param.mYOffsetMax;
 			if (mScale > 1.0f) {
 				mScale = 1.0f;
@@ -139,7 +139,7 @@ void CarryInfo::update(const CarryInfoParam& param)
 
 			case CINFO_Disappear: {
 				if (mAlpha > 8) {
-					mAlpha -= 8;
+					if (PC_ORIG_TICK()) mAlpha -= 8; // FPS Mode: una vez por frame original
 				} else {
 					mAlpha    = 0;
 					mGrowRate = 0.0f;

@@ -685,7 +685,7 @@ void Obj::walkFunc()
 		f32 turnAngle = degreeAngle * mCarryAngleSpeed; // angle goes from 0 to whatever the degAngle factor is over time
 		turnAngle     = TORADIANS(turnAngle);
 
-		mCarryAngleSpeed += 0.1f;
+		mCarryAngleSpeed += 0.1f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 
 		// cap out weighting at 1
 		if (mCarryAngleSpeed > 1.0f) {
@@ -959,7 +959,7 @@ void Obj::calcBaseTrMatrix()
 	Quat unusedQuat(mCurrRotation);
 
 	if (mSlerpTime < 1.0f) {
-		mSlerpTime += 0.1f;
+		mSlerpTime += 0.1f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		if (mSlerpTime > 1.0f) {
 			mSlerpTime = 1.0f;
 		}

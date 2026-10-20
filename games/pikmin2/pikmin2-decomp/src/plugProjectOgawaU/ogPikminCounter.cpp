@@ -2,6 +2,7 @@
 #include "og/Screen/ogScreen.h"
 #include "og/Screen/callbackNodes.h"
 #include "trig.h"
+#include "System.h" // PC_ORIG_DT_SCALE / PC_DAMP
 
 namespace og {
 namespace Screen {
@@ -58,10 +59,10 @@ void PikminCounter::update()
 	if (mPaneSublevel) {
 		if (mIsTotalPokoActive) {
 			if (mCurrPos.x < 700.0f) {
-				mCurrPos.x += 20.0f;
+				mCurrPos.x += 20.0f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 			}
 		} else if (mCurrPos.x > mStandardPos.x) {
-			mCurrPos.x -= 20.0f;
+			mCurrPos.x -= 20.0f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 			if (mCurrPos.x <= mStandardPos.x) {
 				mCurrPos.x = mStandardPos.x;
 				mScaleMgr->up(0.2f, 20.0f, 0.5f, 0.0f);

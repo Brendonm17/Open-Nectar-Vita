@@ -2,6 +2,7 @@
 #include "trig.h"
 #include "PSSystem/PSSystemIF.h"
 #include "SoundID.h"
+#include "System.h" // PC_ORIG_DT_SCALE / PC_DAMP
 
 static const char name[] = "dayEndCount";
 
@@ -105,7 +106,7 @@ void TDayEndCount::doCreate(JKRArchive* arc)
 bool TDayEndCount::doUpdate()
 {
 	if (mIsSection) {
-		mDispMember->mCurrSunRatio += 0.0001f;
+		mDispMember->mCurrSunRatio += 0.0001f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		if (mDispMember->mCurrSunRatio > 1.0f) {
 			mDispMember->mCurrSunRatio = mDispMember->mDuration;
 		}

@@ -288,7 +288,7 @@ void Camera::doUpdate()
 	Vector3f delta = cameraPos - mGoalPosition;
 	delta *= 0.1f;
 	mMovementVelocity += delta;
-	mMovementVelocity *= 0.6f;
+	mMovementVelocity *= PC_DAMP(0.6f); // FPS Mode: amortiguacion por frame
 
 	if (!Screen::gGame2DMgr->isAppearConfirmWindow()) {
 		int fovInc = ((mController->getButton() / 4) & JUTGamePad::PRESS_DPAD_LEFT)
@@ -431,7 +431,7 @@ void Camera::updateFocus()
 	f64 xAbs   = fabs(mCurrentVerticalInput - mVerticalInputDampened);
 	f32 x      = (f32)xAbs;
 	if (fov > 1.0f || x > 30.0f || y > 30.0f) {
-		mFocusLevel += 0.05f;
+		mFocusLevel += 0.05f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 	}
 
 	mCurrentBlurLevel += (0.2f - mFocusLevel) * 0.02f;

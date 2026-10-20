@@ -997,7 +997,7 @@ void Obj::checkFlick(bool check)
 			f32 range    = C_PROPERPARMS.mInvisibleRange();
 			Vector3f sep = navi->getTargetSeparation(this);
 			if (sep.sqrLength() < SQUARE(range)) {
-				mFlickTimer += 0.1f;
+				mFlickTimer += 0.1f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 			}
 		}
 	}

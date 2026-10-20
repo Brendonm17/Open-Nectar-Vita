@@ -13,6 +13,7 @@
 #include "PSSystem/PSSystemIF.h"
 #include "efx2d/T2DChangesmoke.h"
 #include "Controller.h"
+#include "System.h" // PC_ORIG_DT_SCALE / PC_DAMP
 #if PIKI_PC_TOUCH
 extern "C" void pc_touch_claim_game_menu(void);
 extern "C" bool pc_touch_take_game_menu_tap(float* x, float* y);
@@ -559,47 +560,47 @@ void WorldMap::update(Game::WorldMap::UpdateArg& arg)
 		mScreenKitagawa->search(getSerialTagName(MC8("Plight0"), i))->animationTransform();
 	}
 
-	mAnimTimers[2] += 1.0f;
+	mAnimTimers[2] += 1.0f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 	if (mAnimTimers[2] >= mKitaAnim3->getFrameMax()) {
 		mAnimTimers[2] = 0.0f;
 	}
 
-	mAnimTimers[3] += 1.0f;
+	mAnimTimers[3] += 1.0f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 	if (mAnimTimers[3] >= mKitaAnim4->getFrameMax()) {
 		mAnimTimers[3] = 0.0f;
 	}
 
-	mAnimTimers[4] += 1.0f;
+	mAnimTimers[4] += 1.0f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 	if (mAnimTimers[4] >= mKitaAnim5->getFrameMax()) {
 		mAnimTimers[4] = 0.0f;
 	}
 
-	mAnimTimers[5] += 1.0f;
+	mAnimTimers[5] += 1.0f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 	if (mAnimTimers[5] >= mRocketAnim1->getFrameMax()) {
 		mAnimTimers[5] = 0.0f;
 	}
 
-	mAnimTimers[6] += 1.0f;
+	mAnimTimers[6] += 1.0f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 	if (mAnimTimers[6] >= mRocketAnim2->getFrameMax()) {
 		mAnimTimers[6] = 0.0f;
 	}
 
-	mAnimTimers[7] += 0.5f;
+	mAnimTimers[7] += 0.5f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 	if (mAnimTimers[7] >= mInfoAnim1->getFrameMax()) {
 		mAnimTimers[7] = 0.0f;
 	}
 
-	mAnimTimers[8] += 0.5f;
+	mAnimTimers[8] += 0.5f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 	if (mAnimTimers[8] >= mInfoAnim2->getFrameMax()) {
 		mAnimTimers[8] = 0.0f;
 	}
 
-	mAnimTimers[9] += 0.5f;
+	mAnimTimers[9] += 0.5f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 	if (mAnimTimers[9] >= mInfoAnim3->getFrameMax()) {
 		mAnimTimers[9] = 0.0f;
 	}
 
-	mAnimTimers[1] += 1.0f;
+	mAnimTimers[1] += 1.0f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 	if (mAnimTimers[1] >= mKitaAnim2->getFrameMax()) {
 		mAnimTimers[1] = 0.0f;
 	}
@@ -616,7 +617,7 @@ void WorldMap::update(Game::WorldMap::UpdateArg& arg)
 
 	switch (mCurrentState) {
 	case WMAP_NewMapOpened: {
-		mAnimTimers[0] += 1.5f;
+		mAnimTimers[0] += 1.5f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		if (mAnimTimers[0] >= mCameraZoomMinFrame && !newMapOpen()) {
 			// COURSE_Tutorial is always open, so start from next course
 			for (int i = COURSE_Forest; i < COURSE_COUNT; i++) {

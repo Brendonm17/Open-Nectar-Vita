@@ -511,13 +511,13 @@ bool THiScore::doUpdate()
 	}
 
 	if (!mIndexGroup->mStateID) {
-		mAlphaTimer += 0.04f;
+		mAlphaTimer += 0.04f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		if (mAlphaTimer > 1.0f) {
 			mAlphaTimer        = 1.0f;
 			mIndPaneXDirection = 0.0f;
 		}
 	} else {
-		mAlphaTimer *= 0.75f;
+		mAlphaTimer *= PC_DAMP(0.75f); // FPS Mode: amortiguacion por frame
 		if (mAlphaTimer < 0.1f) {
 			mAlphaTimer = 0.0f;
 		}
@@ -981,7 +981,7 @@ void THiScore::changeTextTevBlock(int id)
 
 	if (mIndexGroup->mStateID == TIndexGroup::IDGroup_Idle && val < mCursorSelectionYOffset && val > mSelectionYOffset) {
 		changeTevBlock(mTevBlock[0], textbox->getMaterial()->getTevBlock());
-		mColorChangeTimer += 0.1f;
+		mColorChangeTimer += 0.1f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		if (mColorChangeTimer > TAU) {
 			mColorChangeTimer -= TAU;
 		}

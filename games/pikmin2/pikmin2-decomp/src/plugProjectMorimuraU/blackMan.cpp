@@ -883,7 +883,7 @@ void Obj::walkFunc()
 	}
 
 	if (isOnTyres()) {
-		mHealth += 5.0f;
+		mHealth += 5.0f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		if (mHealth > mMaxHealth) {
 			mHealth = mMaxHealth;
 		}

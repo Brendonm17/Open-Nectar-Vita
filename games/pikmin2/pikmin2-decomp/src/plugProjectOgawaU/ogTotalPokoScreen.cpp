@@ -120,7 +120,7 @@ void TotalPokoScreen::update()
 		mTimer -= sys->mDeltaTime;
 
 		if (mCurrPos.y < mStandardPos.y) {
-			mCurrPos.y += 20.0f;
+			mCurrPos.y += 20.0f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 
 			if (mCurrPos.y >= mStandardPos.y) {
 				mCurrPos.y = mStandardPos.y;
@@ -144,7 +144,7 @@ void TotalPokoScreen::update()
 		}
 	} else {
 		if (mCurrPos.y > -80.0f) {
-			mCurrPos.y -= 20.0f;
+			mCurrPos.y -= 20.0f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		}
 	}
 

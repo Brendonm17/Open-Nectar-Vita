@@ -7,6 +7,7 @@
 #include "efx/TUjinko.h"
 #include "efx/TTamagoAp.h"
 #include "Dolphin/rand.h"
+#include "System.h" // PC_ORIG_DT_SCALE / PC_DAMP
 
 namespace Game {
 namespace TamagoMushi {
@@ -374,7 +375,7 @@ void Obj::walkFunc()
 	const f32 dir = sinVal * mMoveRotationTimer;
 	newDir        = TORADIANS(dir);
 
-	mMoveRotationTimer += 0.1f;
+	mMoveRotationTimer += 0.1f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 	if (mMoveRotationTimer > 1.0f) {
 		mMoveRotationTimer = 1.0f;
 	}

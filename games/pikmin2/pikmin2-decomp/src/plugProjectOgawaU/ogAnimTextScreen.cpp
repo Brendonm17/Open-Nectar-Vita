@@ -161,7 +161,7 @@ void AnimText_Screen::update()
 				}
 
 				if (mBlinkLevel > 0.0f) {
-					mBlinkLevel -= 0.1f;
+					mBlinkLevel -= 0.1f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 					if (mBlinkLevel < 0.0f) {
 						mBlinkLevel = 0.0f;
 					}
@@ -171,7 +171,7 @@ void AnimText_Screen::update()
 				mBlinkBlendRatio += (t - mBlinkBlendRatio) / 3.0f;
 
 			} else if (mBlinkLevel < 1.0f) {
-				mBlinkLevel += 0.05f;
+				mBlinkLevel += 0.05f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 				if (mBlinkLevel > 1.0f) {
 					mBlinkLevel = 1.0f;
 				}

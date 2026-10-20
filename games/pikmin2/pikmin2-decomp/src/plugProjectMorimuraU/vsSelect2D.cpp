@@ -228,7 +228,7 @@ void TVsPiki::update(int pikis)
 			break;
 		case posInfo::Pluck:
 			if (mPosInfos[i].mPosition.y > 0.0f) {
-				mPosInfos[i].mPosition.y -= 5.0f;
+				mPosInfos[i].mPosition.y -= 5.0f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 				if (mPosInfos[i].mPosition.y <= 0.0f) {
 					mPosInfos[i].mPosition.y = 0.0f;
 				}
@@ -243,7 +243,7 @@ void TVsPiki::update(int pikis)
 			break;
 		case posInfo::Bury:
 			if (mPosInfos[i].mPosition.y < 20.0f) {
-				mPosInfos[i].mPosition.y += 5.0f;
+				mPosInfos[i].mPosition.y += 5.0f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 				if (mPosInfos[i].mPosition.y >= 20.0f) {
 					mPosInfos[i].mPosition.y = 20.0f;
 					mPosInfos[i].mState      = posInfo::Sprout;
@@ -1549,13 +1549,13 @@ bool TVsSelect::doUpdate()
 
 	if (mZoomState < 1) {
 		mPaneStarAlpha = 1.0f;
-		mOtherLevelsFadeAlpha += 0.2f;
+		mOtherLevelsFadeAlpha += 0.2f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		if (mOtherLevelsFadeAlpha > 1.0f) {
 			mOtherLevelsFadeAlpha = 1.0f;
 		}
 	} else {
-		mPaneStarAlpha *= 0.9f;
-		mOtherLevelsFadeAlpha -= 0.1f;
+		mPaneStarAlpha *= PC_DAMP(0.9f); // FPS Mode: amortiguacion por frame
+		mOtherLevelsFadeAlpha -= 0.1f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		if (mOtherLevelsFadeAlpha < 0.0f) {
 			mOtherLevelsFadeAlpha = 0.0f;
 		}
@@ -1580,12 +1580,12 @@ bool TVsSelect::doUpdate()
 	}
 
 	if (mIndexGroup->mStateID == TIndexGroup::IDGroup_Idle) {
-		_234 += 0.05f;
+		_234 += 0.05f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		if (_234 > 1.0f) {
 			_234 = 1.0f;
 		}
 	} else {
-		_234 *= 0.8f;
+		_234 *= PC_DAMP(0.8f); // FPS Mode: amortiguacion por frame
 	}
 
 	if (mForceResetParm) {

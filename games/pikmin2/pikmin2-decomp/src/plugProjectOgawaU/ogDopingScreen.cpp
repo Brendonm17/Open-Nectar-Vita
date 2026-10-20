@@ -5,6 +5,7 @@
 #include "og/newScreen/ogUtil.h"
 #include "efx2d/T2DSprayset.h"
 #include "trig.h"
+#include "System.h" // PC_ORIG_DT_SCALE / PC_DAMP
 
 namespace og {
 namespace Screen {
@@ -129,7 +130,7 @@ void DopingScreen::update()
 
 	// when spray 0 is first goten
 	if (mHasGotSpicySpray && mSpicySprayGet < 1.0f) {
-		mSpicySprayGet += 0.1f;
+		mSpicySprayGet += 0.1f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		if (mSpicySprayGet >= 1.0f) {
 			mScaleMgr1->up();
 			mDopingCheck->startGetEff_Up();
@@ -139,7 +140,7 @@ void DopingScreen::update()
 
 	// when spray 1 is first goten
 	if (mHasGotBitterSpray && mBitterSprayGet < 1.0f) {
-		mBitterSprayGet += 0.1f;
+		mBitterSprayGet += 0.1f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		if (mBitterSprayGet >= 1.0f) {
 			mScaleMgr2->up();
 			mDopingCheck->startGetEff_Down();
@@ -149,7 +150,7 @@ void DopingScreen::update()
 
 	// when either spray is first gotten
 	if (mHasGotCenterDpad && mScaleJujiKey < 1.0f) {
-		mScaleJujiKey += 0.1f;
+		mScaleJujiKey += 0.1f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		if (mScaleJujiKey >= 1.0f) {
 			mScaleMgr3->up();
 		}

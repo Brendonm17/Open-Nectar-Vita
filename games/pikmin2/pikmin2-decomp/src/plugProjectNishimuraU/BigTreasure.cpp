@@ -761,7 +761,7 @@ void Obj::updateTreasure()
 			PSMTXIdentity(captureMtx.mMatrix.mtxView);
 
 			if (mIsWeaponAttacked[i]) {
-				mTreasureShakeAngle[i] += 1.4f;
+				mTreasureShakeAngle[i] += 1.4f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 
 				if (mTreasureShakeAngle[i] > TAU) {
 					mTreasureShakeAngle[i] = 0.0f;

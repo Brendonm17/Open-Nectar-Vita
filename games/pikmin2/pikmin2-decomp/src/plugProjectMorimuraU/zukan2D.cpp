@@ -553,7 +553,7 @@ bool TZukanBase::doUpdate()
 			}
 		}
 	} else {
-		mBigWindowScale *= 0.9f;
+		mBigWindowScale *= PC_DAMP(0.9f); // FPS Mode: amortiguacion por frame
 		if (mBigWindowScale < 1.0f) {
 			mBigWindowScale = 1.0f;
 			if (mPaneBigWindow) {
@@ -780,12 +780,12 @@ bool TZukanBase::doUpdate()
 	static_cast<J2DPicture*>(mWindow->mPaneIconLight)->setAlpha(animColor.a);
 
 	if (!mIsEffectRequired) {
-		mCameraFadeInLevel += 0.3f;
+		mCameraFadeInLevel += 0.3f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		if (mCameraFadeInLevel > 1.0f) {
 			mCameraFadeInLevel = 1.0f;
 		}
 	} else {
-		mCameraFadeInLevel *= 0.6f;
+		mCameraFadeInLevel *= PC_DAMP(0.6f); // FPS Mode: amortiguacion por frame
 		if (mCameraFadeInLevel < 0.05f) {
 			mCameraFadeInLevel = 0.0f;
 		}
@@ -852,25 +852,25 @@ bool TZukanBase::doUpdate()
 void TZukanBase::updateButtonAlpha(u8 target)
 {
 	if (mDoFadeNameAlpha) {
-		mNameAlpha -= 0.2f;
+		mNameAlpha -= 0.2f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 	} else {
 		if (mIsCurrentSelUnlocked) {
-			mNameAlpha += 0.2f;
+			mNameAlpha += 0.2f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		} else {
-			mNameAlpha -= 0.2f;
+			mNameAlpha -= 0.2f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		}
 	}
 
 	if (mIsCurrentSelUnlocked) {
 		if (isComplete()) {
-			mYButtonAlpha += 0.2f;
+			mYButtonAlpha += 0.2f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		} else {
-			mYButtonAlpha -= 0.2f;
+			mYButtonAlpha -= 0.2f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		}
-		mXButtonAlpha += 0.2f;
+		mXButtonAlpha += 0.2f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 	} else {
-		mXButtonAlpha -= 0.2f;
-		mYButtonAlpha -= 0.2f;
+		mXButtonAlpha -= 0.2f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
+		mYButtonAlpha -= 0.2f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 	}
 
 	if (mXButtonAlpha > 1.0f) {
@@ -3328,7 +3328,7 @@ void TItemZukan::doUpdateOut()
 
 	if (mIsInDemo) {
 		if (mDemoState == ZUKANDEMO_Scrolling) {
-			mDemoStateButtonAlpha -= 0.1f;
+			mDemoStateButtonAlpha -= 0.1f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 			if (mDemoStateButtonAlpha < 0.0f) {
 				mDemoStateButtonAlpha = 0.0f;
 			}
@@ -4347,7 +4347,7 @@ void TCallbackScrollMsg::reset()
  */
 void TCallbackScrollMsg::scroll(f32 speed)
 {
-	mScrollTimer += 5.0f;
+	mScrollTimer += 5.0f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 	mControl->scroll(speed);
 }
 
@@ -4525,7 +4525,7 @@ void TZukanWindow::update()
 			scale2 = 1.0f;
 		}
 		mPaneIcon->updateScale(scale2 * scale);
-		mIconYHeightSin += 0.3f;
+		mIconYHeightSin += 0.3f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		if (mIconYHeightSin > TAU) {
 			mIconYHeightSin -= TAU;
 		}

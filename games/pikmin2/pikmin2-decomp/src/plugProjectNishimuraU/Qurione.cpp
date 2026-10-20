@@ -315,7 +315,7 @@ void Obj::dropItem()
  */
 void Obj::addQurioneScale()
 {
-	mQurioneScale += 0.05; // yes this is a double for some reason
+	mQurioneScale += 0.05 * PC_ORIG_DT_SCALE(); // yes this is a double for some reason // FPS Mode: paso por frame original
 	if (mQurioneScale > 1.0f) {
 		mQurioneScale = 1.0f;
 	}
@@ -327,7 +327,7 @@ void Obj::addQurioneScale()
  */
 void Obj::subQurioneScale()
 {
-	mQurioneScale -= 0.05; // yes this is a double for some reason
+	mQurioneScale -= 0.05 * PC_ORIG_DT_SCALE(); // yes this is a double for some reason // FPS Mode: paso por frame original
 	if (mQurioneScale < 0.0f) {
 		mQurioneScale = 0.0f;
 	}

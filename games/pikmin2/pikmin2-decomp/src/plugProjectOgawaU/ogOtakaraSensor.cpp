@@ -270,7 +270,7 @@ void OtakaraSensor::calcGrayColor()
 				mSetGrayTimer = 1.5f;
 			}
 		} else if (mDoIncNoise) {
-			mNoiseLevel += 0.05f;
+			mNoiseLevel += 0.05f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 			if (mNoiseLevel > 1.0f) {
 				mNoiseLevel = 1.0f;
 			}
@@ -278,7 +278,7 @@ void OtakaraSensor::calcGrayColor()
 				mDoIncNoise = false;
 			}
 		} else {
-			mNoiseLevel -= 0.05f;
+			mNoiseLevel -= 0.05f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 			if (mNoiseLevel < 0.0f) {
 				mNoiseLevel = 0.0f;
 			}

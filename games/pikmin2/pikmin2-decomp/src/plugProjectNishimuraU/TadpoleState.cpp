@@ -323,9 +323,9 @@ void StateLeap::exec(EnemyBase* enemy)
 
 		f32 angle = 0.0f;
 		if (tadpole->mLeapDirection) {
-			angle += 0.15f;
+			angle += 0.15f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		} else {
-			angle -= 0.15f;
+			angle -= 0.15f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		}
 
 		f32 adjustedDir = angle + tadpole->getFaceDir();

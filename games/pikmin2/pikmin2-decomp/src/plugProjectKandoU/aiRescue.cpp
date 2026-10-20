@@ -4,6 +4,7 @@
 #include "Game/MapMgr.h"
 #include "Game/routeMgr.h"
 #include "Game/AIConstants.h"
+#include "System.h" // PC_ORIG_TICK
 
 static const char className[] = "actRescue";
 
@@ -151,7 +152,7 @@ int ActRescue::execGo()
 			ret = ACTEXEC_Fail;
 		} else {
 			ret = static_cast<ActionExitCode>(mApproachPos->exec());
-			if (!--mTimeLimit) {
+			if (PC_ORIG_TICK() && !--mTimeLimit) { // FPS Mode: limite en frames originales
 				ret = ACTEXEC_Success;
 			}
 

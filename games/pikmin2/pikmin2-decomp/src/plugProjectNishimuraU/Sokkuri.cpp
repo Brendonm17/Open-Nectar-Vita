@@ -275,13 +275,13 @@ void Obj::updateMoveState()
 	if (mWaterBox) {
 		Vector3f velocity    = getVelocity();
 		Vector3f newVelocity = velocity;
-		newVelocity.y += 5.0f;
+		newVelocity.y += 5.0f * PC_ORIG_DT_SCALE(); // FPS Mode: por frame original
 		setVelocity(newVelocity);
 
-		mMoveVelocity = approach(mMoveVelocity, C_PROPERPARMS.mUnderwaterMoveSpeed.mValue, 10.0f);
+		mMoveVelocity = approach(mMoveVelocity, C_PROPERPARMS.mUnderwaterMoveSpeed.mValue, 10.0f * PC_ORIG_DT_SCALE());
 
 	} else {
-		mMoveVelocity = approach(mMoveVelocity, C_GENERALPARMS.mMoveSpeed.mValue, 25.0f);
+		mMoveVelocity = approach(mMoveVelocity, C_GENERALPARMS.mMoveSpeed.mValue, 25.0f * PC_ORIG_DT_SCALE());
 	}
 }
 

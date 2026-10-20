@@ -61,12 +61,12 @@ void StateDead::exec(EnemyBase* enemy)
 	Obj* hanachirashi = OBJ(enemy);
 	if (!hanachirashi->getCurrAnimIndex()) {
 		if (hanachirashi->getMotionFrame() > 45.0f) {
-			hanachirashi->subShadowRadius();
+			if (PC_ORIG_TICK()) hanachirashi->subShadowRadius(); // FPS Mode: una vez por frame original
 		}
 	}
 
 	else if (hanachirashi->getMotionFrame() > 60.0f) {
-		hanachirashi->subShadowRadius();
+		if (PC_ORIG_TICK()) hanachirashi->subShadowRadius(); // FPS Mode: una vez por frame original
 	}
 
 	if (hanachirashi->mCurAnim->mIsPlaying && hanachirashi->mCurAnim->mType == KEYEVENT_END) {

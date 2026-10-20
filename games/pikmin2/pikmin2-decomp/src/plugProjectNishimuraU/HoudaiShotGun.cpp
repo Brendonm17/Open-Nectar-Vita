@@ -487,8 +487,8 @@ bool HoudaiShotGunMgr::searchShotGunRotation()
 	f32 angleDist = angDist(headPitch, turnAngle);
 	f32 absDist   = absVal(angleDist);
 
-	if (absDist > 0.05f) {
-		mYaw -= 0.05f * (angleDist / absDist);
+	if (absDist > 0.05f * PC_ORIG_DT_SCALE()) { // FPS Mode: giro por frame original
+		mYaw -= 0.05f * PC_ORIG_DT_SCALE() * (angleDist / absDist);
 	} else {
 		mYaw -= angleDist;
 	}
@@ -502,8 +502,8 @@ bool HoudaiShotGunMgr::searchShotGunRotation()
 
 	f32 angleDist2 = angDist(mPitch, ang2);
 	f32 absDist2   = absVal(angleDist2);
-	if (absDist2 > 0.05f) {
-		mPitch -= 0.05f * (angleDist2 / absDist2);
+	if (absDist2 > 0.05f * PC_ORIG_DT_SCALE()) { // FPS Mode
+		mPitch -= 0.05f * PC_ORIG_DT_SCALE() * (angleDist2 / absDist2);
 	} else {
 		mPitch -= angleDist2;
 	}
@@ -519,10 +519,10 @@ bool HoudaiShotGunMgr::searchShotGunRotation()
 bool HoudaiShotGunMgr::returnShotGunRotation()
 {
 	f32 targetYaw = getNearestZeroAngle(mYaw);
-	mYaw          = approach(mYaw, targetYaw, 0.025f);
+	mYaw          = approach(mYaw, targetYaw, 0.025f * PC_ORIG_DT_SCALE());
 
 	f32 targetPitch = getNearestZeroAngle(mPitch);
-	mPitch          = approach(mPitch, targetPitch, 0.025f);
+	mPitch          = approach(mPitch, targetPitch, 0.025f * PC_ORIG_DT_SCALE());
 
 	if (absVal(mYaw - targetYaw) < 0.01f && absVal(mPitch - targetPitch) < 0.01f) {
 		return true;

@@ -1,4 +1,5 @@
 #include "Game/EnemyAnimatorBase.h"
+#include "System.h" // PC_ORIG_DT_SCALE / PC_DAMP
 
 namespace Game {
 const f32 EnemyAnimatorBase::defaultAnimSpeed = 30.0f;
@@ -22,7 +23,7 @@ void EnemyAnimatorBase::animate(f32 speed)
 {
 	if (!(mFlags.isSet(SysShape::Animator::AnimCompleted))) {
 		if (mFlags.isSet(SysShape::Animator::AnimFinishMotion)) {
-			mNormalizedTime *= 0.9f;
+			mNormalizedTime *= PC_DAMP(0.9f); // FPS Mode: amortiguacion por frame
 			if (mNormalizedTime < 0.1f) {
 				mNormalizedTime = 0.0f;
 
@@ -53,7 +54,7 @@ void EnemyAnimatorBase::animate(int animatorNum, f32 speed)
 {
 	if (!(mFlags.isSet(SysShape::Animator::AnimCompleted))) {
 		if (mFlags.isSet(SysShape::Animator::AnimFinishMotion)) {
-			mNormalizedTime *= 0.9f;
+			mNormalizedTime *= PC_DAMP(0.9f); // FPS Mode: amortiguacion por frame
 			if (mNormalizedTime < 0.1f) {
 				mNormalizedTime = 0.0f;
 

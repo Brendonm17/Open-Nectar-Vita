@@ -288,7 +288,7 @@ bool BigTreasureWaterAttack::update()
 	mPosition.y += mVelocity.y * sys->mDeltaTime;
 	mPosition.z += mVelocity.z * sys->mDeltaTime;
 
-	mVelocity.y -= 20.0f;
+	mVelocity.y -= 20.0f * PC_ORIG_DT_SCALE(); // FPS Mode: gravedad por frame original
 
 	f32 bubbleDist = 20.0f;
 
@@ -432,7 +432,7 @@ bool BigTreasureElecAttack::update()
 			mFloorTri = nullptr;
 		}
 
-		mVelocity.y -= 20.0f;
+		mVelocity.y -= 20.0f * PC_ORIG_DT_SCALE(); // FPS Mode: gravedad por frame original
 
 	} else {
 		mPosition = mOwner->mModel->getJoint("otakara_elec_eff")->getWorldMatrix()->getColumn(3);

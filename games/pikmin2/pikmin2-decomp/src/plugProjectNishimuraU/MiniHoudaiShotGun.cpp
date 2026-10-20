@@ -95,7 +95,7 @@ bool MiniHoudaiShotGunNode::update()
 
 	setPosition(moveSphere.mPosition);
 
-	mVelocity.y -= 20.0f;
+	mVelocity.y -= 20.0f * PC_ORIG_DT_SCALE(); // FPS Mode: gravedad por frame original
 
 	if (moveInfo.mFloorTriangle || moveInfo.mWallTriangle) {
 		Vector3f groundPos = mPosition;
@@ -538,16 +538,23 @@ bool MiniHoudaiShotGunMgr::searchShotGunRotation()
 		}
 	}
 
-	f32 b = (val / sys->mDeltaTime) / 20.0f;
-	Vector2f vec2D((0.45f * dist) / (b / 20.0f) / sys->mDeltaTime, b);
+#ifdef PIKI_PC_PORT
+	// FPS Mode: la balistica (gravedad por frame) esta pensada para el paso
+	// original; con el deltaTime de 60 FPS la velocidad vertical se doblaba.
+	const f32 dt = PC_ORIG_PERIOD();
+#else
+	const f32 dt = sys->mDeltaTime;
+#endif
+	f32 b = (val / dt) / 20.0f;
+	Vector2f vec2D((0.45f * dist) / (b / 20.0f) / dt, b);
 	mShellSpeed = sqrtfClamped(SQUARE(vec2D.y) + SQUARE(vec2D.x));
 
 	f32 angleDist = angDist(mAngle, HALF_PI - JMAAtan2Radian(vec2D.x, vec2D.y));
 
 	f32 absAng = absVal(angleDist);
 
-	if (absAng > 0.1f) {
-		mAngle -= 0.1f * (angleDist / absAng);
+	if (absAng > 0.1f * PC_ORIG_DT_SCALE()) { // FPS Mode: giro por frame original
+		mAngle -= 0.1f * PC_ORIG_DT_SCALE() * (angleDist / absAng);
 	} else {
 		mAngle -= angleDist;
 	}
@@ -565,7 +572,7 @@ bool MiniHoudaiShotGunMgr::searchShotGunRotation()
 bool MiniHoudaiShotGunMgr::returnShotGunRotation()
 {
 	f32 targetAngle = getNearestZeroAngle(mAngle);
-	mAngle          = approach(mAngle, targetAngle, 0.025f);
+	mAngle          = approach(mAngle, targetAngle, 0.025f * PC_ORIG_DT_SCALE()); // FPS Mode
 
 	if (absVal(mAngle - targetAngle) < 0.01f) {
 		return true;

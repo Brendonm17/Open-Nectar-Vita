@@ -412,7 +412,7 @@ void StateFall::exec(EnemyBase* enemy)
 		limit *= 30.0f;
 		if (limit > 65.0f) {
 			Vector3f velocity = kurage->getVelocity();
-			velocity.y -= 100.0f;
+			velocity.y -= 100.0f * PC_ORIG_DT_SCALE(); // FPS Mode: por frame original
 			kurage->setVelocity(velocity);
 			kurage->disableEvent(0, EB_Untargetable);
 			kurage->finishMotion();

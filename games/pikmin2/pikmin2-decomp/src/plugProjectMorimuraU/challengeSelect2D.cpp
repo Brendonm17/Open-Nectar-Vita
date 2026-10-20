@@ -410,7 +410,7 @@ void TChallengePanel::addAlpha()
  */
 void TChallengePanel::decAlpha()
 {
-	mCurrentScale *= 0.95f;
+	mCurrentScale *= PC_DAMP(0.95f); // FPS Mode: amortiguacion por frame
 	if (mCurrentScale < 1.0f) {
 		mCurrentScale = 1.0f;
 	}
@@ -469,21 +469,21 @@ void TChallengePanel::update(int index, bool flag)
 				dir = -1.0f;
 			f32 s = sinf(mTimer);
 			mYOffset += (TChallengeSelect::mPanelMoveVal * dir * absF(s) - mYOffset) * 0.2f;
-			mXOffset *= 0.9f;
+			mXOffset *= PC_DAMP(0.9f); // FPS Mode: amortiguacion por frame
 		} else if (a2 == a4) {
 			f32 dir = 1.0f;
 			if (a1 < a3)
 				dir = -1.0f;
 			f32 s = sinf(mTimer);
 			mXOffset += (TChallengeSelect::mPanelMoveVal * dir * absF(s) - mXOffset) * 0.2f;
-			mYOffset *= 0.9f;
+			mYOffset *= PC_DAMP(0.9f); // FPS Mode: amortiguacion por frame
 		} else {
-			mXOffset *= 0.9f;
-			mYOffset *= 0.9f;
+			mXOffset *= PC_DAMP(0.9f); // FPS Mode: amortiguacion por frame
+			mYOffset *= PC_DAMP(0.9f); // FPS Mode: amortiguacion por frame
 		}
 	} else {
-		mXOffset *= 0.9f;
-		mYOffset *= 0.9f;
+		mXOffset *= PC_DAMP(0.9f); // FPS Mode: amortiguacion por frame
+		mYOffset *= PC_DAMP(0.9f); // FPS Mode: amortiguacion por frame
 	}
 
 	f32 scale = mScaleMgr->calc();
@@ -858,11 +858,11 @@ void TChallengePlayModeScreen::update()
 	mEfxCursorPos2.x += x2;
 
 	if (TChallengeSelect::mSelected1p) {
-		mAlphaTimer += 0.1f;
+		mAlphaTimer += 0.1f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		if (mAlphaTimer > 1.0f) {
 			mAlphaTimer = 1.0f;
 		}
-		mScale -= 0.1f;
+		mScale -= 0.1f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		if (mScale < 0.0f) {
 			mScale = 0.0f;
 		}
@@ -886,17 +886,17 @@ void TChallengePlayModeScreen::update()
 		mEfxCursorPos1.y = mEfxCursorPos2.y;
 	} else {
 		if (TChallengeSelect::mConnect2p) {
-			mScale += 0.1f;
+			mScale += 0.1f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 			if (mScale > 1.0f) {
 				mScale = 1.0f;
 			}
 		} else {
-			mScale -= 0.1f;
+			mScale -= 0.1f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 			if (mScale < 0.0f) {
 				mScale = 0.0f;
 			}
 		}
-		mAlphaTimer -= 0.1f;
+		mAlphaTimer -= 0.1f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		if (mAlphaTimer < 0.0f) {
 			mAlphaTimer = 0.0f;
 		}
@@ -929,7 +929,7 @@ void TChallengePlayModeScreen::update()
 			scale = mScale;
 		}
 		if (scale == 1.0f) {
-			mAngleTimers[i] += 0.2f;
+			mAngleTimers[i] += 0.2f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 			if (mAngleTimers[i] > TAU) {
 				mAngleTimers[i] -= TAU;
 			}
@@ -1009,12 +1009,12 @@ void TChallengePlayModeScreen::update()
 			}
 			mScreenObj->animation();
 			if (mDoShowNoController) {
-				mNoControllerTimer += 0.2f;
+				mNoControllerTimer += 0.2f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 				if (mNoControllerTimer > 1.0f) {
 					mNoControllerTimer = 1.0f;
 				}
 			} else {
-				mNoControllerTimer -= 0.2f;
+				mNoControllerTimer -= 0.2f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 				if (mNoControllerTimer < 0.0f) {
 					mNoControllerTimer = 0.0f;
 				}
@@ -1733,7 +1733,7 @@ bool TChallengeSelect::doUpdate()
 						if (_14C < 1.0f) {
 							_14C = 1.0f;
 						}
-						_14C += 0.2f;
+						_14C += 0.2f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 						if (_14C >= 2.0f) {
 							_14C = 2.0f;
 						}
@@ -1784,7 +1784,7 @@ bool TChallengeSelect::doUpdate()
 
 	if (mStageChangeCounter > _14C * 8.0f) {
 		mStageChangeCounter = 0;
-		_14C *= 0.7f;
+		_14C *= PC_DAMP(0.7f); // FPS Mode: amortiguacion por frame
 		if (_14C < 0.25f) {
 			_14C = 0.25f;
 		}
@@ -1832,9 +1832,9 @@ bool TChallengeSelect::doUpdate()
 	// update the state of the level name when it moves
 #if defined(VERSION_PAL)
 	if (mDisp && mDisp->mStatus == Screen::Game2DMgr::CHECK2D_ChallengeSelect_InDemo) {
-		mLevelNameMoveTimer += 0.25f;
+		mLevelNameMoveTimer += 0.25f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		if (mLevelNameMoveState > 1) {
-			mLevelNameMoveTimer += 0.15f;
+			mLevelNameMoveTimer += 0.15f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		}
 		if (mLevelNameMoveTimer > 1.0f) {
 			mLevelNameMoveTimer = 1.0f;
@@ -1843,7 +1843,7 @@ bool TChallengeSelect::doUpdate()
 	} else
 #endif
 	    if (_136) {
-		mLevelNameMoveTimer *= 0.65f;
+		mLevelNameMoveTimer *= PC_DAMP(0.65f); // FPS Mode: amortiguacion por frame
 		if (mLevelNameMoveTimer < 0.2f) {
 			_136 = false;
 			setStageName(mCurrentSelection);
@@ -1863,9 +1863,9 @@ bool TChallengeSelect::doUpdate()
 			}
 		}
 	} else if (f32(mStageChangeCounter) == 0.0f && _14C == 2.0f) {
-		mLevelNameMoveTimer += 0.25f;
+		mLevelNameMoveTimer += 0.25f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		if (mLevelNameMoveState > 1) {
-			mLevelNameMoveTimer += 0.15f;
+			mLevelNameMoveTimer += 0.15f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		}
 		if (mLevelNameMoveTimer > 1.0f) {
 			mLevelNameMoveTimer = 1.0f;
@@ -1916,7 +1916,7 @@ bool TChallengeSelect::doUpdate()
 
 	// when in the entering demo, rotate the circular selection effect in the X axis
 	if (mIsInDemo) {
-		mSelectionEffectAngle += 5.0f;
+		mSelectionEffectAngle += 5.0f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		f32 max = -(mDownOffset * 5.0f - 90.0f);
 		if (mSelectionEffectAngle > max) {
 			mSelectionEffectAngle = max;

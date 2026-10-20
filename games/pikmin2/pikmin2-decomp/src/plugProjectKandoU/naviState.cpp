@@ -570,7 +570,7 @@ void NaviWalkState::collisionCallback(Navi* navi, CollEvent& event)
 		f32 y = navi->mController1->getMainStickY();
 		if (x * x + y * y > 0.5f) {
 			if (mCollisionTimer < 100) {
-				mCollisionTimer += 3;
+				if (PC_ORIG_TICK()) mCollisionTimer += 3; // FPS Mode: una vez por frame original
 			}
 
 			if (mCollisionTimer > 60) {

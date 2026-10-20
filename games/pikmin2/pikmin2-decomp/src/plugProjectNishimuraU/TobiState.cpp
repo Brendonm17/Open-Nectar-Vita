@@ -1,6 +1,7 @@
 #include "Game/Entities/Tobi.h"
 #include "Game/EnemyAnimKeyEvent.h"
 #include "Game/EnemyFunc.h"
+#include "System.h" // PC_ORIG_DT_SCALE / PC_DAMP
 
 namespace Game {
 namespace Tobi {
@@ -571,7 +572,7 @@ void StateFly::exec(EnemyBase* enemy)
 		tobi->finishMotion();
 
 		Vector3f vel = tobi->getVelocity();
-		vel.y *= 0.5f;
+		vel.y *= PC_DAMP(0.5f); // FPS Mode: amortiguacion por frame
 		tobi->setVelocity(vel);
 	}
 

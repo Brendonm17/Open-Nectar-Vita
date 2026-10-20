@@ -735,13 +735,13 @@ void GameLightMgr::updateSpotType()
 	Color4 lightColor;
 
 	if (playData->mOlimarData->hasItem(OlimarData::ODII_StellarOrb)) {
-		mStellarIncrement += 0.01f;
+		mStellarIncrement += 0.01f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		if (mStellarIncrement > 1.0f) {
 			mStellarIncrement = 1.0f;
 		}
 
 	} else {
-		mStellarIncrement -= 0.01f;
+		mStellarIncrement -= 0.01f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 		if (mStellarIncrement < 0.0f) {
 			mStellarIncrement = 0.0f;
 		}

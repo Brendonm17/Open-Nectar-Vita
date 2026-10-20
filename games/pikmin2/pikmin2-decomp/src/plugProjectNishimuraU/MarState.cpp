@@ -59,7 +59,7 @@ void StateDead::exec(EnemyBase* enemy)
 {
 	Obj* mar = OBJ(enemy);
 	if (mar->getMotionFrame() > 45.0f) {
-		mar->subShadowRadius();
+		if (PC_ORIG_TICK()) mar->subShadowRadius(); // FPS Mode: una vez por frame original
 	}
 
 	if (mar->mCurAnim->mIsPlaying && mar->mCurAnim->mType == KEYEVENT_END) {

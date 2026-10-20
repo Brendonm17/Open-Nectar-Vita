@@ -1272,7 +1272,7 @@ bool TChallengeResult::doUpdate()
 	if (mDemoState == 6) {
 		mPaneAButton->show();
 		if (mAButtonAlphaTimer < 1.0f) {
-			mAButtonAlphaTimer += 0.1f;
+			mAButtonAlphaTimer += 0.1f * PC_ORIG_DT_SCALE(); // FPS Mode: paso por frame original
 			if (mAButtonAlphaTimer > 1.0f) {
 				mAButtonAlphaTimer = 1.0f;
 			}

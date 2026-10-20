@@ -656,7 +656,7 @@ void Obj::updateCollPartOffset()
 			if (absVal(slot->mOffset.x - cDefaultKamuJointOffset[i]) > 1.0f || absVal(20.0f + slot->mOffset.y) > 1.0f
 			    || absVal(slot->mOffset.z) > 1.0f) {
 				slot->mOffset.x = interpolate(slot->mOffset.x, cDefaultKamuJointOffset[i], 0.2f);
-				slot->mOffset.y = approach(slot->mOffset.y, -20.0f, 7.5f);
+				slot->mOffset.y = approach(slot->mOffset.y, -20.0f, 7.5f * PC_ORIG_DT_SCALE());
 				slot->mOffset.z *= PC_DAMP(0.8f); // FPS Mode: amortiguacion por frame
 
 				if (absVal(slot->mOffset.x - cDefaultKamuJointOffset[i]) < 1.0f && absVal(20.0f + slot->mOffset.y) < 1.0f

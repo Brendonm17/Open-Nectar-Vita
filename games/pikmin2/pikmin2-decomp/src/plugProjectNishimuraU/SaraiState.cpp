@@ -5,6 +5,13 @@
 #include "Game/rumble.h"
 #include "Dolphin/rand.h"
 
+#ifdef PIKI_PC_PORT
+// FPS Mode: duracion del paso original (1/30), para la logica pensada a 30 Hz.
+#define SARAI_ORIG_DT PC_ORIG_PERIOD()
+#else
+#define SARAI_ORIG_DT sys->mDeltaTime
+#endif
+
 namespace Game {
 namespace Sarai {
 
@@ -442,7 +449,9 @@ void StateAttack::exec(EnemyBase* enemy)
 				f32 saraiHeight = sarai->getPosition().y; // f29
 
 				Vector3f vel = sarai->getVelocity(); // 0x80
-				f32 factor   = ((targetHeight - saraiHeight) / sys->mDeltaTime) * CG_PROPERPARMS(sarai).mHuntDescentFactor();
+				// FPS Mode: control proporcional pensado para el paso original;
+				// con el deltaTime de 60 FPS bajaba el doble de rapido.
+				f32 factor = ((targetHeight - saraiHeight) / SARAI_ORIG_DT) * CG_PROPERPARMS(sarai).mHuntDescentFactor();
 
 				f32 vertSpeed;
 				if (factor < -2500.0f) {
@@ -462,7 +471,7 @@ void StateAttack::exec(EnemyBase* enemy)
 		} else {
 			sarai->setHeightVelocity();
 			Vector3f targetVel = sarai->getTargetVelocity();
-			targetVel *= CG_PROPERPARMS(sarai).mPostHuntDecayRate();
+			targetVel *= PC_DAMP(CG_PROPERPARMS(sarai).mPostHuntDecayRate()); // FPS Mode: amortiguacion por frame
 			sarai->setTargetVelocity(targetVel);
 		}
 	} else {
@@ -481,7 +490,7 @@ void StateAttack::exec(EnemyBase* enemy)
 				dir *= 25.0f;
 				sep -= dir;
 				sep.y = 0.0f;
-				sep *= (0.06666667f / sys->mDeltaTime);
+				sep *= (0.06666667f / SARAI_ORIG_DT); // FPS Mode: mismo impulso que a 30 Hz
 				sarai->setVelocity(sep);
 				sarai->mTargetVelocity = sep;
 			}
@@ -538,7 +547,7 @@ void StateFail::exec(EnemyBase* enemy)
 	sarai->setHeightVelocity();
 
 	Vector3f targetVel = sarai->getTargetVelocity();
-	targetVel *= CG_PROPERPARMS(sarai).mPostHuntDecayRate();
+	targetVel *= PC_DAMP(CG_PROPERPARMS(sarai).mPostHuntDecayRate()); // FPS Mode: amortiguacion por frame
 	sarai->setTargetVelocity(targetVel);
 
 	if (sarai->mCurAnim->mIsPlaying && sarai->mCurAnim->mType == KEYEVENT_END) {
