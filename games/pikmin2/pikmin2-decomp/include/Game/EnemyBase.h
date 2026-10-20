@@ -261,7 +261,15 @@ struct EnemyBase : public Creature, public SysShape::MotionListener, virtual pub
 	virtual void doStartStoneState();                                                // _2A4
 	virtual void doFinishStoneState();                                               // _2A8
 	virtual f32 getDamageCoeStoneState() { return 1.5f; }                            // _2AC (weak)
+#ifdef PIKI_PC_PORT
+	// FPS Mode: the timer moves in fractional steps and, at the end of a
+	// non-looping animation, swings between time-0.5 and the time-1 clamp.
+	// JAIAnimeSound reads any backwards step as a loop and replays the
+	// sounds (Hermit Crawmad attack heard twice). Whole frames, as on console.
+	virtual f32 getSound_CurrAnimFrame() { return (f32)(int)mAnimator->getAnimator().mTimer; } // _108 (weak)
+#else
 	virtual f32 getSound_CurrAnimFrame() { return mAnimator->getAnimator().mTimer; } // _108 (weak)
+#endif
 	virtual f32 getSound_CurrAnimSpeed() { return mAnimator->mSpeed; }               // _10C (weak)
 	virtual bool sound_culling()                                                     // _104 (weak)
 	{
