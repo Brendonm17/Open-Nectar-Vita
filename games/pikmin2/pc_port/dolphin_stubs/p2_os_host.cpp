@@ -599,7 +599,15 @@ void OSInitCond(OSCond* cond)
 // esperaba ya no sigue para soltarlo: el siguiente que lo use se colgaba.
 static void pc_cancel_unlock_mutex(void* mutex)
 {
+#ifdef __ANDROID__
+	// Aquí el hilo sale por pthread_exit desde el manejador de SIGUSR2 (ver
+	// OSCancelThread), no por pthread_cancel: pthread_cond_wait no vuelve a
+	// tomar el mutex, y soltarlo era soltar uno ajeno, a menudo ya destruido
+	// (FORTIFY abortaba al pulsar Begin en el título).
+	(void)mutex;
+#else
 	pthread_mutex_unlock(static_cast<pthread_mutex_t*>(mutex));
+#endif
 }
 
 void OSWaitCond(OSCond* cond, OSMutex* mutex)
