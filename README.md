@@ -6,6 +6,12 @@ Native, open-source ports of *Pikmin* (GameCube, 2001) and *Pikmin 2* (GameCube,
 
 This project builds upon the decompilations by [projectPiki/pikmin](https://github.com/projectPiki/pikmin) and [projectPiki/pikmin2](https://github.com/projectPiki/pikmin2) and adds a native port layer.
 
+## AI disclosure
+
+This project was developed with the assistance of AI tools. The generated code was reviewed, tested and integrated by me. I mention it because I'd rather be upfront about how this was built.
+
+To make it clear: I'm a coder and I use claude as a tool not as a substitute. I know what is done in my project and how it is done, main problem with open nectar is that I don't have testers, I test myself on my devices where it works fine and once released I fix all the issues reported. Please consider to try the latest release
+
 ## Project Status
 
 ### Pikmin 2
@@ -635,10 +641,6 @@ NECTAR_PRIME_EGL=1           # Also pin EGL to NVIDIA (can fail on Wayland)
 The game binary also accepts `--audio-self-test`, which walks scenes, stages,
 boss transitions, muting, sound effects and cinematic streams without opening a
 window, and reports whether each produced audio.
-
-## AI disclosure
-
-This project was developed with the assistance of AI tools. The generated code was reviewed, tested and integrated by me. I mention it because I'd rather be upfront about how this was built.
 
 ## Legal requirements
 
