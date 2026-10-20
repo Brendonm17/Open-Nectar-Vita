@@ -14,6 +14,7 @@
 #include "fd_stream.h"
 #include "gamecube_image.h"
 #include "launcher_gui.h"
+#include "crash_report.h"
 #include "texture_pack_download.h"
 
 #include <SDL2/SDL.h>
@@ -259,6 +260,12 @@ int main(int argc, char** argv)
         logLine("could not open the window: " + error);
         return 1;
     }
+    // Crash de la sesión anterior (el juego corre en su propio proceso y deja
+    // el informe en su carpeta): copiar y abrir GitHub antes de la portada.
+    offerCrashReport(hub, {
+        { "Pikmin 2", pikmin2Dir, "pikmin2_crash.log", "pikmin2.log" },
+        { "Pikmin", pikmin1Dir, "pikmin_crash.log", "pikmin.log" },
+    });
 
     for (;;) {
         const HubResult choice = hub.runHome();

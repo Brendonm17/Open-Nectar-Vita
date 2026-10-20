@@ -33,11 +33,74 @@ __declspec(dllexport) int           AmdPowerXpressRequestHighPerformance = 1;
 #include "settings/pc_settings.h"
 
 #include "System.h"
+#include <ctime>
+#include <cwchar>
+#ifndef _WIN32
+#include <unistd.h> // getcwd
+#endif
+
+#ifndef NECTAR_RELEASE_VERSION
+#define NECTAR_RELEASE_VERSION "unknown"
+#endif
+#ifndef NECTAR_GIT_COMMIT
+#define NECTAR_GIT_COMMIT "unknown"
+#endif
+#if defined(_WIN32)
+#define PC_CRASH_PLATFORM "Windows x86-64"
+#elif defined(__ANDROID__)
+#define PC_CRASH_PLATFORM "Android arm64"
+#else
+#define PC_CRASH_PLATFORM "Linux x86-64"
+#endif
+
+// Informe de crash junto a los datos del juego. El launcher lo encuentra (al
+// fallar, porque el juego lo lanza, o la próxima vez que se abre) y ofrece
+// copiarlo al portapapeles y abrir la página de issues de GitHub.
+static const char kPcCrashFile[] = "pikmin2_crash.log";
+// Launcher que abrió el juego (NECTAR_LAUNCHER, lo pone él). Se copia al
+// arrancar: dentro del gestor de crash no se reserva memoria.
+#ifdef _WIN32
+static wchar_t sPcCrashLauncher[1024];
+static wchar_t sPcCrashPath[1024]; // ruta absoluta del informe, para el launcher
+#else
+static char sPcCrashLauncher[1024];
+static char sPcCrashPath[1024];
+#endif
+
+static void pc_crash_header(FILE* out)
+{
+	char stamp[32] = "?";
+	const time_t now = time(nullptr);
+	struct tm utc;
+#ifdef _WIN32
+	if (gmtime_s(&utc, &now) == 0)
+#else
+	if (gmtime_r(&now, &utc))
+#endif
+		strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &utc);
+	fprintf(out, "game: Pikmin 2\nversion: %s (commit %s)\nplatform: %s\ntime: %s UTC\n", NECTAR_RELEASE_VERSION,
+	        NECTAR_GIT_COMMIT, PC_CRASH_PLATFORM, stamp);
+}
+
+static void pc_crash_remember_launcher()
+{
+#ifdef _WIN32
+	const wchar_t* launcher = _wgetenv(L"NECTAR_LAUNCHER");
+	if (launcher && wcslen(launcher) < 1024) wcscpy(sPcCrashLauncher, launcher);
+	if (!_wfullpath(sPcCrashPath, L"pikmin2_crash.log", 1024)) sPcCrashPath[0] = 0;
+#else
+	const char* launcher = getenv("NECTAR_LAUNCHER");
+	if (launcher && strlen(launcher) < sizeof(sPcCrashLauncher)) strcpy(sPcCrashLauncher, launcher);
+	char cwd[900];
+	if (getcwd(cwd, sizeof(cwd))) snprintf(sPcCrashPath, sizeof(sPcCrashPath), "%s/%s", cwd, kPcCrashFile);
+#endif
+}
 
 #if defined(__linux__) || defined(__ANDROID__)
 #include <csignal>
 #include <unistd.h>
 #include <execinfo.h>
+#include <sys/stat.h>
 #include <dlfcn.h>
 #include <link.h>
 
@@ -79,20 +142,37 @@ extern "C" void pc_crash_handler(int sig, siginfo_t* info, void* /*ucontext*/)
 	int   count = backtrace(frames, 64);
 
 	uintptr_t base = pc_module_base();
-	fprintf(stderr, "\n=== [PC Port] CRASH: %s ===\n", name);
-	if (info) {
-		fprintf(stderr, "faulting address = %p\n", info->si_addr);
+	FILE* outs[2] = { stderr, fopen(kPcCrashFile, "w") };
+	for (FILE* out : outs) {
+		if (!out) continue;
+		fprintf(out, "\n=== [PC Port] CRASH: %s ===\n", name);
+		pc_crash_header(out);
+		if (info) {
+			fprintf(out, "faulting address = %p\n", info->si_addr);
+		}
+		fprintf(out, "module base = 0x%lx  (addr2line -Cfe pikmin2_pc <rel>)\n", (unsigned long)base);
+		for (int i = 0; i < count; i++) {
+			uintptr_t abs = (uintptr_t)frames[i];
+			Dl_info   dl;
+			const char* sym = (dladdr(frames[i], &dl) && dl.dli_sname) ? dl.dli_sname : "?";
+			fprintf(out, "  #%-2d abs=0x%016lx rel=0x%010lx  %s\n", i, (unsigned long)abs,
+			        (unsigned long)(abs - base), sym);
+		}
+		fprintf(out, "=== end backtrace ===\n");
+		fflush(out);
 	}
-	fprintf(stderr, "module base = 0x%lx  (addr2line -Cfe pikmin2_pc <rel>)\n", (unsigned long)base);
-	for (int i = 0; i < count; i++) {
-		uintptr_t abs = (uintptr_t)frames[i];
-		Dl_info   info;
-		const char* sym = (dladdr(frames[i], &info) && info.dli_sname) ? info.dli_sname : "?";
-		fprintf(stderr, "  #%-2d abs=0x%016lx rel=0x%010lx  %s\n", i, (unsigned long)abs,
-		        (unsigned long)(abs - base), sym);
+	if (outs[1]) fclose(outs[1]);
+
+#ifndef __ANDROID__
+	// Ventana del informe al momento: un proceso nuevo (el launcher), no este,
+	// que puede tener la memoria corrupta. En Android la muestra el launcher
+	// al volver a abrirse.
+	if (sPcCrashLauncher[0] && fork() == 0) {
+		setsid();
+		execl(sPcCrashLauncher, sPcCrashLauncher, "--crash-report", sPcCrashPath, (char*)nullptr);
+		_exit(127);
 	}
-	fprintf(stderr, "=== end backtrace ===\n");
-	fflush(stderr);
+#endif
 
 	signal(sig, SIG_DFL);
 	raise(sig);
@@ -100,6 +180,21 @@ extern "C" void pc_crash_handler(int sig, siginfo_t* info, void* /*ucontext*/)
 
 static void pc_install_crash_handler()
 {
+	pc_crash_remember_launcher();
+#ifndef __ANDROID__
+	// Sin terminal (abierto desde el launcher o el escritorio) la salida se
+	// perdía: va a pikmin2.log, como en Windows, y entra en el informe de crash.
+	// Una tubería o un archivo se respetan (el launcher lee --settings-dump así).
+	struct stat outStat;
+	const bool outCaptured
+	    = fstat(STDOUT_FILENO, &outStat) == 0 && (S_ISFIFO(outStat.st_mode) || S_ISREG(outStat.st_mode));
+	if ((!isatty(STDOUT_FILENO) && !outCaptured) || getenv("PIKMIN2_LOG_TO_FILE")) {
+		if (freopen("pikmin2.log", "w", stdout)) {
+			dup2(fileno(stdout), STDERR_FILENO);
+			setvbuf(stderr, NULL, _IONBF, 0);
+		}
+	}
+#endif
 	struct sigaction sa;
 	memset(&sa, 0, sizeof(sa));
 	sa.sa_sigaction = pc_crash_handler;
@@ -135,12 +230,13 @@ static LONG WINAPI pc_crash_filter(EXCEPTION_POINTERS* ep)
 	static volatile LONG entered = 0;
 	if (InterlockedExchange(&entered, 1)) return EXCEPTION_CONTINUE_SEARCH;
 
-	FILE* outs[2] = { stderr, fopen("pikmin2_crash.log", "w") };
+	FILE* outs[2] = { stderr, fopen(kPcCrashFile, "w") };
 	for (FILE* out : outs) {
 		if (!out) continue;
 		const EXCEPTION_RECORD* rec = ep->ExceptionRecord;
 		fprintf(out, "\n=== [PC Port] CRASH: exception 0x%08lx at %p ===\n", (unsigned long)rec->ExceptionCode,
 		        rec->ExceptionAddress);
+		pc_crash_header(out);
 		if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && rec->NumberParameters >= 2) {
 			fprintf(out, "%s address = 0x%llx\n", rec->ExceptionInformation[0] ? "write" : "read",
 			        (unsigned long long)rec->ExceptionInformation[1]);
@@ -166,6 +262,20 @@ static LONG WINAPI pc_crash_filter(EXCEPTION_POINTERS* ep)
 		fflush(out);
 	}
 	if (outs[1]) fclose(outs[1]);
+	// Ventana del informe al momento, en un proceso nuevo (el launcher).
+	if (sPcCrashLauncher[0]) {
+		wchar_t command[2200];
+		_snwprintf(command, 2200, L"\"%ls\" --crash-report \"%ls\"", sPcCrashLauncher, sPcCrashPath);
+		command[2199] = 0;
+		STARTUPINFOW startup = {};
+		startup.cb = sizeof(startup);
+		PROCESS_INFORMATION process = {};
+		if (CreateProcessW(nullptr, command, nullptr, nullptr, FALSE, DETACHED_PROCESS, nullptr, nullptr, &startup,
+		                   &process)) {
+			CloseHandle(process.hThread);
+			CloseHandle(process.hProcess);
+		}
+	}
 	return EXCEPTION_CONTINUE_SEARCH;
 }
 
@@ -188,6 +298,7 @@ static void pc_install_crash_handler()
 	// el juego mantiene abiertos archivos de audio y DVD a la vez.
 	// 2048 es el máximo que acepta msvcrt (MinGW); la UCRT admite más.
 	_setmaxstdio(2048);
+	pc_crash_remember_launcher();
 	SetUnhandledExceptionFilter(pc_crash_filter);
 }
 #else

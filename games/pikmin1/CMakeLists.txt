@@ -899,6 +899,7 @@ if(ANDROID AND NOT TARGET nectar_launcher)
     add_library(nectar_launcher SHARED
         pc_port/launcher/launcher_android_main.cpp
         pc_port/launcher/launcher_gui.cpp
+        pc_port/launcher/crash_report.cpp
         pc_port/launcher/bti_decode.cpp
         pc_port/launcher/settings_model.cpp
         pc_port/launcher/release_update.cpp
@@ -967,6 +968,7 @@ if(PIKMIN_BUILD_LAUNCHER)
     add_executable(pikmin_launcher
         pc_port/launcher/launcher_main.cpp
         pc_port/launcher/launcher_gui.cpp
+        pc_port/launcher/crash_report.cpp
         pc_port/launcher/bti_decode.cpp
         pc_port/launcher/settings_model.cpp
         pc_port/launcher/release_update.cpp

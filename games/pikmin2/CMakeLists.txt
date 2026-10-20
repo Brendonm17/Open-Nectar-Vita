@@ -309,6 +309,28 @@ message(STATUS "  GD+THP  : ${GD_SOURCES} ${THP_SOURCES}")
 #  pikmin2_pc — entry nativo + stubs Dolphin + renderer GX→GL (Fase 4)
 ###############################################################################
 if(PIKMIN2_ENABLE_PORT_LAYER)
+    # Versión y commit en el informe de crash (pikmin2_crash.log): sin ellos
+    # no se sabe con qué ejecutable traducir las direcciones del backtrace.
+    set(NECTAR_RELEASE_VERSION "unknown")
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../versions.json")
+        file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../../versions.json" NECTAR_VERSIONS_JSON)
+        string(REGEX MATCH "\"release\"[ \t]*:[ \t]*\"([^\"]*)\"" _ "${NECTAR_VERSIONS_JSON}")
+        if(CMAKE_MATCH_1)
+            set(NECTAR_RELEASE_VERSION "${CMAKE_MATCH_1}")
+        endif()
+    endif()
+    set(NECTAR_GIT_COMMIT "unknown")
+    find_package(Git QUIET)
+    if(GIT_FOUND)
+        execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse --short HEAD
+                        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+                        OUTPUT_VARIABLE _nectar_commit OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        if(_nectar_commit)
+            set(NECTAR_GIT_COMMIT "${_nectar_commit}")
+        endif()
+    endif()
+    set_source_files_properties(${PC_PORT_DIR}/pc_main.cpp PROPERTIES COMPILE_DEFINITIONS
+        "NECTAR_RELEASE_VERSION=\"${NECTAR_RELEASE_VERSION}\";NECTAR_GIT_COMMIT=\"${NECTAR_GIT_COMMIT}\"")
     set(PC_PORT_SOURCES
         ${PC_PORT_DIR}/pc_main.cpp
         ${PC_PORT_DIR}/pc_gpu_preference.cpp

@@ -10,6 +10,7 @@
 #include "prepared_image.h"
 #include "installer_ui.h"
 #include "launcher_gui.h"
+#include "crash_report.h"
 #include "launcher_platform.h"
 #include "release_update.h"
 #include "texture_pack_download.h"
@@ -1196,9 +1197,15 @@ int main(int argc, char** argv)
     fs::path converter;
     bool directoryWasSpecified = false;
     fs::path movedFrom;
+    bool crashReport = false; // lo lanza el juego al fallar: abrir y ofrecer el informe
+    fs::path crashFile;       // ruta del informe que pasa el juego (opcional)
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
-        if (arg == "--moved-from" && i + 1 < argc) movedFrom = argv[++i];
+        if (arg == "--crash-report") {
+            crashReport = true;
+            if (i + 1 < argc && std::strncmp(argv[i + 1], "--", 2) != 0) crashFile = argv[++i];
+        }
+        else if (arg == "--moved-from" && i + 1 < argc) movedFrom = argv[++i];
         else if (arg == "--rom" && i + 1 < argc) image = argv[++i];
         else if ((arg == "--install-dir" || arg == "--data-dir") && i + 1 < argc) {
             dataRoot = argv[++i];
@@ -1275,7 +1282,17 @@ int main(int argc, char** argv)
             if (ec) std::this_thread::sleep_for(std::chrono::milliseconds(300));
         }
     }
-    const bool openWindow = argc == 1 || (argc == 3 && !movedFrom.empty());
+    const bool openWindow = argc == 1 || (crashReport && argc == (crashFile.empty() ? 2 : 3))
+                         || (argc == 3 && !movedFrom.empty());
+    // El juego lo hereda: si falla, vuelve a abrir este launcher con
+    // --crash-report para mostrar el informe al momento.
+    if (const fs::path self = platform::executablePath(); !self.empty()) {
+#ifdef _WIN32
+        _wputenv_s(L"NECTAR_LAUNCHER", self.wstring().c_str());
+#else
+        setenv("NECTAR_LAUNCHER", self.c_str(), 1);
+#endif
+    }
     // El launcher descargado de GitHub, abierto otra vez tras instalar: se
     // abre el de la instalación, que es el que juega y actualiza. Antes se
     // copia a la instalación lo que trae este paquete: si es una versión
@@ -1346,6 +1363,15 @@ int main(int argc, char** argv)
         std::string hubError;
         if (window->open(hubState, hubError)) {
             pikmin::launcher::HubWindow* home = window.get();
+            // Informe de un crash (de ahora, si nos lanzó el juego, o de una
+            // sesión anterior): copiar y abrir GitHub antes de la portada.
+            pikmin::launcher::offerCrashReport(*home, {
+                // El que indica el juego al fallar va primero: no depende de
+                // dónde crea este launcher que está instalado.
+                { "Pikmin 2", crashFile.parent_path(), crashFile.filename().string(), "pikmin2.log" },
+                { "Pikmin 2", pikmin2Directory, "pikmin2_crash.log", "pikmin2.log" },
+                { "Pikmin", pikmin1Directory, "pikmin_crash.log", "pikmin.log" },
+            });
             // Pantalla principal hasta que se pide instalar Pikmin 1 (o salir):
             // jugar, actualizar e instalar Pikmin 2 se resuelven aquí. También
             // la usa el modal de rutas de Pikmin 1 al cancelar.
