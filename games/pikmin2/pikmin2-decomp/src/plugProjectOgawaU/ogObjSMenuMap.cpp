@@ -606,12 +606,6 @@ void ObjSMenuMap::doCreate(JKRArchive* arc)
 	// set up MapCounter object
 	mMapCounter = new og::Screen::MapCounter(&mDisp->mDataMap);
 	mMapCounter->set("s_menu_map_l.blo", 0x1040000, arc);
-#ifdef PIKI_PC_PORT
-	if (FILE* f = fopen("/tmp/mapdbg.txt", "a")) {
-		fprintf(f, "doCreate env=%s\n", getenv("PIKMIN_MAPDBG") ? getenv("PIKMIN_MAPDBG") : "(none)");
-		fclose(f);
-	}
-#endif
 	// load in animations
 	mAnimGroup = new og::Screen::AnimGroup(3);
 	og::Screen::registAnimGroupScreen(mAnimGroup, arc, mMapCounter, "s_menu_map_l.btk", msBaseVal.mAnimSpeed);
@@ -954,21 +948,6 @@ void ObjSMenuMap::doDraw(Graphics& gfx)
 	//   nocounter  sin el marco (mMapCounter): solo mapa e iconos
 	//   mapafter   el marco después del mapa
 	static const char* sPcMapDbg = getenv("PIKMIN_MAPDBG");
-	{
-		static int sPcDrawCount = 0;
-		if (sPcDrawCount < 3) {
-			sPcDrawCount++;
-			if (FILE* f = fopen("/tmp/mapdbg.txt", "a")) {
-				const ResTIMG* timg = mMapTexPane && mMapTexPane->getTexture(0) ? mMapTexPane->getTexture(0)->mTexInfo : nullptr;
-				fprintf(f, "doDraw #%d env=%s tex=%p fmt=%d transp=%d %dx%d mapAlpha=%d colorAlpha=%d infl=%d rootAlpha=%d\n", sPcDrawCount,
-				        sPcMapDbg ? sPcMapDbg : "(none)", (const void*)timg, timg ? timg->mTextureFormat : -1,
-				        timg ? (int)timg->mTransparency : -1, timg ? timg->mSizeX : 0, timg ? timg->mSizeY : 0,
-				        mMapTexPane ? mMapTexPane->getAlpha() : -1, mMapTexPane ? mMapTexPane->getColorAlpha() : -1,
-				        mMapTexPane ? (int)mMapTexPane->mIsInfluencedAlpha : -1, mIconRootPane ? mIconRootPane->getAlpha() : -1);
-				fclose(f);
-			}
-		}
-	}
 	if (sPcMapDbg) {
 		static bool sLogged = false;
 		if (!sLogged) {

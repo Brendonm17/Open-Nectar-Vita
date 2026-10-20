@@ -5925,6 +5925,11 @@ void pc_gfx_set_z_mode(GXBool compareEnable, GXCompare func, GXBool updateEnable
         && lastCompare == compareEnable && lastFunc == func && lastUpdate == updateEnable) return;
     seenSerial = sGlPipelineGuardSerial;
     valid = true; lastCompare = compareEnable; lastFunc = func; lastUpdate = updateEnable;
+    // GX code may omit GXEnd: on hardware a state change lands after the
+    // vertices already in the FIFO. The pause map's depth mask (drawRectZ /
+    // drawVecZ) draws its quads with ALWAYS and switches to LESS right after;
+    // drawing them under the new mode hid the map behind the scene's depth.
+    close_complete_immediate();
     pc_gfx_note_gl_state_change();
     if (compareEnable) {
         glEnable(GL_DEPTH_TEST);
@@ -6051,6 +6056,7 @@ void pc_gfx_set_cull_mode(GXCullMode mode) {
 
 void pc_gfx_set_color_update(GXBool updateEnable) {
     if (sColorUpdate == updateEnable) return;
+    close_complete_immediate(); // same as pc_gfx_set_z_mode: FIFO order
     sColorUpdate = updateEnable;
     pc_gfx_note_gl_state_change();
     glColorMask(sColorUpdate, sColorUpdate, sColorUpdate, sAlphaUpdate);
@@ -6058,6 +6064,7 @@ void pc_gfx_set_color_update(GXBool updateEnable) {
 
 void pc_gfx_set_alpha_update(GXBool updateEnable) {
     if (sAlphaUpdate == updateEnable) return;
+    close_complete_immediate(); // same as pc_gfx_set_z_mode: FIFO order
     sAlphaUpdate = updateEnable;
     pc_gfx_note_gl_state_change();
     glColorMask(sColorUpdate, sColorUpdate, sColorUpdate, sAlphaUpdate);
