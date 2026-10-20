@@ -1061,6 +1061,11 @@ if(PIKMIN_BUILD_TESTS AND PIKMIN_BUILD_LAUNCHER)
 endif()
 
 if(PIKMIN_BUILD_TESTS)
+    add_executable(pc_bundle_compat_test pc_port/pc_bundle_compat_test.cpp)
+    target_include_directories(pc_bundle_compat_test PRIVATE pc_port)
+    target_compile_options(pc_bundle_compat_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+    add_test(NAME pc_bundle_compat_test COMMAND pc_bundle_compat_test)
+
     add_executable(pc_generator_cache_validation_test
         pc_port/save/pc_generator_cache_validation_test.cpp)
     target_include_directories(pc_generator_cache_validation_test PRIVATE pc_port/save)
