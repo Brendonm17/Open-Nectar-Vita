@@ -9495,6 +9495,12 @@ static void apply_draw_state(bool profilingSubmit, double stateT0) {
             usedTextureMaps[static_cast<int>(st.texMap)] = true;
         }
     }
+    // Los mapas de las etapas indirectas tambien: sin enlazar, el shader leia
+    // la textura que quedase en esa unidad y el desplazamiento se disparaba
+    // (el halo y la reverberacion del titulo de zona quedaban fuera).
+    for (u8 n = 0; n < sNumIndStages && n < 4; ++n) {
+        if (sIndStages[n].texMap < 8) usedTextureMaps[sIndStages[n].texMap] = true;
+    }
     int lastActiveMap = 0;
     const double texT0 = profilingSubmit ? submit_clock_ms() : 0.0;
     static u32 bindLogCount = 0;
@@ -9516,6 +9522,39 @@ static void apply_draw_state(bool profilingSubmit, double stateT0) {
     }
     if (lastActiveMap != 0) glActiveTexture_ptr(GL_TEXTURE0);
     if (profilingSubmit) sSubmitTexBindMs += submit_clock_ms() - texT0;
+#if !PIKI_USE_GLES
+    // TEMP depuracion (PIKMIN_IND_DEBUG=1): estado de los dibujos con indirecta.
+    static const bool indDbg = getenv("PIKMIN_IND_DEBUG") != nullptr;
+    static int indDbgLines = 0;
+    if (indDbg && sNumIndStages > 0 && indDbgLines < 400) {
+        indDbgLines++;
+        printf("[IND] stages=%d ind=%d", int(sNumTevStages), int(sNumIndStages));
+        for (u8 n = 0; n < sNumIndStages && n < 4; ++n)
+            printf(" | ind%d map=%d coord=%d scl=%d,%d", n, sIndStages[n].texMap, sIndStages[n].texCoord,
+                   sIndStages[n].scaleS, sIndStages[n].scaleT);
+        for (u8 st = 0; st < sNumTevStages && st < GX_MAXTEVSTAGE; ++st) {
+            const TevIndState& ti = sTevInd[st];
+            printf(" | tev%d map=%d tc=%d tex=%d indSt=%d fmt=%d bias=%d mtx=%d wrap=%d,%d add=%d", st,
+                   int(sTevStages[st].texMap), int(sTevStages[st].texCoord), int(sTevStages[st].textureEnabled),
+                   ti.indStage, ti.fmt, ti.bias, ti.mtx, ti.wrapS, ti.wrapT, ti.addPrev);
+        }
+        for (int m = 0; m < 3; ++m)
+            printf(" | M%d=[%.3f %.3f %.3f / %.3f %.3f %.3f] e%d", m, sIndMtx[m][0][0], sIndMtx[m][0][1], sIndMtx[m][0][2],
+                   sIndMtx[m][1][0], sIndMtx[m][1][1], sIndMtx[m][1][2], sIndMtxScale[m]);
+        for (int map = 0; map < 4; ++map) {
+            GLint w = 0, h = 0;
+            if (sBoundTextures[map]) {
+                glActiveTexture_ptr(GL_TEXTURE0 + map);
+                glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
+                glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h);
+            }
+            printf(" | u%d=%u %dx%d", map, (unsigned)sBoundTextures[map], int(w), int(h));
+        }
+        glActiveTexture_ptr(GL_TEXTURE0);
+        printf("\n");
+        fflush(stdout);
+    }
+#endif
 
     // Upload lighting
     if (sLoc.nrmMtx >= 0) {
