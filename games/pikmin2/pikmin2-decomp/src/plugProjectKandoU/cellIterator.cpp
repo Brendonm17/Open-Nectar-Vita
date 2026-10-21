@@ -1,5 +1,18 @@
 #include "Game/cellPyramid.h"
 
+// Mismo control que en cellPyramid.cpp: una pata fuera de la arena del juego
+// es memoria liberada y reutilizada; se trata como fin de cadena.
+#ifdef PIKI_PC_PORT
+extern "C" bool pc_ptr_in_game_arena(const void* p);
+static inline Game::CellLeg* pcSaneLeg(Game::CellLeg* leg)
+{
+	if (!leg || !pc_ptr_in_game_arena(leg) || (leg->mObject && !pc_ptr_in_game_arena(leg->mObject))) return nullptr;
+	return leg;
+}
+#else
+static inline Game::CellLeg* pcSaneLeg(Game::CellLeg* leg) { return leg; }
+#endif
+
 namespace Game {
 /**
  * @note Address: 0x8022E36C
@@ -66,7 +79,7 @@ void CellIterator::first()
 
 	Cell* foundCell = mArg.mCellMgr->mLayers[mCurrLayerIdx](mCurrX, mCurrY);
 	if (foundCell) {
-		mCurrLeg = foundCell->mLeg;
+		mCurrLeg = pcSaneLeg(foundCell->mLeg);
 	}
 	find();
 }
@@ -120,7 +133,7 @@ CellObject* CellIterator::getCellObject()
 bool CellIterator::step()
 {
 	if (mCurrLeg) {
-		mCurrLeg = mCurrLeg->mNext;
+		mCurrLeg = pcSaneLeg(mCurrLeg->mNext);
 	}
 
 	if (!mCurrLeg) {
@@ -140,7 +153,7 @@ bool CellIterator::step()
 
 		Cell* foundCell = mArg.mCellMgr->mLayers[mCurrLayerIdx](mCurrX, mCurrY);
 		if (foundCell) {
-			mCurrLeg = foundCell->mLeg;
+			mCurrLeg = pcSaneLeg(foundCell->mLeg);
 		}
 	}
 

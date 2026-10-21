@@ -8,6 +8,19 @@
 #include "P2Macros.h"
 #include "trig.h"
 
+// Las patas (CellLeg) viven dentro de los objetos: si uno se libera sin salir
+// de su celda, la cadena sigue apuntando a memoria ya reutilizada. En consola
+// esa memoria conservaba lo de antes y no fallaba; aquí se corta la cadena en
+// cuanto un eslabón cae fuera de la arena del juego (crash al salir de la
+// Piklopedia en CellPyramid::clearAllCollBuffer).
+#ifdef PIKI_PC_PORT
+extern "C" bool pc_ptr_in_game_arena(const void* p);
+#define PC_LEG_OK(leg) \
+	((leg) != nullptr && pc_ptr_in_game_arena(leg) && (!(leg)->mObject || pc_ptr_in_game_arena((leg)->mObject)))
+#else
+#define PC_LEG_OK(leg) ((leg) != nullptr)
+#endif
+
 namespace Game {
 
 CellPyramid* cellMgr;
@@ -140,7 +153,7 @@ void Cell::clear()
  */
 void Cell::mapSearch(IDelegate1<CellObject*>* delegate, u32 passID)
 {
-	for (CellLeg* leg = mLeg; leg != nullptr; leg = leg->mNext) {
+	for (CellLeg* leg = mLeg; PC_LEG_OK(leg); leg = leg->mNext) {
 		if (leg->mObject->mPassID != passID) {
 			leg->mObject->mPassID = passID;
 			delegate->invoke(leg->mObject);
@@ -165,7 +178,7 @@ void Cell::mapSearch(IDelegate1<CellObject*>* delegate, u32 passID)
  */
 void Cell::mapSearchUp(IDelegate1<CellObject*>* delegate, u32 passID)
 {
-	for (CellLeg* leg = mLeg; leg != nullptr; leg = leg->mNext) {
+	for (CellLeg* leg = mLeg; PC_LEG_OK(leg); leg = leg->mNext) {
 		if (leg->mObject->mPassID != passID) {
 			leg->mObject->mPassID = passID;
 			delegate->invoke(leg->mObject);
@@ -182,7 +195,7 @@ void Cell::mapSearchUp(IDelegate1<CellObject*>* delegate, u32 passID)
  */
 void Cell::mapSearchDown(IDelegate1<CellObject*>* delegate, u32 passID)
 {
-	for (CellLeg* leg = mLeg; leg != nullptr; leg = leg->mNext) {
+	for (CellLeg* leg = mLeg; PC_LEG_OK(leg); leg = leg->mNext) {
 		if (leg->mObject->mPassID != passID) {
 			leg->mObject->mPassID = passID;
 			delegate->invoke(leg->mObject);
@@ -613,7 +626,7 @@ void Cell::rec_resolveColl()
  */
 void Cell::clearAllCollBuffer()
 {
-	for (CellLeg* leg = mLeg; leg != nullptr; leg = leg->mNext) {
+	for (CellLeg* leg = mLeg; PC_LEG_OK(leg); leg = leg->mNext) {
 		if (leg->mObject) {
 			leg->mObject->mCollisionBuffer.clear();
 		}
@@ -1185,14 +1198,14 @@ void CellPyramid::dumpCount(int&, int&)
  */
 void Cell::resolveCollision_2()
 {
-	for (CellLeg* legA = mLeg; legA != nullptr; legA = legA->mNext) {
-		for (CellLeg* legB = legA->mNext; legB != nullptr; legB = legB->mNext) {
+	for (CellLeg* legA = mLeg; PC_LEG_OK(legA); legA = legA->mNext) {
+		for (CellLeg* legB = legA->mNext; PC_LEG_OK(legB); legB = legB->mNext) {
 			if (legA->mObject->collisionUpdatable()) {
 				legA->mObject->checkCollision(legB->mObject);
 			}
 		}
 		for (Cell* cell = mHeadCell; cell != nullptr; cell = cell->mHeadCell) {
-			for (CellLeg* legB = cell->mLeg; legB != nullptr; legB = legB->mNext) {
+			for (CellLeg* legB = cell->mLeg; PC_LEG_OK(legB); legB = legB->mNext) {
 				if (legA->mObject->collisionUpdatable()) {
 					legA->mObject->checkCollision(legB->mObject);
 				}
@@ -1220,9 +1233,9 @@ static inline u32 pcCellPassID(const void* obj) { return (u32)(uintptr_t)obj | 0
  */
 void Cell::resolveCollision_1()
 {
-	for (CellLeg* currentLeg = mLeg; currentLeg != nullptr; currentLeg = currentLeg->mNext) {
+	for (CellLeg* currentLeg = mLeg; PC_LEG_OK(currentLeg); currentLeg = currentLeg->mNext) {
 		// Check for collisions between currentLeg and all other legs
-		for (CellLeg* otherLeg = currentLeg->mNext; otherLeg != nullptr; otherLeg = otherLeg->mNext) {
+		for (CellLeg* otherLeg = currentLeg->mNext; PC_LEG_OK(otherLeg); otherLeg = otherLeg->mNext) {
 			if ((currentLeg->mObject != otherLeg->mObject) && (otherLeg->mObject->mPassID != CELL_PASS_ID(currentLeg->mObject))) {
 				otherLeg->mObject->mPassID = CELL_PASS_ID(currentLeg->mObject);
 				currentLeg->mObject->checkCollision(otherLeg->mObject);
@@ -1231,7 +1244,7 @@ void Cell::resolveCollision_1()
 
 		// Check for collisions between currentLeg and all legs in the head cell
 		for (Cell* headCell = mHeadCell; headCell != nullptr; headCell = headCell->mHeadCell) {
-			for (CellLeg* otherLeg = headCell->mLeg; otherLeg != nullptr; otherLeg = otherLeg->mNext) {
+			for (CellLeg* otherLeg = headCell->mLeg; PC_LEG_OK(otherLeg); otherLeg = otherLeg->mNext) {
 				if ((currentLeg->mObject != otherLeg->mObject) && (otherLeg->mObject->mPassID != CELL_PASS_ID(currentLeg->mObject))) {
 					otherLeg->mObject->mPassID = CELL_PASS_ID(currentLeg->mObject);
 					currentLeg->mObject->checkCollision(otherLeg->mObject);
@@ -1247,7 +1260,7 @@ void Cell::resolveCollision_1()
  */
 void Cell::resolveCollision_3()
 {
-	for (CellLeg* legA = mLeg; legA != nullptr; legA = legA->mNext) {
+	for (CellLeg* legA = mLeg; PC_LEG_OK(legA); legA = legA->mNext) {
 		if (legA->mObject->collisionUpdatable() == false) {
 			CellObject* legAObject = legA->mObject;
 			if (legAObject->mPassID != Game::cellMgr->mPassID) {
@@ -1255,7 +1268,7 @@ void Cell::resolveCollision_3()
 				legAObject->mPassID = Game::cellMgr->mPassID;
 			}
 		} else {
-			for (CellLeg* legB = legA->mNext; legB != nullptr; legB = legB->mNext) {
+			for (CellLeg* legB = legA->mNext; PC_LEG_OK(legB); legB = legB->mNext) {
 				if (legA->mObject != legB->mObject) {
 					if (CellMgrParms::getInstance()->mCellParms.mMagicNumber()) {
 						if (CELL_PASS_ID(legB->mObject) != legA->mObject->mPassID) {
@@ -1270,7 +1283,7 @@ void Cell::resolveCollision_3()
 				}
 			}
 			for (Cell* cell = mHeadCell; cell != nullptr; cell = cell->mHeadCell) {
-				for (CellLeg* legB = cell->mLeg; legB != nullptr; legB = legB->mNext) {
+				for (CellLeg* legB = cell->mLeg; PC_LEG_OK(legB); legB = legB->mNext) {
 					if (legA->mObject != legB->mObject) {
 						if (CellMgrParms::getInstance()->mCellParms.mMagicNumber()) {
 							if (legA->mObject->mPassID != CELL_PASS_ID(legB->mObject)) {

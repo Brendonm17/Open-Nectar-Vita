@@ -162,6 +162,7 @@ struct PcThreadArg {
 	bool started;
 	bool suspended;
 	bool cancel;                // OSCancelThread lo pide (atómico)
+	bool waitForeign;           // en OSWaitCond: mutex del juego, no se toca
 	pthread_cond_t* waitCond;   // espera pthread en curso, para despertarla
 	pthread_mutex_t* waitMutex;
 };
@@ -549,6 +550,13 @@ void OSSetArenaHi(void* addr) { sArenaHi = addr; }
 // J3D bakes texture, TLUT and vertex-array addresses into BP/CP registers
 // as 29-bit physical addresses; on LP64 the pointer has to be folded into
 // that space and unfolded again by the pc_gfx register decoder.
+// ¿Está p dentro de la arena del juego? Todos los objetos de los heaps JKR
+// viven ahí: un puntero fuera es basura (memoria liberada y reutilizada).
+extern "C" bool pc_ptr_in_game_arena(const void* p)
+{
+	return sArenaBase && (const u8*)p >= (const u8*)sArenaBase && (const u8*)p < (const u8*)sArenaBase + kArenaSize;
+}
+
 u32 pc_host_to_gc_phys(const void* ptr)
 {
 	if (!ptr)
@@ -672,13 +680,17 @@ void OSWaitCond(OSCond* cond, OSMutex* mutex)
 	// trylock para no bloquearse con otro hilo que lo tenga y quiera este mutex.
 	const bool irqHeld = tIrqHeld;
 	if (irqHeld) pcIrqUnlock();
-	pc_wait_begin(nativeCond, nativeMutex);
+	// El mutex es del juego y freeAll lo destruye antes que el hilo (el hilo
+	// no lo tiene tomado mientras espera): OSCancelThread no lo toca ni
+	// despierta esta espera, que al volver lo tomaría ya destruido (bionic
+	// aborta). Sale por el método forzoso de cada plataforma.
+	if (tThreadArg) __atomic_store_n(&tThreadArg->waitForeign, true, __ATOMIC_RELEASE);
 	if (!pc_cancel_requested()) {
 		pthread_cleanup_push(pc_cancel_unlock_mutex, nativeMutex);
 		pthread_cond_wait(nativeCond, nativeMutex);
 		pthread_cleanup_pop(0);
 	}
-	pc_wait_end();
+	if (tThreadArg) __atomic_store_n(&tThreadArg->waitForeign, false, __ATOMIC_RELEASE);
 	if (pc_cancel_requested()) {
 		pthread_mutex_unlock(nativeMutex);
 		pc_cancel_exit();
@@ -773,6 +785,7 @@ BOOL OSCreateThread(OSThread* thread, OSThreadStartFunction func, void* param, v
 	arg->started   = false;
 	arg->suspended = false;
 	arg->cancel    = false;
+	arg->waitForeign = false;
 	arg->waitCond  = nullptr;
 	arg->waitMutex = nullptr;
 	pthread_mutex_init(&arg->mutex, nullptr);
@@ -812,12 +825,22 @@ void OSCancelThread(OSThread* thread)
 		pthread_mutex_unlock(&arg->mutex);
 		// Despierta la espera pthread en curso (OSWaitCond/OSSleepThread):
 		// con su mutex, el hilo ve la marca antes de volver a dormirse.
+		// Solo OSSleepThread la registra, y solo si su cola sigue viva: con el
+		// cerrojo del registro tomado nadie puede destruirla mientras tanto.
 		pthread_mutex_t* waitMutex = __atomic_load_n(&arg->waitMutex, __ATOMIC_ACQUIRE);
 		pthread_cond_t* waitCond   = __atomic_load_n(&arg->waitCond, __ATOMIC_ACQUIRE);
 		if (waitCond && waitMutex && !self) {
-			pthread_mutex_lock(waitMutex);
-			pthread_cond_broadcast(waitCond);
-			pthread_mutex_unlock(waitMutex);
+			pthread_mutex_lock(&sQueueRegistry.registryLock);
+			for (size_t i = 0; i < 1024; ++i) {
+				if (sQueueRegistry.keys[i] && &sQueueRegistry.values[i].cond == waitCond
+				    && &sQueueRegistry.values[i].mutex == waitMutex) {
+					pthread_mutex_lock(waitMutex);
+					pthread_cond_broadcast(waitCond);
+					pthread_mutex_unlock(waitMutex);
+					break;
+				}
+			}
+			pthread_mutex_unlock(&sQueueRegistry.registryLock);
 		}
 	}
 	if (self) {
@@ -832,8 +855,10 @@ void OSCancelThread(OSThread* thread)
 	sMsgCv.notify_all();
 	// Medio segundo para salir por su cuenta; si no (hilo ocupado fuera de
 	// las esperas del port), el método forzoso de cada plataforma.
-	bool exited = false;
-	{
+	bool exited       = false;
+	PcThreadArg* warg = (PcThreadArg*)thread->specific[1];
+	const bool foreign = warg && __atomic_load_n(&warg->waitForeign, __ATOMIC_ACQUIRE);
+	if (!foreign) {
 		PcIrqRelease irq;
 		for (int i = 0; i < 500 && !(exited = thread->state == OS_THREAD_STATE_MORIBUND); ++i)
 			std::this_thread::sleep_for(std::chrono::milliseconds(1));
