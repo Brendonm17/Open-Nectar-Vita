@@ -538,7 +538,7 @@ s32 P2DPrint::getNumber(const u8** strPtr, s32 defaultValue, s32 invalidValue, i
 
 	(*strPtr)++;
 	value = 0;
-	char* endStr;
+	char* endStr = (char*)*strPtr;
 
 	if (base == 10) { // base 10, we're expecting a straight value
 		value = strtol((char*)*strPtr, &endStr, base);

@@ -185,7 +185,7 @@ void RandItemUnit::getItemDropPosition(Vector3f& position, f32 weight, int floor
 
 	MapNode* nodes[2];
 	MapNode* dropList[256];
-	MapNode* dropNode;
+	MapNode* dropNode = nullptr; // sin candidatos quedaba sin valor y se usaba
 
 	nodes[0] = mGenerator->mPlacedMapNodes;
 	nodes[1] = mGenerator->mVisitedMapNodes;

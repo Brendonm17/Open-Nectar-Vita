@@ -142,7 +142,7 @@ u32 Mgr::dvdToAram(char const* name, bool forceAddNode)
 			if (success) {
 				mResourceList.add(newNode);
 			} else {
-				delete newName;
+				delete[] newName;
 				delete newNode;
 			}
 		}

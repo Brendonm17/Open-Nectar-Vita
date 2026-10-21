@@ -728,7 +728,7 @@ void StateFail::init(EnemyBase* enemy, StateArg* stateArg)
  */
 void StateFail::exec(EnemyBase* enemy)
 {
-	Obj* armor = OBJ(armor);
+	Obj* armor = OBJ(enemy);
 	if (armor->mHealth <= 0.0f) {
 		transit(armor, ARMOR_Dead, nullptr);
 		return;

@@ -282,7 +282,7 @@ void Item::onSetPosition()
 void Item::emitDamageEffect()
 {
 	if (!mMakeEffectDelay) {
-		int type;
+		int type = 0;
 		switch (mSize) {
 		case SIZE_Max:
 			type = 2;

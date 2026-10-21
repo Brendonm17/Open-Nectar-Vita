@@ -334,7 +334,7 @@ Creature* MonoObjectMgr::birth()
 		PRINT("numObjects(%d) exceeds maxObjects(%d)\n", mNumObjects, mMaxElements);
 		for (int i = 0; i < mMaxElements; i++) {
 			if (mEntryStatus[i] == -2) {
-				PRINT("*** (%d) WANT TO DIE : %s (%d refs)\n", mObjectList[i]->removable() ? "removable" : "not removable",
+				PRINT("*** (%d) WANT TO DIE : %s (%d refs)\n", i, mObjectList[i]->removable() ? "removable" : "not removable",
 				      mObjectList[i]->getCnt());
 			}
 		}

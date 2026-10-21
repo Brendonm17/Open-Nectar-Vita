@@ -34,8 +34,12 @@ static char sPcCrashLauncher[1024];
 static char sPcCrashPath[1024];
 #endif
 
+// Definido en os_stubs.cpp (OSPanic lo rellena antes de abortar).
+extern "C" char pc_crash_note[512];
+
 static void pc_crash_header(FILE* out)
 {
+	if (pc_crash_note[0]) fprintf(out, "reason: %.511s\n", pc_crash_note);
 	char stamp[32] = "?";
 	const time_t now = time(nullptr);
 	struct tm utc;
@@ -52,10 +56,32 @@ static void pc_crash_header(FILE* out)
 #if defined(__linux__) || defined(__ANDROID__)
 #include <csignal>
 #include <dlfcn.h>
-#include <execinfo.h>
 #include <link.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef __ANDROID__
+// bionic solo trae backtrace() desde Android 13 (API 33): se desenrolla con libunwind.
+#include <unwind.h>
+struct PcUnwindState {
+	void** frames;
+	int count, max;
+};
+static _Unwind_Reason_Code pc_unwind_frame(struct _Unwind_Context* ctx, void* arg)
+{
+	PcUnwindState* state = (PcUnwindState*)arg;
+	const uintptr_t pc = _Unwind_GetIP(ctx);
+	if (pc && state->count < state->max) state->frames[state->count++] = (void*)pc;
+	return state->count < state->max ? _URC_NO_REASON : _URC_END_OF_STACK;
+}
+static int backtrace(void** frames, int max)
+{
+	PcUnwindState state = { frames, 0, max };
+	_Unwind_Backtrace(pc_unwind_frame, &state);
+	return state.count;
+}
+#else
+#include <execinfo.h>
+#endif
 
 static uintptr_t pc_module_base()
 {
@@ -74,8 +100,44 @@ static uintptr_t pc_module_base()
 	return 0;
 }
 
-static void pc_crash_handler(int sig, siginfo_t* info, void* /*ucontext*/)
+#if defined(__x86_64__) && !defined(__ANDROID__)
+#include <sys/ucontext.h>
+#include "pc_intdiv_recover.h"
+
+// Una línea por dirección (solo write: estamos dentro de una señal).
+static void pc_intdiv_log(uint64_t at)
 {
+	static uint64_t seen[32];
+	static int      seenCount = 0;
+	for (int i = 0; i < seenCount; i++) {
+		if (seen[i] == at) return;
+	}
+	if (seenCount < 32) seen[seenCount++] = at;
+	char line[96] = "[PC Port] integer division by zero recovered at rel 0x";
+	size_t len    = strlen(line);
+	const uint64_t rel = at - pc_module_base();
+	for (int shift = 36; shift >= 0; shift -= 4) line[len++] = "0123456789abcdef"[(rel >> shift) & 0xF];
+	line[len++] = '\n';
+	ssize_t ignored = write(2, line, len);
+	(void)ignored;
+}
+#endif
+
+static void pc_crash_handler(int sig, siginfo_t* info, void* ucontext)
+{
+#if defined(__x86_64__) && !defined(__ANDROID__)
+	if (sig == SIGFPE && info && ucontext && (info->si_code == FPE_INTDIV || info->si_code == FPE_INTOVF)) {
+		greg_t* regs      = static_cast<ucontext_t*>(ucontext)->uc_mcontext.gregs;
+		const uint64_t at = (uint64_t)regs[REG_RIP];
+		if (pc_intdiv_recover((uint64_t*)&regs[REG_RIP], (uint64_t*)&regs[REG_RAX], (uint64_t*)&regs[REG_RDX],
+		                      info->si_code == FPE_INTOVF)) {
+			pc_intdiv_log(at);
+			return;
+		}
+	}
+#else
+	(void)ucontext;
+#endif
 	static volatile sig_atomic_t entered = 0;
 	if (entered) {
 		_exit(128 + sig);
@@ -167,6 +229,7 @@ void pc_install_crash_handler()
 #elif defined(_WIN32)
 #include <io.h>
 #include <windows.h>
+#include <csignal>
 
 // Pila desenrollada con las tablas de x64 (sin dbghelp). rel = dirección -
 // base del módulo, para addr2line/nm sobre el ejecutable sin strip.
@@ -182,6 +245,40 @@ static void pc_crash_frame(FILE* out, int index, DWORD64 pc)
 	        (unsigned long long)(pc - (DWORD64)(uintptr_t)module), name ? name + 1 : path);
 }
 
+#include "pc_intdiv_recover.h"
+
+// División entera entre cero: se recupera como en ARM64 (pc_intdiv_recover.h)
+// antes de que llegue al filtro de crash.
+static LONG WINAPI pc_intdiv_handler(EXCEPTION_POINTERS* ep)
+{
+	const DWORD code = ep->ExceptionRecord->ExceptionCode;
+	if (code != EXCEPTION_INT_DIVIDE_BY_ZERO && code != EXCEPTION_INT_OVERFLOW) return EXCEPTION_CONTINUE_SEARCH;
+	CONTEXT* ctx     = ep->ContextRecord;
+	const DWORD64 at = ctx->Rip;
+	if (!pc_intdiv_recover(&ctx->Rip, &ctx->Rax, &ctx->Rdx, code == EXCEPTION_INT_OVERFLOW)) {
+		return EXCEPTION_CONTINUE_SEARCH;
+	}
+	static DWORD64 seen[32];
+	static LONG    seenCount = 0;
+	bool known = false;
+	for (LONG i = 0; i < seenCount; i++) known = known || seen[i] == at;
+	if (!known) {
+		if (seenCount < 32) seen[seenCount++] = at;
+		fprintf(stderr, "[PC Port] integer division by zero recovered at rel 0x%llx\n",
+		        (unsigned long long)(at - (DWORD64)(uintptr_t)GetModuleHandleW(nullptr)));
+	}
+	return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+// abort() (assert, std::terminate) levanta SIGABRT, que el filtro de
+// excepciones no ve: el juego se cerraba sin informe. El manejador lo
+// convierte en una excepción para que el filtro saque la pila de siempre.
+static const DWORD kPcAbortException = 0xE0000ABD;
+static void pc_abort_signal(int)
+{
+	RaiseException(kPcAbortException, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+}
+
 static LONG WINAPI pc_crash_filter(EXCEPTION_POINTERS* ep)
 {
 	static volatile LONG entered = 0;
@@ -191,7 +288,8 @@ static LONG WINAPI pc_crash_filter(EXCEPTION_POINTERS* ep)
 	for (FILE* out : outs) {
 		if (!out) continue;
 		const EXCEPTION_RECORD* rec = ep->ExceptionRecord;
-		fprintf(out, "\n=== [PC Port] CRASH: exception 0x%08lx at %p ===\n", (unsigned long)rec->ExceptionCode,
+		fprintf(out, "\n=== [PC Port] CRASH: exception 0x%08lx%s at %p ===\n", (unsigned long)rec->ExceptionCode,
+		        rec->ExceptionCode == kPcAbortException ? " (abort/assert)" : "",
 		        rec->ExceptionAddress);
 		pc_crash_header(out);
 		if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && rec->NumberParameters >= 2) {
@@ -256,6 +354,8 @@ void pc_install_crash_handler()
 		}
 	}
 	SetUnhandledExceptionFilter(pc_crash_filter);
+	AddVectoredExceptionHandler(1, pc_intdiv_handler);
+	signal(SIGABRT, pc_abort_signal);
 }
 
 #else

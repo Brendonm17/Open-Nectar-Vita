@@ -144,6 +144,13 @@ void JUTException::errorHandler(OSError error, OSContext* context, u32 p3, u32 p
  * @note Address: N/A
  * @note Size: 0x134
  */
+#ifdef PIKI_PC_PORT
+// Motivo del último abort(): el gestor de crash (pc_main.cpp) lo copia al informe.
+extern "C" {
+char pc_crash_note[512];
+}
+#endif
+
 void JUTException::panic_f_va(const char* fileName, int lineNumber, const char* format, va_list* args)
 {
 	char buffer[255];
@@ -154,6 +161,7 @@ void JUTException::panic_f_va(const char* fileName, int lineNumber, const char* 
 	// pointers to u32 on LP64 and SEGVs). Surface the assert and stop cleanly.
 	fprintf(stderr, "[PC Port] PANIC: %s in \"%s\" on line %d\n", buffer, fileName, lineNumber);
 	fflush(stderr);
+	snprintf(pc_crash_note, sizeof(pc_crash_note), "PANIC %s in %s:%d", buffer, fileName, lineNumber);
 	printf("[PC Port] PANIC: %s in \"%s\" on line %d\n", buffer, fileName, lineNumber);
 	fflush(stdout);
 	abort();

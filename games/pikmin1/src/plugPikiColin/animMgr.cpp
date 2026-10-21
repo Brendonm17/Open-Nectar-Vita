@@ -355,7 +355,7 @@ void AnimMgr::loadAnims(immut char* animPath, immut char* bundlePath)
 		// we're missing animations, try loading the bundle.
 		if (missingAnimCount != 0) {
 			gsys->mCurrentShape = mModel;
-			sprintf(finalBundlePath, bundlePath ? bundlePath : mModel->mName);
+			sprintf(finalBundlePath, "%s", bundlePath ? bundlePath : mModel->mName);
 
 			if (!bundlePath) {
 				// Derive the animation bundle beside the model (foo.mod ->

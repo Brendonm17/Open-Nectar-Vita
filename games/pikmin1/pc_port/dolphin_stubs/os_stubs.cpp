@@ -144,6 +144,11 @@ void OSReport(const char* message, ...) {
     va_end(args);
 }
 
+// Motivo del último abort(): el gestor de crash (pc_crash.cpp) lo copia al informe.
+extern "C" {
+char pc_crash_note[512];
+}
+
 void OSPanic(const char* file, int line, const char* message, ...) {
     va_list args;
     va_start(args, message);
@@ -151,6 +156,12 @@ void OSPanic(const char* file, int line, const char* message, ...) {
     vfprintf(stderr, message, args);
     fprintf(stderr, "\n");
     va_end(args);
+    const int used = snprintf(pc_crash_note, sizeof(pc_crash_note), "PANIC %s:%d: ", file, line);
+    if (used > 0 && used < (int)sizeof(pc_crash_note)) {
+        va_start(args, message);
+        vsnprintf(pc_crash_note + used, sizeof(pc_crash_note) - used, message, args);
+        va_end(args);
+    }
     abort();
 }
 

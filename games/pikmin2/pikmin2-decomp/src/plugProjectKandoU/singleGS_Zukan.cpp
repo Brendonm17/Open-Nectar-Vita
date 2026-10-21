@@ -1630,8 +1630,8 @@ void ZukanState::dvdloadB_teki()
 			}
 		}
 
-		delete spawnPositions;
-		delete tempPositions;
+		delete[] spawnPositions;
+		delete[] tempPositions;
 
 		if (makeSpectralids) {
 			switch (mCurrentEnemyIndex) {

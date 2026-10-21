@@ -159,7 +159,7 @@ int NsCalculation::calcMtxDirect(const Matrix4f& param_1, const Matrix4f& param_
 	local_4c.z = local_40.z - local_34.z;
 	local_4c.normalise();
 
-	int maxIdx;
+	int maxIdx = 0; // ratios NaN o todos por debajo: antes índice sin valor
 	for (i = 0; i < 3; i++) {
 		float innerRatio = calcInnerRatio(local_28[i], local_4c);
 		if (maxInnerRatio < innerRatio) {

@@ -1558,7 +1558,8 @@ void ActTransport::draw(Graphics& gfx)
 		sprintf(buf1, "%.1f/%.1f %s", val1, weightedProj, type[mPathType]);
 
 	} else {
-		sprintf(buf2, "%s %d %.1f %s", stateNames[mState], mNextPathIndex, type[mPathType]);
+		// Faltaba el argumento de %.1f: el %s final leía un puntero basura.
+		sprintf(buf2, "%s %d %s", stateNames[mState], mNextPathIndex, type[mPathType]);
 	}
 
 	gfx.useMatrix(Matrix4f::ident, 0);

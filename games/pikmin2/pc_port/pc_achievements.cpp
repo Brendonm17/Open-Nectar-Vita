@@ -3,6 +3,7 @@
 #include <SDL2/SDL.h>
 #include <cstdio>
 #include <deque>
+#include "pc_host_alloc.h"
 
 #include "Game/gamePlayData.h"
 #include "Game/GameSystem.h"
@@ -47,7 +48,7 @@ constexpr Uint32 kToastMs       = 4500;
 constexpr Uint32 kPollMs        = 1000;
 bool sLoaded                    = false;
 bool sUnlocked[PC_ACH_COUNT]    = {};
-std::deque<int> sToasts;
+std::deque<int, PcHostAllocator<int>> sToasts;
 Uint32 sToastStart        = 0;
 Uint32 sBlockedToastStart = 0;
 bool sBlockedToastShown   = false;

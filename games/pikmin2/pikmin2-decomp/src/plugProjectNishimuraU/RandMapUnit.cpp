@@ -491,11 +491,13 @@ MapNode* RandMapUnit::getNormalRandMapUnit()
 
 	MapNode* nodeArray = mGenerator->getMapNodeKind(0);
 
-	int doorIdx;
-	int doorX;
-	int doorY;
+	int doorIdx = 0;
+	int doorX   = 0;
+	int doorY   = 0;
+	// getCalcDoorIndex devuelve nullptr sin puerta abierta: se comprobaba
+	// después de usarlo.
 	MapNode* node  = getCalcDoorIndex(doorIdx, doorX, doorY, randDoor);
-	DoorNode* door = node->getDoorNode(doorIdx);
+	DoorNode* door = node ? node->getDoorNode(doorIdx) : nullptr;
 
 	if (node && door) {
 		setUnitKindOrder(node, kindOrder);
@@ -629,6 +631,9 @@ MapNode* RandMapUnit::getLoopRandMapUnit()
 	int oppDir;
 	for (int i = 0; i < openDoorNum; i++) {
 		MapNode* tile = getCalcDoorIndex(doorIdx, x, y, i);
+		if (!tile) {
+			continue;
+		}
 
 		// Skip if loop map node check fails
 		if (!isLoopMapNodeCheck(tile, doorIdx)) {
@@ -1012,9 +1017,9 @@ int RandMapUnit::getLeftToLinkDoorDir(int direction, int xDiff, int yDiff)
 MapNode* RandMapUnit::getLoopEndMapUnit()
 {
 	MapNode* mapNodeTypes = mGenerator->getMapNodeKinds();
-	int doorIndex, doorOffsetX, doorOffsetY;
+	int doorIndex = 0, doorOffsetX = 0, doorOffsetY = 0;
 	MapNode* unblockedMapNode   = getCalcDoorIndex(doorIndex, doorOffsetX, doorOffsetY, 0);
-	DoorNode* unblockedDoorNode = unblockedMapNode->getDoorNode(doorIndex);
+	DoorNode* unblockedDoorNode = unblockedMapNode ? unblockedMapNode->getDoorNode(doorIndex) : nullptr;
 	int doorTypes[3]            = { 0, 2, 1 };
 	if (unblockedMapNode && unblockedDoorNode) {
 		for (int typeIndex = 0; typeIndex < 3; ++typeIndex) {
@@ -1301,6 +1306,9 @@ void RandMapUnit::createLoopMapNodeCheck()
 	for (int i = 0; i < unclosedDoors; ++i) {
 		if (mCapCandidateCount < 16 && randWeightFloat(1.0f) < mCapMax) {
 			MapNode* node                                = getCalcDoorIndex(doorIndex, x, y, i);
+			if (!node) {
+				continue;
+			}
 			mCapCandidateNodes[mCapCandidateCount]       = node;
 			mCapCandidateDoorIndices[mCapCandidateCount] = doorIndex;
 			++mCapCandidateCount;

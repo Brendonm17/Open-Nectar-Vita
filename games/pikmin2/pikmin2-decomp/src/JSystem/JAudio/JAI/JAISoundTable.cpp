@@ -61,7 +61,7 @@ void JAInter::SoundTable::init(u8* data, u32 dataSize)
 JAInter::SoundInfo* JAInter::SoundTable::getInfoPointer(u32 soundID)
 {
 	SoundInfo* info = nullptr;
-	u32 category;
+	u32 category    = 0x12; // tipo desconocido: sin info (antes índice sin valor)
 	switch (soundID & JAISoundID_TypeMask) {
 	case JAISoundID_Type_Se:
 		category = soundID >> 0xC & 0xFF;
@@ -75,7 +75,8 @@ JAInter::SoundInfo* JAInter::SoundTable::getInfoPointer(u32 soundID)
 		break;
 	}
 	u32 maskedID = soundID & 0x3FF;
-	if (mAddress != nullptr && maskedID < mSoundMax[category]) {
+	// Las tablas tienen 0x12 categorías; un ID malformado leía fuera de ellas.
+	if (mAddress != nullptr && category < 0x12 && maskedID < mSoundMax[category]) {
 		info = mPointerCategory[category] + maskedID;
 	}
 	return info;

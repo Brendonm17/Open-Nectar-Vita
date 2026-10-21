@@ -28,6 +28,15 @@ struct PcHostAllocScope {
 
 #include "stb_image.h"
 
+// Operación larga a propósito: no cuenta para el vigilante de cuelgues (pc_main.cpp).
+extern "C" void pc_hang_busy(int begin);
+namespace {
+struct PcHangBusy {
+	PcHangBusy() { pc_hang_busy(1); }
+	~PcHangBusy() { pc_hang_busy(0); }
+};
+}
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -1243,6 +1252,7 @@ int convert(const Source& src, const fs::path& modelsRoot, bool force = false)
 int pc_texpack_install_zip(const char* zipPath, char* message, unsigned long messageSize)
 {
     PC_HOST_ALLOC_SCOPE();
+	PcHangBusy hangBusy;
 	auto say = [&](const std::string& text) {
 		if (message && messageSize) std::snprintf(message, messageSize, "%s", text.c_str());
 	};
@@ -1287,6 +1297,7 @@ int pc_texpack_install_zip(const char* zipPath, char* message, unsigned long mes
 int pc_hd_models_convert_sources(void)
 {
     PC_HOST_ALLOC_SCOPE();
+	PcHangBusy hangBusy;
 	const fs::path modelsRoot = fs::path("Load") / "Models";
 	std::error_code ec;
 	if (!fs::is_directory(modelsRoot, ec)) return 0;
@@ -1310,6 +1321,7 @@ int pc_hd_models_convert_sources(void)
 int pc_hd_models_convert_file(const char* pathStr, int expected, char* message, unsigned long messageSize)
 {
     PC_HOST_ALLOC_SCOPE();
+	PcHangBusy hangBusy;
 	auto say = [&](const char* text) {
 		if (message && messageSize) std::snprintf(message, messageSize, "%s", text);
 	};

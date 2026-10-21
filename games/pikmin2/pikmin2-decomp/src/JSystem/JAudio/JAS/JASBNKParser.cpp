@@ -204,9 +204,9 @@ JASBasicBank* createBasicBank(void* stream)
  */
 JASOscillator::Data* findOscPtr(JASBasicBank* bank, THeader* header, TOsc* oscPtr)
 {
-	TOffset<TInst>* instOffsets = header->mInstOffsets - 1;
+	TOffset<TInst>* instOffsets = header->mInstOffsets;
 	for (int i = 0; i < TPerc_MAX_ENTRIES; i++) {
-		TInst* instRaw = BNK_PTR(TInst, header, instOffsets[i + 1]);
+		TInst* instRaw = BNK_PTR(TInst, header, instOffsets[i]);
 		if (instRaw) {
 			// look through both oscillators
 			for (int j = 0; j < TInst_MAX_OSCILLATORS; j++) {

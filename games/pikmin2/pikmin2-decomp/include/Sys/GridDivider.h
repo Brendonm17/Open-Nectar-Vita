@@ -26,8 +26,10 @@ struct GridInfo {
 	// Unused/inlined:
 	void write(Stream&);
 
-	int mCount;    // _00
-	int* mIndices; // _04
+	// Inicializados: el destructor hace delete[] mIndices y AgePlatform
+	// construye un GridInfo vacío (delete[] de un puntero sin valor).
+	int mCount    = 0;       // _00
+	int* mIndices = nullptr; // _04
 };
 
 /**

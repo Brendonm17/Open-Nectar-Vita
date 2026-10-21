@@ -389,11 +389,6 @@ enum Row {
     ROW_REFRESH_RATE,
     ROW_VSYNC,
     ROW_FPS_MODE,
-#if defined(VERSION_GPIP01)
-    // Only the European release carries more than one language. On any other
-    // disc the row would be a control with one position.
-    ROW_LANGUAGE,
-#endif
     ROW_DISPLAY_COUNT, ///< filas del grupo Display (el resto son grupos en pc_settings_rows)
 };
 
@@ -3010,15 +3005,6 @@ void mainRowValue(int row, char* out, size_t n) {
     else snprintf(valueBuf[4], sizeof(valueBuf[4]), "%.0f Hz", sPending.refreshRate);
     snprintf(valueBuf[5], sizeof(valueBuf[5]), "%s", sPending.vsync ? "On" : "Off");
     snprintf(valueBuf[ROW_FPS_MODE], sizeof(valueBuf[0]), "%s", fpsModeBuf);
-#if defined(VERSION_GPIP01)
-    {
-        static const char* const kNames[] = { "English", "Deutsch", "Francais",
-                                              "Espanol", "Italiano", "Nederlands" };
-        const unsigned char language = pc_settings_get_language();
-        snprintf(valueBuf[ROW_LANGUAGE], sizeof(valueBuf[0]), "%s%s", kNames[language],
-                 (sHeadless || language == pc_settings_startup_language()) ? "" : "  (on restart)");
-    }
-#endif
 
     snprintf(out, n, "%s", valueBuf[row]);
 }
@@ -3108,20 +3094,6 @@ void mainRowChange(int row, bool left, bool right, bool ok) {
             sPending.fpsMode = (sPending.fpsMode + 1) % 4;
         }
         break;
-#if defined(VERSION_GPIP01)
-    case ROW_LANGUAGE: {
-        // Only the five the European disc actually carries. Dutch exists in the
-        // hardware's list and not on the disc, so offering it would point the
-        // game at files that are not there.
-        const int kCount = 5;
-        int language = pc_settings_get_language();
-        if (language >= kCount) language = 0;
-        if (left) language = (language + kCount - 1) % kCount;
-        else if (right) language = (language + 1) % kCount;
-        pc_settings_set_language((unsigned char)language);
-        break;
-    }
-#endif
     default:
         break;
     }
@@ -3554,10 +3526,10 @@ int achievementAtRow(int row); // logro de esa fila de la pestaña, o -1
 
 // Textura del icono de un logro (del juego), cargada una vez.
 Texture* achievementIcon(int id) {
-    static std::map<std::string, Texture*> sIcons;
-    const char* path = pc_achievement_icon(id);
-    auto it = sIcons.find(path);
-    return it != sIcons.end() ? it->second : (sIcons[path] = zen::loadTexExp(path, true, true));
+    // Sin caché propia: el registro de gsys ya la hace y se invalida cuando el
+    // heap del nivel se resetea (un Texture* guardado aquí quedaba con la textura
+    // GL liberada y los píxeles reutilizados).
+    return zen::loadTexExp(pc_achievement_icon(id), true, true);
 }
 
 void drawAchievementIcon(DGXGraphics* gfx, Texture* icon, int x, int y, int maxW, int maxH, const Colour& tint) {
@@ -6150,14 +6122,12 @@ void vsFitText(const char* s, char* out, size_t n, int maxW, int fw)
 
 Texture* vsIcon(const char* name)
 {
-    static std::map<std::string, Texture*> cache;
-    auto it = cache.find(name);
-    if (it != cache.end()) return it->second;
+    // Sin caché propia: el registro de gsys ya la hace y se invalida cuando el
+    // heap del nivel se resetea (un Texture* guardado aquí quedaba con la textura
+    // GL liberada y los píxeles reutilizados).
     char path[64];
     snprintf(path, sizeof(path), "screen/tex/%s.bti", name);
-    Texture* t  = zen::loadTexExp(path, true, true);
-    cache[name] = t;
-    return t;
+    return zen::loadTexExp(path, true, true);
 }
 void vsDrawIcon(const char* name, int x, int y, int w, int h)
 {
@@ -7486,9 +7456,6 @@ const GroupRow kDisplayRows[] = {
     { SRC_MAIN, ROW_REFRESH_RATE, "Refresh Rate", "How often the screen updates in fullscreen. Auto keeps your monitor's setting." },
     { SRC_MAIN, ROW_VSYNC, "Frame Sync (VSync)", "Waits for the screen before showing each frame. Stops tearing (a picture split in two), adds a little input delay." },
     { SRC_MAIN, ROW_FPS_MODE, "FPS Mode", "Frames per second. 30 is the original and the most stable. 60 and 120 are smoother but experimental." },
-#if defined(VERSION_GPIP01)
-    { SRC_MAIN, ROW_LANGUAGE, "Language", "Language of the game's text. Takes effect after a restart." },
-#endif
 };
 
 const GroupRow kGraphicsRows[] = {
@@ -7509,6 +7476,8 @@ const GroupRow kGraphicsRows[] = {
 };
 
 const GroupRow kControlsRows[] = {
+    { SRC_KEYS, 0, "Keyboard Bindings", "Two keys or mouse buttons per action. A: main key. Right: second key. Left: back to default. While waiting, Delete clears it. Shift, Ctrl and Alt can be used." },
+    { SRC_PADS, 0, "Controller Bindings", "Choose the controller button for each action." },
     { SRC_MODS, 0, "Control Scheme", "Classic: the stick moves the cursor, as on GameCube. Mouse Cursor: aim the cursor with the mouse." },
     { SRC_ADV, 0, "Mouse Sensitivity", "How far the cursor moves when you move the mouse." },
     { SRC_MODS, 3, "Mouse Wheel", "What the mouse wheel does: choose the Pikmin colour to throw, or zoom the camera." },
@@ -7530,12 +7499,10 @@ const GroupRow kControlsRows[] = {
     { SRC_ADV, 6, "Gyro Invert", "Flips gyro aiming: none, horizontal, vertical or both." },
     { SRC_ADV, 7, "Gyro Calibrate", "Put the controller or phone down, keep it still and press A. Fixes a cursor that drifts on its own." },
     { SRC_RECENTER, 0, "Gyro Recenter Button", "Button that brings the cursor back in front of Olimar. A: choose the button." },
-    { SRC_KEYS, 0, "Keyboard Bindings", "Two keys or mouse buttons per action. A: main key. Right: second key. Left: back to default. While waiting, Delete clears it. Shift, Ctrl and Alt can be used." },
-    { SRC_PADS, 0, "Controller Bindings", "Choose the controller button for each action." },
 };
 
 const GroupRow kCameraRows[] = {
-    { SRC_MODS, 14, "Free Camera", "Turn the camera freely, as in Pikmin 3. Mouse: push the cursor against the edge of its circle. Controller: right stick. L puts the camera back behind Olimar. Swarming moves to D-pad Down, or to its own Swarm button." },
+    { SRC_MODS, 14, "Free Camera", "Turn the camera freely, as in Pikmin 3. Mouse: push the cursor against the edge of its circle. Controller: right stick. L puts the camera back behind Olimar. Swarming moves to the Swarm button (assign it in Controls)." },
     { SRC_MODS, 38, "Free Camera Speed", "How fast the right stick turns the free camera. 100% is the default." },
     { SRC_MODS, 18, "First Person", "Look at the world from inside Olimar's helmet. Switch in game with the First Person button (V on keyboard, L3 on a controller)." },
     { SRC_MODS, 6, "Co-op Split Screen", "How the screen divides in two-player co-op." },
@@ -7627,7 +7594,7 @@ const GroupRow* achievementRows() {
 
 int achievementAtRow(int row) { return row >= 0 && row < PC_ACH_COUNT ? kAchOrder[row] : -1; }
 
-const GroupRow* groupRows(int group, int* count) {
+const GroupRow* rawGroupRows(int group, int* count) {
     switch (group) {
     case PC_SET_GROUP_ACHIEVEMENTS: *count = PC_ACH_COUNT; return achievementRows();
     case PC_SET_GROUP_DISPLAY: *count = countOf(kDisplayRows); return kDisplayRows;
@@ -7641,6 +7608,40 @@ const GroupRow* groupRows(int group, int* count) {
     }
 }
 
+// Filas que solo valen con otra encendida: se ocultan en vez de atenuarse,
+// para que Controls y Graphics no se llenen de opciones que no aplican.
+bool rowHidden(const GroupRow& r) {
+    switch (r.src) {
+    case SRC_ADV:
+        if (r.idx == 0) return sPending.controlMode == PC_CONTROL_CLASSIC;
+        if (r.idx >= 5 && r.idx <= 7) return !sPending.gyroEnabled;
+        return false;
+    case SRC_RECENTER: return !sPending.gyroEnabled;
+    case SRC_GFX: return r.idx >= 7 && r.idx <= 9 && !sPending.colourGrading;
+    case SRC_MODS: return r.idx == 16 && !sPending.lockOn;
+    default: return false;
+    }
+}
+// Fila original de cada fila visible del último groupRows (para las secciones).
+int sVisibleRowSource[64];
+const GroupRow* groupRows(int group, int* count) {
+    int n = 0;
+    const GroupRow* raw = rawGroupRows(group, &n);
+    if (!raw || group == PC_SET_GROUP_ACHIEVEMENTS) {
+        *count = n;
+        for (int i = 0; i < n && i < 64; i++) sVisibleRowSource[i] = i;
+        return raw;
+    }
+    static GroupRow visible[64];
+    int k = 0;
+    for (int i = 0; i < n && k < 64; i++) {
+        if (rowHidden(raw[i])) continue;
+        sVisibleRowSource[k] = i;
+        visible[k++] = raw[i];
+    }
+    *count = k;
+    return visible;
+}
 const GroupRow* groupRow(int group, int row) {
     int n = 0;
     const GroupRow* rows = groupRows(group, &n);
@@ -7660,19 +7661,16 @@ const GroupSection kSections[] = {
     { PC_SET_GROUP_ACHIEVEMENTS, 39, "CHALLENGE MODE" },
     { PC_SET_GROUP_DISPLAY, 0, "DISPLAY" },
     { PC_SET_GROUP_DISPLAY, 3, "RENDERING" },
-#if defined(VERSION_GPIP01)
-    { PC_SET_GROUP_DISPLAY, 7, "LANGUAGE" },
-#endif
     { PC_SET_GROUP_GRAPHICS, 0, "IMAGE" },
     { PC_SET_GROUP_GRAPHICS, 4, "POST-PROCESSING" },
     { PC_SET_GROUP_GRAPHICS, 8, "COLOUR" },
     { PC_SET_GROUP_GRAPHICS, 12, "CONTENT" },
-    { PC_SET_GROUP_CONTROLS, 0, "SCHEME" },
-    { PC_SET_GROUP_CONTROLS, 3, "ACTIONS" },
-    { PC_SET_GROUP_CONTROLS, 10, "COMBAT" },
-    { PC_SET_GROUP_CONTROLS, 13, "STICKS" },
-    { PC_SET_GROUP_CONTROLS, 16, "GYRO" },
-    { PC_SET_GROUP_CONTROLS, 21, "BINDINGS" },
+    { PC_SET_GROUP_CONTROLS, 0, "BINDINGS" },
+    { PC_SET_GROUP_CONTROLS, 2, "SCHEME" },
+    { PC_SET_GROUP_CONTROLS, 5, "ACTIONS" },
+    { PC_SET_GROUP_CONTROLS, 12, "COMBAT" },
+    { PC_SET_GROUP_CONTROLS, 15, "STICKS" },
+    { PC_SET_GROUP_CONTROLS, 18, "GYRO" },
     { PC_SET_GROUP_CAMERA, 0, "CAMERA" },
     { PC_SET_GROUP_CAMERA, 3, "CO-OP" },
     { PC_SET_GROUP_GAMEPLAY, 0, "PIKMIN" },
@@ -7690,9 +7688,16 @@ const GroupSection kSections[] = {
 };
 
 const char* rowSection(int group, int row) {
+    // La cabecera va en la primera fila visible de su sección.
+    int n = 0;
+    groupRows(group, &n);
+    if (row < 0 || row >= n) return nullptr;
+    const int from = row > 0 ? sVisibleRowSource[row - 1] + 1 : 0;
+    const int to   = sVisibleRowSource[row];
+    const char* title = nullptr;
     for (const GroupSection& s : kSections)
-        if (s.group == group && s.row == row) return s.title;
-    return nullptr;
+        if (s.group == group && s.row >= from && s.row <= to) title = s.title;
+    return title;
 }
 
 bool rowIsResolution(int group, int row) {
@@ -7709,13 +7714,7 @@ bool rowProbeable(int group, int row) {
     switch (r->src) {
     case SRC_MAIN:
         return r->idx == ROW_DISPLAY_MODE || r->idx == ROW_ASPECT_RATIO || r->idx == ROW_RENDER_SCALE
-            || r->idx == ROW_REFRESH_RATE || r->idx == ROW_VSYNC || r->idx == ROW_FPS_MODE
-#if defined(VERSION_GPIP01)
-            // El idioma se guarda aparte de sPending (sLanguage): el sondeo lo
-            // restaura por su cuenta. Solo sin ventana, para el launcher.
-            || (sHeadless && r->idx == ROW_LANGUAGE)
-#endif
-            ;
+            || r->idx == ROW_REFRESH_RATE || r->idx == ROW_VSYNC || r->idx == ROW_FPS_MODE;
     case SRC_ADV: return r->idx != 7;
     case SRC_GFX: return r->idx != 10 && r->idx != 11;
     case SRC_MODS: return true;

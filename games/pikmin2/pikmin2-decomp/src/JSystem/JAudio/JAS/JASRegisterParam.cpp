@@ -30,7 +30,7 @@ JASRegisterParam::JASRegisterParam()
 	_00[5] = 0;
 	_0C    = 0;
 	_0E    = 0;
-	_16[2] = 0;
+	_1A = 0;
 	_10    = 0;
 	_12    = 0;
 	_14    = 0;
@@ -55,7 +55,7 @@ void JASRegisterParam::init()
 	_00[5] = 0;
 	_0C    = 0xF0;
 	_0E    = 0x0C;
-	_16[2] = 0x40;
+	_1A = 0x40;
 	_10    = 0;
 	_12    = 1;
 	_14    = 1;
@@ -80,7 +80,7 @@ void JASRegisterParam::inherit(const JASRegisterParam& other)
 	_00[5] = 0;
 	_0C    = other._0C;
 	_0E    = other._0E;
-	_16[2] = other._16[2];
+	_1A = other._1A;
 	_10    = other._10;
 	_12    = other._12;
 	_14    = other._14;

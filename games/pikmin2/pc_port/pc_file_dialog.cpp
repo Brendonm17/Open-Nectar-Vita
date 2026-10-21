@@ -27,6 +27,15 @@ struct PcHostAllocScope {
 #include <string>
 #include <vector>
 
+// Operación larga a propósito: no cuenta para el vigilante de cuelgues (pc_main.cpp).
+extern "C" void pc_hang_busy(int begin);
+namespace {
+struct PcHangBusy {
+    PcHangBusy() { pc_hang_busy(1); }
+    ~PcHangBusy() { pc_hang_busy(0); }
+};
+}
+
 #if defined(_WIN32)
 #include <windows.h>
 #include <commdlg.h>
@@ -41,6 +50,7 @@ static std::wstring widen(const char* s)
 
 bool pc_file_dialog_open(const char* title, const char* filterName, const char* patterns, char* out, size_t outSize)
 {
+    PcHangBusy hangBusy;
     PC_HOST_ALLOC_SCOPE();
     if (!out || outSize == 0) return false;
     out[0] = '\0';
@@ -76,6 +86,7 @@ bool pc_file_dialog_open(const char* title, const char* filterName, const char* 
 
 bool pc_file_dialog_open(const char*, const char*, const char*, char* out, size_t outSize)
 {
+    PcHangBusy hangBusy;
     if (out && outSize) out[0] = '\0';
     return false; // Android uses the Java SAF picker
 }
@@ -109,6 +120,7 @@ static std::string runDialog(const std::string& command)
 
 bool pc_file_dialog_open(const char* title, const char* filterName, const char* patterns, char* out, size_t outSize)
 {
+    PcHangBusy hangBusy;
     PC_HOST_ALLOC_SCOPE();
     if (!out || outSize == 0) return false;
     out[0] = '\0';

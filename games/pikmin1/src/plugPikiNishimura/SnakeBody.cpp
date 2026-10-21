@@ -237,10 +237,13 @@ void SnakeBody::makeTurnVelocity()
 void SnakeBody::makeNewPosition()
 {
 	if (mSnake->getCurrentState() >= SNAKEAI_ChaseNavi && mSnake->getCurrentState() <= SNAKEAI_ChasePiki) {
+		// Original: mSegmentPositionList[i + 7], fuera de sus 8 elementos; cae en
+		// mSegmentTurnVelocityList (justo detrás). GCC -O3 puede recortar un
+		// bucle que se sale del array: se indexa el array real.
 		for (int i = 1; i < 7; i++) {
-			mAnimPosList[i][3].x += mSegmentPositionList[i + 7].x;
-			mAnimPosList[i][3].y += mSegmentPositionList[i + 7].y;
-			mAnimPosList[i][3].z += mSegmentPositionList[i + 7].z;
+			mAnimPosList[i][3].x += mSegmentTurnVelocityList[i - 1].x;
+			mAnimPosList[i][3].y += mSegmentTurnVelocityList[i - 1].y;
+			mAnimPosList[i][3].z += mSegmentTurnVelocityList[i - 1].z;
 		}
 	}
 }
@@ -315,7 +318,9 @@ void SnakeBody::makeVectorMatrix()
 			}
 
 			if (i > 0) {
-				mAnimPosList[i][2] = mSegmentTurnVelocityList[4 * i + 4];
+				// Original: mSegmentTurnVelocityList[4 * i + 4], fuera de sus 6
+				// elementos; cae en mAnimPosList[i - 1][2] (justo detrás).
+				mAnimPosList[i][2] = mAnimPosList[i - 1][2];
 				NsCalculation::calcOuterPro(mAnimPosList[i][2], mAnimPosList[i][0], mAnimPosList[i][1]);
 				NsCalculation::calcOuterPro(mAnimPosList[i][0], mAnimPosList[i][1], mAnimPosList[i][2]);
 

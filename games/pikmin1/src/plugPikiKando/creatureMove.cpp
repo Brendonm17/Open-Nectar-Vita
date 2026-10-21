@@ -382,8 +382,8 @@ CollTriInfo* Creature::checkForward(immut Vector3f& direction, f32 magnitude, f3
 		// ...unless it's gone on for long enough.
 		if (loopLimit-- < 0) {
 			PRINT("######################################################## loop !?\n");
-			f32* wtf = nullptr;
-			PRINT("%.1f \n", wtf[7]); // What the fuck?
+			// El original leía wtf[7] de un puntero nulo dentro de PRINT, que en
+			// consola no se compilaba; en el port PRINT existe y crasheaba.
 			return nullptr;
 		}
 	}

@@ -1731,7 +1731,7 @@ bool Onyon::insideAccessArea(Vector3f& navipos)
 BaseItem* ItemOnyon::Mgr::generatorBirth(Vector3f& pos, Vector3f& angle, GenItemParm* parm)
 {
 	GenOnyonParm* onyonparm = static_cast<GenOnyonParm*>(parm);
-	int objectType;
+	int objectType          = -1; // índice desconocido (mapas propios): nada
 	int onyonType = ONYON_TYPE_BLUE;
 
 	switch (onyonparm->mOnyonIndex) {
@@ -1757,6 +1757,9 @@ BaseItem* ItemOnyon::Mgr::generatorBirth(Vector3f& pos, Vector3f& angle, GenItem
 	case ONYON_TYPE_SHIP:
 		objectType = ONYON_OBJECT_SHIP;
 		break;
+	}
+	if (objectType < 0) {
+		return nullptr;
 	}
 
 	if (objectType == ONYON_OBJECT_ONYON) {
@@ -1945,7 +1948,7 @@ J3DModelData* ItemOnyon::Mgr::generatorGetShape(GenItemParm* parm)
 {
 	GenOnyonParm* onyonparm = static_cast<GenOnyonParm*>(parm);
 
-	int objType;
+	int objType = -1; // índice desconocido (mapas propios): sin modelo
 	switch (onyonparm->mOnyonIndex) {
 	case ONYON_TYPE_RED:
 	case ONYON_TYPE_BLUE:
@@ -1960,7 +1963,7 @@ J3DModelData* ItemOnyon::Mgr::generatorGetShape(GenItemParm* parm)
 		break;
 	}
 
-	return mModelData[objType];
+	return objType >= 0 ? mModelData[objType] : nullptr;
 }
 
 /**

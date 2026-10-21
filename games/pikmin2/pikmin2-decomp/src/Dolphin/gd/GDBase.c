@@ -59,6 +59,10 @@ void GDOverflowed(void)
 	fprintf(stderr, "[PC Port] GD display list overflow: begin=%p data=%p end=%p (length %u)\n",
 	        (void*)__GDCurrentDL->begin, (void*)__GDCurrentDL->data, (void*)__GDCurrentDL->end,
 	        (unsigned)__GDCurrentDL->length);
+	{
+		extern char pc_crash_note[512];
+		snprintf(pc_crash_note, sizeof(pc_crash_note), "GD display list overflow (length %u)", (unsigned)__GDCurrentDL->length);
+	}
 	abort();
 #endif
 	if (overflowcb) {

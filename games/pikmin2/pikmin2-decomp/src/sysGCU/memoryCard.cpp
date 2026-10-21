@@ -365,7 +365,7 @@ bool MemoryCardMgr::writeHeader(ECardSlot cardSlot, const char* fileName)
 			setInsideStatusFlag(INSIDESTATUS_ErrorOccurred);
 			break;
 		}
-		delete (buffer);
+		delete[] buffer;
 	}
 	CARDClose(&fileInfo);
 	return result;

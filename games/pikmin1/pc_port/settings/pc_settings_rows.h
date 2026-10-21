@@ -6,7 +6,7 @@
    mismos que usa el overlay F1; aquí solo se exponen por grupo/fila. */
 
 enum PcSettingsGroup {
-	PC_SET_GROUP_DISPLAY = 0, ///< ventana, resolución, frecuencia, FPS, idioma
+	PC_SET_GROUP_DISPLAY = 0, ///< ventana, resolución, frecuencia, FPS
 	PC_SET_GROUP_GRAPHICS,    ///< imagen, efectos, color, packs de texturas y modelos HD
 	PC_SET_GROUP_CONTROLS,    ///< esquema, ratón, sticks, giroscopio y asignación de teclas
 	PC_SET_GROUP_CAMERA,      ///< cámara libre, primera persona, Lock-On, Charge

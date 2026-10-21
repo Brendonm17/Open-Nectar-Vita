@@ -1578,8 +1578,8 @@ int main(int argc, char** argv)
             installedAssetsNow = true;
 
             // El idioma no se pregunta al instalar: el disco europeo trae los
-            // cinco y se instalan todos; el juego empieza en inglés y se cambia
-            // en el menú F1 (Display > Language).
+            // cinco y se instalan todos; se elige en las opciones del propio
+            // juego.
         }
 
         std::string failure;

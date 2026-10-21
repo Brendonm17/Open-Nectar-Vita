@@ -444,7 +444,7 @@ void SnakeAi::pikiStickMouth()
 {
 	CollPart* mouth  = mSnake->mCollInfo->getSphere('slot');
 	int randStartNum = NsMathI::getRand(mMaxSlotCount);
-	int partNum;
+	int partNum = -1;
 	for (int i = 0; i < mMaxSlotCount; i++) {
 		if (randStartNum >= mMaxSlotCount) {
 			randStartNum = 0;
@@ -459,6 +459,10 @@ void SnakeAi::pikiStickMouth()
 		randStartNum++;
 	}
 
+	// Boca llena: partNum quedaba sin valor y getChildAt leía fuera de rango.
+	if (partNum < 0 || !mouth) {
+		return;
+	}
 	InteractSwallow swallow(mSnake, mouth->getChildAt(partNum), 0);
 	mSnake->getTargetCreature()->stimulate(swallow);
 }

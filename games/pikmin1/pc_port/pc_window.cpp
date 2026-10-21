@@ -243,7 +243,6 @@ static SDL_Scancode sKeyBindings[PC_KEY_ACT_COUNT];
 static SDL_Scancode sKeyBindings2[PC_KEY_ACT_COUNT];
 static bool sSwarmHeld = false; // PC_KEY_ACT_SWARM sampled by the last poll
 // D-pad Down of each player's pad, which is also the swarm button.
-static bool sPadDpadDownHeld[2] = { false, false };
 
 // Lock-On y Charge se consumen como flanco: el bucle sondea el mando muchas
 // veces entre ticks lógicos, así que la pulsación se guarda hasta que alguien
@@ -260,7 +259,6 @@ static bool sSwarmPending[2]  = { false, false };
 
 bool pc_window_swarm_held(void) { return sSwarmHeld; }
 
-bool pc_window_pad_dpad_down_held(int player) { return sPadDpadDownHeld[player & 1]; }
 static bool sKeyBindingsInitialized = false;
 
 // Gamepad remapping state.
@@ -360,7 +358,7 @@ const int kDefaultGamepadBindings[PC_KEY_ACT_COUNT] = {
     /* PC_KEY_ACT_CSTICK_DOWN */ -1,
     /* PC_KEY_ACT_CSTICK_LEFT */ -1,
     /* PC_KEY_ACT_CSTICK_RIGHT*/ -1,
-    /* PC_KEY_ACT_SWARM       */ -1, // Optional; D-pad Down is taken by the pad's own D-pad
+    /* PC_KEY_ACT_SWARM       */ -1, // Optional; D-pad Down keeps the original lie down
     /* PC_KEY_ACT_LOCKON      */ SDL_CONTROLLER_BUTTON_RIGHTSTICK,
     /* PC_KEY_ACT_FIRSTPERSON */ SDL_CONTROLLER_BUTTON_LEFTSTICK,
     /* PC_KEY_ACT_GYRO_RECENTER */ -1, // sin botón libre por defecto; se asigna en Controls
@@ -1028,15 +1026,10 @@ static bool pc_window_read_gamepad(SDL_GameController* ctl, u16& button, s8& sti
     if (sCStickInvert & 2) ry = -ry;
     // Mod "Free Camera": the right stick orbits instead of pushing the squad,
     // the way Pikmin 3 rearranged it. The squad moves to the Swarm button.
-    // D-pad Down is the pad's swarm button with or without the mod (issue
-    // #76): the right stick alone makes the original C-stick column, never a
-    // group at the cursor.
+    // Swarming on the pad is its own Swarm binding (issue #138): D-pad Down
+    // keeps the original lie down, with or without the mod. The right stick
+    // alone makes the original C-stick column, never a group at the cursor.
     sFreeCamSubY[player & 1] = 0.0f;
-    sPadDpadDownHeld[player & 1] = SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0;
-    // Con A pulsado y la selección de Pikmin 2, la cruceta abajo solo cambia
-    // el color del Pikmin agarrado: no hace swarm.
-    const bool kindChange = (button & PAD_BUTTON_A) && pc_settings_get_p2_selection();
-    if (sPadDpadDownHeld[player & 1] && !kindChange) swarmHeld = true;
     if (pc_settings_get_free_camera()) {
         if (abs(ry) > axisDeadZone) sFreeCamSubY[player & 1] = pc_pad_axis_from_sdl(-ry) / 74.0f;
         if (abs(rx) > axisDeadZone) {

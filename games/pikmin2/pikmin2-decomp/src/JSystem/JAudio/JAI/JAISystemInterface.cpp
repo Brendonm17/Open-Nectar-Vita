@@ -5,6 +5,7 @@
 #include "JSystem/JAudio/JAS/JASPortCmd.h"
 #include "JSystem/JAudio/JAS/JASTrack.h"
 #include "types.h"
+#include <string.h>
 
 JASPortCmd JAInter::SystemInterface::systemPortCmd;
 
@@ -78,9 +79,41 @@ JASTrack* JAInter::SystemInterface::trackToSeqp(JASTrack* track, u8 p2, u32 p3)
  * @note Address: 0x800B904C
  * @note Size: 0x1C
  */
+#ifdef PIKI_PC_PORT
+// En consola asArray[i] y asStruct coinciden palabra a palabra (4 bytes). En
+// 64 bits PortArg mide 8 (lleva un puntero) y asStruct empieza con un
+// puntero de 8: asArray[2] (flags) caía sobre mTrackVolume y asArray[3]
+// (volumen) sobre mTrackPan. mFlags no recibía nunca los bits y ningún
+// cambio de volumen, tono, paneo o tempo de una secuencia se aplicaba tras
+// empezar: la música del nivel seguía sonando en las cinemáticas (pausa a
+// volumen 0) y los fundidos cortaban de golpe (issue #135). Se escribe en el
+// campo que corresponde al índice de consola.
+static void* pcPortArgSlot(JASPortArgs& args, u8 index)
+{
+	switch (index) {
+	case 1: return &args._04;
+	case 2: return &args.mFlags;
+	case 3: return &args.mTrackVolume;
+	case 4: return &args.mTrackPitch;
+	case 5: return &args.mTrackPan;
+	case 6: return &args.mTrackFxmix;
+	case 7: return &args.mTrackDolby;
+	case 8: return &args._20;
+	case 9: return &args._24;
+	case 10: return &args.mTrackTempo;
+	default: return nullptr; // 0 es mTrack (puntero), no un valor
+	}
+}
+#endif
+
 void JAInter::SystemInterface::setSeqPortargsF32(JAInter::SeqUpdateData* updateData, u32 playerParameterIndex, u8 portArgIndex, f32 value)
 {
+#ifdef PIKI_PC_PORT
+	if (void* slot = pcPortArgSlot(updateData->mPlayerParams[playerParameterIndex].mPortArgs.asStruct, portArgIndex))
+		memcpy(slot, &value, sizeof(value));
+#else
 	updateData->mPlayerParams[playerParameterIndex].mPortArgs.asArray[portArgIndex].f32 = value;
+#endif
 }
 
 /**
@@ -99,7 +132,12 @@ void JAInter::SystemInterface::setSeqPortargsPS16(JAInter::SeqUpdateData* update
  */
 void JAInter::SystemInterface::setSeqPortargsU32(JAInter::SeqUpdateData* updateData, u32 playerParameterIndex, u8 portArgIndex, u32 value)
 {
+#ifdef PIKI_PC_PORT
+	if (void* slot = pcPortArgSlot(updateData->mPlayerParams[playerParameterIndex].mPortArgs.asStruct, portArgIndex))
+		memcpy(slot, &value, sizeof(value));
+#else
 	updateData->mPlayerParams[playerParameterIndex].mPortArgs.asArray[portArgIndex].u32 = value;
+#endif
 }
 
 /**

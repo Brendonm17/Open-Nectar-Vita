@@ -77,6 +77,21 @@ set(LEGACY_COMPILE_OPTIONS
     -Wno-comment
 )
 
+# Endurecimiento del código decompilado. El compilador de GameCube no
+# aprovechaba el comportamiento indefinido que GCC/Clang -O2 sí aprovechan:
+# variables sin inicializar (crash de Armor::StateFail, leía la dirección
+# 0x2fc), comprobaciones de this == nullptr, punteros reinterpretados entre
+# tipos y overflow con signo. Con estas opciones ese código se compila como
+# lo que el juego espera en vez de eliminarse o volverse basura.
+include(CheckCXXCompilerFlag)
+foreach(flag -fno-strict-aliasing -fno-delete-null-pointer-checks -fwrapv -ftrivial-auto-var-init=zero)
+    string(MAKE_C_IDENTIFIER "LEGACY_HAS${flag}" flagVar)
+    check_cxx_compiler_flag(${flag} ${flagVar})
+    if(${flagVar})
+        list(APPEND LEGACY_COMPILE_OPTIONS ${flag})
+    endif()
+endforeach()
+
 # Native code (pc_port, tests, launcher) should compile with strict warnings.
 # We keep -fpermissive because native code includes legacy Dolphin headers.
 set(NATIVE_COMPILE_OPTIONS
@@ -938,7 +953,7 @@ if(ANDROID AND NOT TARGET nectar_launcher)
         "${LAUNCHER_EMBED_DIR}"
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb
         ${SDL2_INCLUDE_DIRS})
-    set(OPEN_NECTAR_VERSION "1.0.4" CACHE STRING "Open Nectar version of this build (GitHub release tag)")
+    set(OPEN_NECTAR_VERSION "1.0.7" CACHE STRING "Open Nectar version of this build (GitHub release tag)")
     target_compile_definitions(nectar_launcher PRIVATE OPEN_NECTAR_VERSION="${OPEN_NECTAR_VERSION}")
     target_compile_options(nectar_launcher PRIVATE ${NATIVE_COMPILE_OPTIONS})
     target_link_libraries(nectar_launcher PRIVATE launcher_imgui_android pikmin_disc_image ${SDL2_LIBRARIES} GLESv3 EGL log android)
@@ -1010,7 +1025,7 @@ if(PIKMIN_BUILD_LAUNCHER)
     target_link_libraries(pikmin_launcher PRIVATE launcher_imgui)
     # Versión que el launcher compara con el último release de GitHub para
     # avisar y actualizarse. Súbela en cada release (la etiqueta de GitHub).
-    set(OPEN_NECTAR_VERSION "1.0.4" CACHE STRING "Open Nectar version of this build (GitHub release tag)")
+    set(OPEN_NECTAR_VERSION "1.0.7" CACHE STRING "Open Nectar version of this build (GitHub release tag)")
     target_compile_definitions(pikmin_launcher PRIVATE OPEN_NECTAR_VERSION="${OPEN_NECTAR_VERSION}")
     if (WIN32)
         target_sources(pikmin_launcher PRIVATE packaging/windows/nectar.rc)

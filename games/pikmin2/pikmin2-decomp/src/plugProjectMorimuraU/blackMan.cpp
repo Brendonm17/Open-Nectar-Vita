@@ -1198,7 +1198,7 @@ void Obj::findNextRoutePoint()
 		int val     = -1;                                       // r28
 		bool check  = false;                                    // r27
 		f32 minDist = SQUARE(C_GENERALPARMS.mSearchDistance()); // f31
-		int targetWPIdx;                                        // r26
+		int targetWPIdx = 0; // r26; mEscapePhase fuera de los casos la dejaba sin valor
 		switch (mEscapePhase) {
 		case 0: {
 			targetWPIdx = randInt(counter);
@@ -1340,6 +1340,9 @@ void Obj::findNextRoutePoint()
 
 		if (targetWPIdx >= counter) {
 			targetWPIdx = counter - 1;
+		}
+		if (targetWPIdx < 0) {
+			targetWPIdx = 0;
 		}
 
 		s16 idx            = indices[targetWPIdx];

@@ -67,9 +67,10 @@ Creature* ObjectSystem::findCreature(const char* query) const
 
 	} else if (!strcmp(stringBuffer, "onyon")) {
 		int i = (int)targetChar;
-		OnyonTypes onyon_type;
+		// Carácter desconocido: sin cebolla (antes índice sin valor).
+		int onyon_type = -1;
 		if (!((i < '0') || ('2' < i))) {
-			onyon_type = (OnyonTypes)(i - '0'); // converts ascii char into integer
+			onyon_type = i - '0'; // converts ascii char into integer
 		} else if (targetChar == 'R') {
 			onyon_type = ONYON_TYPE_RED;
 		} else if (targetChar == 'B') {
@@ -77,8 +78,8 @@ Creature* ObjectSystem::findCreature(const char* query) const
 		} else if (targetChar == 'Y') {
 			onyon_type = ONYON_TYPE_YELLOW;
 		}
-		creature = ItemOnyon::mgr->getOnyon((int)onyon_type);
-		if (!playData->hasBootContainer((EPikiKind)onyon_type)) {
+		creature = onyon_type >= 0 ? ItemOnyon::mgr->getOnyon(onyon_type) : nullptr;
+		if (onyon_type < 0 || !playData->hasBootContainer((EPikiKind)onyon_type)) {
 			creature = nullptr;
 		}
 

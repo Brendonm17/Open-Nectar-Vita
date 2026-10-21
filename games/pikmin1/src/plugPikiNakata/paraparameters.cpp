@@ -50,7 +50,7 @@ void ParaParametersI::write(Stream& output)
 void ParaParametersI::print()
 {
 	for (int i = 0; i < mParaCount; i++) {
-		PRINT("%s:%d\n", mParameters[i]);
+		PRINT("%d:%d\n", i, mParameters[i]); // era "%s:%d" sin nombre: %s leía el entero
 	}
 }
 
@@ -89,7 +89,7 @@ void ParaParametersF::write(Stream& output)
 void ParaParametersF::print()
 {
 	for (int i = 0; i < mParaCount; i++) {
-		PRINT("%s:%f\n", mParameters[i]);
+		PRINT("%d:%f\n", i, mParameters[i]); // era "%s:%f" sin nombre: %s leía el float
 	}
 }
 

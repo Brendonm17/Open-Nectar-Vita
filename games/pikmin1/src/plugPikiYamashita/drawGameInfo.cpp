@@ -309,14 +309,14 @@ struct NaviTexCallBack : public P2DPaneCallBack {
 			// capitán Pikmin, el icono de burbuja con hoja (el del contador; los
 			// de los Pikmin blanco y morado salen del Pikmin 2 instalado).
 			if (!mOriginalTex) mOriginalTex = pic->getTexture(0);
-			static Texture* sPikiPortrait[PikiColorCount] = {};
+			// Sin caché estática: el registro de gsys se invalida al resetear el
+			// heap del nivel y un puntero guardado quedaba colgando.
 			static const char* kPikiPortrait[PikiColorCount] = { "screen/tex/bp_l64.bti", "screen/tex/rp_l64.bti", "screen/tex/yp_l64.bti" };
 			const int captain  = navi->pcCaptain();
 			const int pikColor = pc_captain_piki_color(captain);
 			Texture* custom    = nullptr;
 			if (pikColor >= 0) {
-				if (!sPikiPortrait[pikColor]) sPikiPortrait[pikColor] = zen::loadTexExp(kPikiPortrait[pikColor], true, true);
-				custom = sPikiPortrait[pikColor];
+				custom = zen::loadTexExp(kPikiPortrait[pikColor], true, true);
 			} else if (captain == PC_CAPTAIN_LOUIE) {
 				custom = pc_art_texture("coop_portrait_louie");
 			} else if (captain == PC_CAPTAIN_PRESIDENT) {
@@ -327,14 +327,12 @@ struct NaviTexCallBack : public P2DPaneCallBack {
 				custom = pc_art_texture("coop_portrait_piki_purple");
 			} else if (captain == PC_CAPTAIN_BULBMIN) {
 				// Pikmin 2 no tiene icono de Bulbmin: el del rojo, su color.
-				if (!sPikiPortrait[Red]) sPikiPortrait[Red] = zen::loadTexExp(kPikiPortrait[Red], true, true);
-				custom = sPikiPortrait[Red];
+				custom = zen::loadTexExp(kPikiPortrait[Red], true, true);
 			} else if (captain == PC_CAPTAIN_PUFFMIN) {
 				// Sin PNG propio, el icono del rojo.
 				custom = pc_art_texture("coop_portrait_puffmin");
 				if (!custom) {
-					if (!sPikiPortrait[Red]) sPikiPortrait[Red] = zen::loadTexExp(kPikiPortrait[Red], true, true);
-					custom = sPikiPortrait[Red];
+					custom = zen::loadTexExp(kPikiPortrait[Red], true, true);
 				}
 			}
 			Texture* want = custom ? custom : mOriginalTex;

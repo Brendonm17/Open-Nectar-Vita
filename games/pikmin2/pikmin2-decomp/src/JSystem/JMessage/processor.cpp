@@ -933,15 +933,17 @@ void* TSequenceProcessor::process_onBranch_limited_(const TSequenceProcessor* pr
  */
 void* TSequenceProcessor::process_onBranch_(const TSequenceProcessor* processor, u32 p2)
 {
-	u16 v1 = ((u32*)processor->mProc.mJumpProc.mTarget)[p2];
+	// En GameCube mJumpProc.mTarget compartía dirección con mBranchProc.mTargetAddr;
+	// en 64 bits solo tendría la mitad baja del puntero.
+	const u32 target = ((const u32*)processor->mProc.mBranchProc.mTargetAddr)[p2];
+	u16 v1           = target;
 
 	if (v1 >= 0xFF00) {
 		return nullptr;
 	}
 
 	TControl* control = processor->mControl;
-	return (!control->setMessageCode_inSequence_(processor, ((u32*)processor->mProc.mJumpProc.mTarget)[p2] >> 0x10, v1)) ? nullptr
-	                                                                                                                     : control->mEntry;
+	return (!control->setMessageCode_inSequence_(processor, target >> 0x10, v1)) ? nullptr : control->mEntry;
 }
 
 /**

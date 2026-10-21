@@ -37,6 +37,7 @@
 #include <fstream>
 #include <algorithm>
 #include <vector>
+#include "pc_host_alloc.h"
 #include <atomic>
 #include <filesystem>
 #include <mutex>
@@ -502,7 +503,7 @@ int sDesktopH = 0;
 bool sHadConfigFile = false;
 
 bool sMenuOpen = false;
-static std::vector<Uint8> gPrevKeys; // previous-frame keyboard state snapshot
+static std::vector<Uint8, PcHostAllocator<Uint8>> gPrevKeys; // previous-frame keyboard state snapshot
 // SDL calls the Xbox Select/View button BACK.  Keep its edge independently of
 // the keyboard snapshot: settings input is polled from more than one hook per
 // frame, and a held button must not reopen the menu after a modal closes.
@@ -7677,6 +7678,13 @@ void pc_settings_draw(void) {
     // Página de pestañas: grupos arriba, filas a la izquierda y opciones de
     // la fila seleccionada a la derecha.
     drawF1Page(gfx);
+}
+
+int pc_settings_debug_toggle_fps_mode(void) {
+    // Comparar a 30 y 60 FPS la misma escena (enemigos, HUD): no se guarda en
+    // pikmin_settings.conf, el ajuste de F1 sigue mandando al reiniciar.
+    sConfig.fpsMode = sConfig.fpsMode == 0 ? 1 : 0;
+    return sConfig.fpsMode;
 }
 
 int pc_settings_get_fps_mode(void) {

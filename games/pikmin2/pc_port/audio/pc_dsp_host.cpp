@@ -73,6 +73,16 @@ enum BusId : u16 {
 	kBusDryRight  = 0x0D60,
 	kBusBackLeft  = 0x0F40,
 	kBusBackRight = 0x0CA0,
+	// Bus central: en estéreo y mono JASChannel::initialUpdateDSPChannel
+	// redirige aquí el trasero izquierdo (connect 8 -> 11), para que lo que en
+	// surround va en contrafase no se anule; la consola lo suma en fase a
+	// los dos lados. Sin este caso esas voces se descartaban y en estéreo
+	// faltaban sonidos (issue #135; en surround se oía todo).
+	kBusCenter = 0x09A0,
+	// Los otros dos buses intermedios del DSP: el renderer de Pikmin 1 los
+	// suma igual a los dos lados; aquí se descartaban.
+	kBusCenter2 = 0x0FA0,
+	kBusCenter3 = 0x0B00,
 	// Entradas de las cuatro líneas FX (JASDsp::setFXLine), en orden de línea.
 	kBusFx0 = 0x0DC0,
 	kBusFx1 = 0x0E20,
@@ -93,6 +103,8 @@ int fxLineForBus(u16 id)
 
 /// Downmix weight for the surround pair when folded into stereo.
 constexpr s32 kSurroundFold = 24576; // 0.75 in Q15.
+/// Bus central repartido a izquierda y derecha (-3 dB).
+constexpr s32 kCenterFold = 23170; // 0.7071 in Q15.
 
 const u32* sResampleFilter = nullptr;
 const u32* sAdpcmFilter    = nullptr;
@@ -392,6 +404,14 @@ void renderFxLines(u32 frameSamples)
 					case kBusDryRight: sBusRight[sub + i] += v; break;
 					case kBusBackLeft: sBusLeft[sub + i] += (v * kSurroundFold) >> 15; break;
 					case kBusBackRight: sBusRight[sub + i] += (v * kSurroundFold) >> 15; break;
+					case kBusCenter:
+					case kBusCenter2:
+					case kBusCenter3: {
+						const s32 c = (v * kCenterFold) >> 15;
+						sBusLeft[sub + i] += c;
+						sBusRight[sub + i] += c;
+						break;
+					}
 					default: break;
 					}
 				}
@@ -611,6 +631,14 @@ void pc_dsp_host_render_frame(DSPchannel_* channels, u32 channelCount, s16* out,
 					startR += (from * kSurroundFold) >> 15;
 					endR += (to * kSurroundFold) >> 15;
 					break;
+				case kBusCenter:
+				case kBusCenter2:
+				case kBusCenter3:
+					startL += (from * kCenterFold) >> 15;
+					endL += (to * kCenterFold) >> 15;
+					startR += (from * kCenterFold) >> 15;
+					endR += (to * kCenterFold) >> 15;
+					break;
 				case kBusFx0:
 				case kBusFx1:
 				case kBusFx2:
@@ -766,7 +794,7 @@ void pc_dsp_host_render_frame(DSPchannel_* channels, u32 channelCount, s16* out,
 			} else {
 				for (int m = 0; m < 6; ++m) {
 					const u16 id = channel.mixChannels[m].id;
-					if (id == kBusDryLeft || id == kBusDryRight) {
+					if (id == kBusDryLeft || id == kBusDryRight || id == kBusCenter || id == kBusCenter2 || id == kBusCenter3) {
 						asked = std::max(asked, std::abs(static_cast<s32>(static_cast<s16>(channel.mixChannels[m].targetVolume)) >> 1));
 					}
 				}

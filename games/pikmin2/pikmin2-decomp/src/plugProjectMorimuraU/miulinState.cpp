@@ -143,6 +143,7 @@ void StateWalk::exec(EnemyBase* enemy)
 		} else if (mTurnTimer > 30) {
 			f32 x;
 			f32 z;
+			bool hasAim        = true; // sin objetivo ni meta, x/z quedaban sin valor
 			Creature* creature = enemy->mTargetCreature;
 			if (creature) {
 				mReturnTimer         = 0;
@@ -154,12 +155,14 @@ void StateWalk::exec(EnemyBase* enemy)
 					Vector3f goalPos = enemy->getGoalPos();
 					x                = goalPos.x;
 					z                = goalPos.z;
+				} else {
+					hasAim = false;
 				}
 				if (PC_ORIG_TICK()) mReturnTimer++;
 			}
 
 			Vector3f pos = enemy->getPosition();
-			f32 angle    = angDist(angXZ(x, z, pos), enemy->getFaceDir());
+			f32 angle    = hasAim ? angDist(angXZ(x, z, pos), enemy->getFaceDir()) : 0.0f;
 			if (FABS(angle) > 3.0f * (PI * (DEG2RAD * CG_PROPERPARMS(OBJ(enemy)).mMaxTurnAngle.mValue))) {
 				enemy->finishMotion();
 				OBJ(enemy)->mNextState = MIULIN_Turn;

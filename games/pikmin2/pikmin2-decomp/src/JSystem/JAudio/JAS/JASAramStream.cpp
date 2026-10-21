@@ -806,7 +806,7 @@ int JASAramStream::channelProc()
 void JASAramStream::channelStart()
 {
 	static const int one = 1;
-	u8 blockType;
+	u8 blockType = 0;
 	switch (mStreamType) {
 	case 0:
 		blockType = 0;

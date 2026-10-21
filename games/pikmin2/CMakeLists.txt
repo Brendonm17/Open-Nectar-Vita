@@ -108,6 +108,21 @@ set(LEGACY_COMPILE_OPTIONS
     -Werror=return-type
 )
 
+# Endurecimiento del código decompilado. El compilador de GameCube no
+# aprovechaba el comportamiento indefinido que GCC/Clang -O2 sí aprovechan:
+# variables sin inicializar (crash de Armor::StateFail, leía la dirección
+# 0x2fc), comprobaciones de this == nullptr, punteros reinterpretados entre
+# tipos y overflow con signo. Con estas opciones ese código se compila como
+# lo que el juego espera en vez de eliminarse o volverse basura.
+include(CheckCXXCompilerFlag)
+foreach(flag -fno-strict-aliasing -fno-delete-null-pointer-checks -fwrapv -ftrivial-auto-var-init=zero)
+    string(MAKE_C_IDENTIFIER "LEGACY_HAS${flag}" flagVar)
+    check_cxx_compiler_flag(${flag} ${flagVar})
+    if(${flagVar})
+        list(APPEND LEGACY_COMPILE_OPTIONS ${flag})
+    endif()
+endforeach()
+
 set(NATIVE_COMPILE_OPTIONS
     -include "${ADAPTER_DIR}/pikmin2_pc_types.h"
     -fsigned-char

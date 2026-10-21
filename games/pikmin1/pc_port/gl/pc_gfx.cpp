@@ -8177,7 +8177,7 @@ void pc_gfx_end(void) {
             char name[256];
             GLsizei length;
             GLint size;
-            GLenum type;
+            GLenum type = 0;
             if (glGetActiveUniform_ptr) {
                 glGetActiveUniform_ptr(sShaderProgram, i, sizeof(name), &length, &size, &type, name);
             } else {

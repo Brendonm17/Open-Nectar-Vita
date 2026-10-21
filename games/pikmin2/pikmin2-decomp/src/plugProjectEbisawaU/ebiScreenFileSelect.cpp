@@ -898,7 +898,7 @@ bool TMainScreen::isFinishDecideDataBall(s32 fileID)
  */
 void TMainScreen::createCopyCursor(s32 fileID)
 {
-	int id1, id2;
+	int id1 = 1, id2 = 2; // fileID fuera de 0..2: índices sin valor
 	switch (fileID) {
 	case 0:
 		id1 = 1;

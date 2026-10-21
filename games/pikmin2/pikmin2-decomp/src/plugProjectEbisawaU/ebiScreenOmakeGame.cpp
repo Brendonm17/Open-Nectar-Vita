@@ -243,7 +243,7 @@ void TOmakeGame::setSelfControl()
 bool TOmakeGame::openMsg(s32 id)
 {
 	// This text was never translated from japanese
-	u64 tag;
+	u64 tag = MC8("4800_00"); // mSelection fuera de rango: ID sin valor
 	switch (id) {
 	case GameDesc:
 		switch (mSelection) {

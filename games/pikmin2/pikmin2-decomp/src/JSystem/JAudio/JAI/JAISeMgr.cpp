@@ -664,7 +664,7 @@ void storeSeBuffer(JAISe** soundHandlePtr, JAInter::Actor* actor, u32 soundID, u
 	void* obj;
 	u8 bufferCount;
 	u8 max;
-	JAISe* seBuffer[16];
+	JAISe* seBuffer[16] = {};
 	JAInter::Actor* usableActor = actor;
 	if (!actor) {
 		usableActor = &JAInter::Const::nullActor;
@@ -699,6 +699,11 @@ void storeSeBuffer(JAISe** soundHandlePtr, JAInter::Actor* actor, u32 soundID, u
 				link        = nullptr;
 				bufferCount = 0xFF;
 			} else {
+				// seBuffer tiene 16 huecos; bufferCount no tenía tope.
+				if (bufferCount >= 16) {
+					link = link->getNext();
+					continue;
+				}
 				if (bufferCount == 0) {
 					seBuffer[bufferCount] = sound;
 				} else if (seBuffer[0]->getInfoPriority() < sound->getInfoPriority()) {
@@ -717,7 +722,8 @@ void storeSeBuffer(JAISe** soundHandlePtr, JAInter::Actor* actor, u32 soundID, u
 		}
 	}
 
-	if (bufferCount == max) {
+	// max sale de la tabla de categorías y puede ser 0: sin buffer que comparar.
+	if (bufferCount == max && seBuffer[0]) {
 		if (seBuffer[0]->getInfoPriority() > soundInfo->mPriority) {
 #ifdef PIKI_PC_PORT
 			pc_audio_drop(PCAD_SeLowPriority);

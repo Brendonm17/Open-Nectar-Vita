@@ -148,6 +148,44 @@ static PcCondRegistry sCondRegistry;
 static PcQueueRegistry sQueueRegistry;
 static thread_local OSThread* sCurrentHostThread;
 
+// Cancelación cooperativa (OSCancelThread). Matar un hilo en cualquier punto
+// lo deja morir con cerrojos tomados (malloc, heap, E/S) y en Windows las
+// esperas de std::condition_variable ni siquiera son puntos de cancelación:
+// pthread_join se quedaba esperando para siempre (cuelgue al cambiar de
+// sección). El hilo marcado sale él mismo desde sus esperas.
+struct PcThreadArg {
+	OSThreadStartFunction func;
+	void* param;
+	OSThread* thread;
+	pthread_mutex_t mutex;
+	pthread_cond_t cond;
+	bool started;
+	bool suspended;
+	bool cancel;                // OSCancelThread lo pide (atómico)
+	pthread_cond_t* waitCond;   // espera pthread en curso, para despertarla
+	pthread_mutex_t* waitMutex;
+};
+
+static thread_local PcThreadArg* tThreadArg = nullptr;
+
+static bool pc_cancel_requested()
+{
+	return tThreadArg && __atomic_load_n(&tThreadArg->cancel, __ATOMIC_ACQUIRE);
+}
+static void pc_cancel_exit() { pthread_exit(nullptr); }
+static void pc_wait_begin(pthread_cond_t* cond, pthread_mutex_t* mutex)
+{
+	if (!tThreadArg) return;
+	__atomic_store_n(&tThreadArg->waitMutex, mutex, __ATOMIC_RELEASE);
+	__atomic_store_n(&tThreadArg->waitCond, cond, __ATOMIC_RELEASE);
+}
+static void pc_wait_end()
+{
+	if (!tThreadArg) return;
+	__atomic_store_n(&tThreadArg->waitCond, (pthread_cond_t*)nullptr, __ATOMIC_RELEASE);
+	__atomic_store_n(&tThreadArg->waitMutex, (pthread_mutex_t*)nullptr, __ATOMIC_RELEASE);
+}
+
 static void pc_init_recursive_mutex(pthread_mutex_t* m)
 {
 	pthread_mutexattr_t attr;
@@ -398,6 +436,9 @@ void OSReport(const char* message, ...)
 	va_end(ap);
 }
 
+extern "C" char pc_crash_note[512];
+extern "C" void pc_hang_heartbeat(void);
+
 void OSPanic(const char* file, int line, const char* message, ...)
 {
 	fprintf(stderr, "OSPanic %s:%d: ", file, line);
@@ -405,6 +446,12 @@ void OSPanic(const char* file, int line, const char* message, ...)
 	va_start(ap, message);
 	vfprintf(stderr, message, ap);
 	va_end(ap);
+	int used = snprintf(pc_crash_note, sizeof(pc_crash_note), "OSPanic %s:%d: ", file, line);
+	if (used > 0 && used < (int)sizeof(pc_crash_note)) {
+		va_start(ap, message);
+		vsnprintf(pc_crash_note + used, sizeof(pc_crash_note) - used, message, ap);
+		va_end(ap);
+	}
 	fprintf(stderr, "\n");
 	abort();
 }
@@ -625,9 +672,17 @@ void OSWaitCond(OSCond* cond, OSMutex* mutex)
 	// trylock para no bloquearse con otro hilo que lo tenga y quiera este mutex.
 	const bool irqHeld = tIrqHeld;
 	if (irqHeld) pcIrqUnlock();
-	pthread_cleanup_push(pc_cancel_unlock_mutex, nativeMutex);
-	pthread_cond_wait(nativeCond, nativeMutex);
-	pthread_cleanup_pop(0);
+	pc_wait_begin(nativeCond, nativeMutex);
+	if (!pc_cancel_requested()) {
+		pthread_cleanup_push(pc_cancel_unlock_mutex, nativeMutex);
+		pthread_cond_wait(nativeCond, nativeMutex);
+		pthread_cleanup_pop(0);
+	}
+	pc_wait_end();
+	if (pc_cancel_requested()) {
+		pthread_mutex_unlock(nativeMutex);
+		pc_cancel_exit();
+	}
 	if (irqHeld) {
 		while (!sIrqMutex.try_lock()) {
 			pthread_mutex_unlock(nativeMutex);
@@ -660,15 +715,6 @@ BOOL OSIsThreadTerminated(OSThread* thread)
 	return !thread || thread->state == OS_THREAD_STATE_MORIBUND || thread->state == OS_THREAD_STATE_NULL;
 }
 
-struct PcThreadArg {
-	OSThreadStartFunction func;
-	void* param;
-	OSThread* thread;
-	pthread_mutex_t mutex;
-	pthread_cond_t cond;
-	bool started;
-	bool suspended;
-};
 
 static void pc_thread_cancel_cleanup(void* p)
 {
@@ -687,20 +733,22 @@ static void* pc_thread_entry(void* p)
 	PcThreadArg* arg            = (PcThreadArg*)p;
 	void* ret                   = nullptr;
 	sCurrentHostThread          = arg->thread;
+	tThreadArg                  = arg;
 	pthread_cleanup_push(pc_thread_cancel_cleanup, arg);
 	pthread_mutex_lock(&arg->mutex);
 	while (!arg->started)
 		pthread_cond_wait(&arg->cond, &arg->mutex);
 	pthread_mutex_unlock(&arg->mutex);
+	if (pc_cancel_requested())
+		pc_cancel_exit();
 	arg->thread->state          = OS_THREAD_STATE_RUNNING;
 	ret                         = arg->func(arg->param);
 	arg->thread->state          = OS_THREAD_STATE_MORIBUND;
 	arg->thread->val            = ret;
 	arg->thread->specific[1]    = nullptr;
 	sCurrentHostThread          = nullptr;
-	pthread_cond_destroy(&arg->cond);
-	pthread_mutex_destroy(&arg->mutex);
-	free(arg);
+	// arg no se libera: OSCancelThread puede estar usándolo a la vez (los
+	// hilos del juego son pocos y viven casi toda la partida).
 	pthread_cleanup_pop(0);
 	return ret;
 }
@@ -724,6 +772,9 @@ BOOL OSCreateThread(OSThread* thread, OSThreadStartFunction func, void* param, v
 	arg->thread    = thread;
 	arg->started   = false;
 	arg->suspended = false;
+	arg->cancel    = false;
+	arg->waitCond  = nullptr;
+	arg->waitMutex = nullptr;
 	pthread_mutex_init(&arg->mutex, nullptr);
 	pthread_cond_init(&arg->cond, nullptr);
 	pthread_t pt;
@@ -751,12 +802,47 @@ void OSCancelThread(OSThread* thread)
 	if (!thread || thread->state == OS_THREAD_STATE_MORIBUND || !thread->specific[0])
 		return;
 	const pthread_t native = (pthread_t)(uintptr_t)thread->specific[0];
+	const bool self        = pthread_equal(native, pthread_self());
 	if (PcThreadArg* arg = (PcThreadArg*)thread->specific[1]) {
+		__atomic_store_n(&arg->cancel, true, __ATOMIC_RELEASE);
 		pthread_mutex_lock(&arg->mutex);
 		arg->started = true;
 		arg->suspended = false;
 		pthread_cond_broadcast(&arg->cond);
 		pthread_mutex_unlock(&arg->mutex);
+		// Despierta la espera pthread en curso (OSWaitCond/OSSleepThread):
+		// con su mutex, el hilo ve la marca antes de volver a dormirse.
+		pthread_mutex_t* waitMutex = __atomic_load_n(&arg->waitMutex, __ATOMIC_ACQUIRE);
+		pthread_cond_t* waitCond   = __atomic_load_n(&arg->waitCond, __ATOMIC_ACQUIRE);
+		if (waitCond && waitMutex && !self) {
+			pthread_mutex_lock(waitMutex);
+			pthread_cond_broadcast(waitCond);
+			pthread_mutex_unlock(waitMutex);
+		}
+	}
+	if (self) {
+		thread->state       = OS_THREAD_STATE_MORIBUND;
+		thread->specific[0] = nullptr;
+		pc_cancel_exit();
+	}
+	{
+		// Y las colas de mensajes (std::condition_variable compartida).
+		std::lock_guard<std::mutex> lock(sMsgMutex);
+	}
+	sMsgCv.notify_all();
+	// Medio segundo para salir por su cuenta; si no (hilo ocupado fuera de
+	// las esperas del port), el método forzoso de cada plataforma.
+	bool exited = false;
+	{
+		PcIrqRelease irq;
+		for (int i = 0; i < 500 && !(exited = thread->state == OS_THREAD_STATE_MORIBUND); ++i)
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	if (exited) {
+		PcIrqRelease irq;
+		pthread_join(native, nullptr);
+		thread->specific[0] = nullptr;
+		return;
 	}
 #ifdef __ANDROID__
 	// bionic no tiene pthread_cancel: una señal cuyo manejador sale del hilo.
@@ -779,10 +865,18 @@ void OSCancelThread(OSThread* thread)
 #else
 	pthread_cancel(native);
 #endif
-	if (!pthread_equal(native, pthread_self())) {
+	{
 		// The target may need the interrupt lock to unwind (PcIrqRelease).
+		// Sin esperar para siempre: un hilo que no sale congelaba el juego.
 		PcIrqRelease irq;
-		pthread_join(native, nullptr);
+		for (int i = 0; i < 2500 && !(exited = thread->state == OS_THREAD_STATE_MORIBUND); ++i)
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		if (exited) {
+			pthread_join(native, nullptr);
+		} else {
+			fprintf(stderr, "[PC Port] OSCancelThread: thread did not exit, detached\n");
+			pthread_detach(native);
+		}
 	}
 	thread->state       = OS_THREAD_STATE_MORIBUND;
 	thread->specific[0] = nullptr;
@@ -817,9 +911,13 @@ s32 OSSuspendThread(OSThread* thread)
 	if (thread == OSGetCurrentThread()) {
 		thread->state = OS_THREAD_STATE_WAITING;
 		pthread_cleanup_push(pc_cancel_unlock_mutex, &arg->mutex);
-		while (arg->suspended)
+		while (arg->suspended && !pc_cancel_requested())
 			pthread_cond_wait(&arg->cond, &arg->mutex);
 		pthread_cleanup_pop(0);
+		if (pc_cancel_requested()) {
+			pthread_mutex_unlock(&arg->mutex);
+			pc_cancel_exit();
+		}
 		thread->state = OS_THREAD_STATE_RUNNING;
 	}
 	pthread_mutex_unlock(&arg->mutex);
@@ -840,11 +938,15 @@ void OSSleepThread(OSThreadQueue* queue)
 	const bool irqHeld   = tIrqHeld;
 	if (irqHeld)
 		pcIrqUnlock();
+	pc_wait_begin(&value->cond, &value->mutex);
 	pthread_cleanup_push(pc_cancel_unlock_mutex, &value->mutex);
-	while (generation == value->generation)
+	while (generation == value->generation && !pc_cancel_requested())
 		pthread_cond_wait(&value->cond, &value->mutex);
 	pthread_cleanup_pop(0);
+	pc_wait_end();
 	pthread_mutex_unlock(&value->mutex);
+	if (pc_cancel_requested())
+		pc_cancel_exit();
 	if (irqHeld)
 		pcIrqLock();
 }
@@ -881,6 +983,10 @@ BOOL OSSendMessage(OSMessageQueue* queue, OSMessage msg, s32 flags)
 		}
 		if (!(flags & OS_MESSAGE_BLOCK))
 			return FALSE;
+		if (pc_cancel_requested()) {
+			lock.unlock();
+			pc_cancel_exit();
+		}
 		sMsgCv.wait(lock);
 	}
 }
@@ -899,6 +1005,10 @@ BOOL OSJamMessage(OSMessageQueue* queue, OSMessage msg, s32 flags)
 		}
 		if (!(flags & OS_MESSAGE_BLOCK))
 			return FALSE;
+		if (pc_cancel_requested()) {
+			lock.unlock();
+			pc_cancel_exit();
+		}
 		sMsgCv.wait(lock);
 	}
 }
@@ -917,6 +1027,10 @@ BOOL OSReceiveMessage(OSMessageQueue* queue, OSMessage* msgPtr, s32 flags)
 		}
 		if (!(flags & OS_MESSAGE_BLOCK))
 			return FALSE;
+		if (pc_cancel_requested()) {
+			lock.unlock();
+			pc_cancel_exit();
+		}
 		sMsgCv.wait(lock);
 	}
 }
@@ -1204,6 +1318,8 @@ void VIWaitForRetrace()
 			}
 		}
 	}
+	// Latido del frame para el vigilante de cuelgues (pc_main.cpp).
+	pc_hang_heartbeat();
 	// Eventos de ventana/entrada via pc_window (capa compartida con Pikmin 1).
 	pc_window_poll_events(nullptr);
 	if (pc_window_should_close()) {

@@ -39,8 +39,8 @@ void EUTPadInterface_countNum::update()
 	}
 	mSelectionChanged = 0;
 
-	bool isForwards;
-	bool isBackwards;
+	bool isForwards  = false; // modo desconocido: sin valor
+	bool isBackwards = false;
 
 	switch (mMode) {
 	case MODE_LEFTRIGHT:

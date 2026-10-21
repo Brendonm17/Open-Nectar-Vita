@@ -760,7 +760,7 @@ int ActPathMove::execPathfinding()
 			endIdx = node->mWpIndex;
 		}
 		char buf[256];
-		sprintf(buf, "%d->%d->...->%d", mStartNode->mWpIndex, (mStartNode->mNext) ? (char*)mStartNode->mNext->mWpIndex : "...", endIdx);
+		sprintf(buf, "%d->%d->...->%d", mStartNode->mWpIndex, (mStartNode->mNext) ? (int)mStartNode->mNext->mWpIndex : -1, endIdx);
 		return ACTEXEC_Continue;
 
 			}	case Game::PATHFIND_Start: { // make a new context and start a path

@@ -437,7 +437,7 @@ void RandEnemyUnit::setUnitRandEnemyTypeC()
 				}
 			}
 
-			if (ones) {
+			if (ones && counter < 128) {
 				enemyList[counter]  = enemy;
 				weightList[counter] = ones;
 				weightTally += weightList[counter];
@@ -605,7 +605,7 @@ void RandEnemyUnit::setSlotEnemyTypeF(int vsColor)
 				}
 			}
 
-			if (check) {
+			if (check && spawnCounter < 128) {
 				nodeList[spawnCounter]  = node;
 				spawnList[spawnCounter] = spawn;
 				scoreList[spawnCounter] = vsSign * (vsScore + nodeList[spawnCounter]->getVersusScore());
@@ -667,7 +667,7 @@ void RandEnemyUnit::setUnitRandEnemyTypeF()
 				}
 			}
 
-			if (ones) {
+			if (ones && counter < 128) {
 				enemyList[counter]  = enemy;
 				weightList[counter] = ones;
 				weightTally += weightList[counter];
@@ -832,7 +832,7 @@ void RandEnemyUnit::setSlotEnemyTypeB(int vsColor)
 				}
 			}
 
-			if (check) {
+			if (check && spawnCounter < 128) {
 				nodeList[spawnCounter]  = node;
 				spawnList[spawnCounter] = spawn;
 				scoreList[spawnCounter] = vsSign * (vsScore + nodeList[spawnCounter]->getVersusScore());
@@ -894,7 +894,7 @@ void RandEnemyUnit::setUnitRandEnemyTypeB()
 				}
 			}
 
-			if (ones) {
+			if (ones && counter < 128) {
 				enemyList[counter]  = enemy;
 				weightList[counter] = ones;
 				weightTally += weightList[counter];
@@ -1181,7 +1181,7 @@ void RandEnemyUnit::setSlotEnemyTypeA(int& max, int& min, int vsColor)
 				}
 			}
 
-			if (check) {
+			if (check && spawnCounter < 128) {
 				nodeList[spawnCounter]  = node;
 				spawnList[spawnCounter] = spawn;
 				scoreList[spawnCounter] = vsSign * (vsScore + nodeList[spawnCounter]->getVersusScore());
@@ -1257,7 +1257,7 @@ void RandEnemyUnit::setUnitRandEnemyTypeA(int& count, int max, int min)
 				}
 			}
 
-			if (ones) {
+			if (ones && counter < 128) {
 				enemyList[counter]  = enemy;
 				weightList[counter] = ones;
 				weightTally += weightList[counter];

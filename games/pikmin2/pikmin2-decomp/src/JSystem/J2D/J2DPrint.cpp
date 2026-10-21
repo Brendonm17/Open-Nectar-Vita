@@ -705,7 +705,7 @@ s32 J2DPrint::getNumberS32(const u8** strPtr, s32 min, s32 max, int base)
 	(*strPtr)++;
 
 	s32 value = 0;
-	char* endStr;
+	char* endStr = (char*)*strPtr;
 
 	if (base == 10) { // base 10, do as signed
 		value = strtol((char*)*strPtr, &endStr, base);
@@ -756,7 +756,7 @@ f32 J2DPrint::getNumberF32(const u8** strPtr, f32 min, f32 max, int base)
 	(*strPtr)++;
 
 	s32 value = 0;
-	char* endStr;
+	char* endStr = (char*)*strPtr;
 
 	if (base == 10) { // base 10, do as signed
 		value = strtol((char*)*strPtr, &endStr, base);

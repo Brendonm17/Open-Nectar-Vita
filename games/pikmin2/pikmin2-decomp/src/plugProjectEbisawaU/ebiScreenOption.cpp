@@ -387,7 +387,7 @@ bool TOption::doUpdateStateWait()
 			mInputLanguage.update();
 			if (mInputLanguage.mSelectionChanged) {
 				mExitStatus = OptionState_Unk8;
-				int index;
+				int index = 7; // idioma fuera de 0..4: índice sin valor
 				switch (mOptionParamA.mLanguage) {
 				case 0:
 					index = 7;

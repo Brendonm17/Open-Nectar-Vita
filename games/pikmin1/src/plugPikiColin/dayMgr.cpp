@@ -903,8 +903,9 @@ void DayMgr::menuDecreaseTime(Menu& parent)
  */
 void DayMgr::refresh(Graphics& gfx, f32 time, int numLights)
 {
-	TimeSetting* timeSettingStart;
-	TimeSetting* timeSettingEnd;
+	// Noche si time no cae en ningún tramo (NaN): antes quedaban sin valor.
+	TimeSetting* timeSettingStart = &mTimeSettings[TIME_Night];
+	TimeSetting* timeSettingEnd   = &mTimeSettings[TIME_Night];
 
 	// cap number of lights at active light count (default: 2)
 	int lightCount = (numLights < mActiveLightCount) ? numLights : mActiveLightCount;

@@ -76,7 +76,7 @@ JKRArchive* JKRArchive::mount(s32 entryNum, EMountMode mountMode, JKRHeap* heap,
 		return archive;
 	} else {
 		int i = (mountDirection == EMD_Head) ? 4 : -4;
-		JKRArchive* archive;
+		JKRArchive* archive = nullptr;
 #ifdef PIKI_PC_PORT
 		// Only the memory archive reads the big-endian RARC header on the
 		// host; DVD/ARAM-resident mounts are served from RAM instead. The

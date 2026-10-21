@@ -2047,8 +2047,9 @@ static int getMCBtype(BitBufferWithTree* code, RLDecoder* flag)
 static void spread_PB_descMap(SeqObj* obj, MCHandler* mch)
 {
 	VideoState* ws = (VideoState*)obj->ws;
-	struct RLDecoder proc;
-	struct RLDecoder type;
+	// A cero: initMCB* no siempre los rellena y status indexa mcbtypetrans.
+	struct RLDecoder proc = { 0 };
+	struct RLDecoder type = { 0 };
 	int i, j;
 
 	initMCBproc(&ws->mcaot, &proc);

@@ -697,13 +697,7 @@ void NaviWalkState::exec(Navi* navi)
 	STACK_PAD_VAR(1);
 	navi->makeVelocity(false);
 
-#if defined(PIKI_PC_PORT)
-	// En el mando la cruceta abajo es el swarm: tumbarse queda en el teclado.
-	if (!playerState->isTutorial() && navi->mGroundTriangle && navi->mKontroller->keyClick(KBBTN_DPAD_DOWN)
-	    && !pc_window_pad_dpad_down_held(navi->mNaviID)) {
-#else
 	if (!playerState->isTutorial() && navi->mGroundTriangle && navi->mKontroller->keyClick(KBBTN_DPAD_DOWN)) {
-#endif
 		navi->mStateMachine->transit(navi, NAVISTATE_Pellet);
 		return;
 	}

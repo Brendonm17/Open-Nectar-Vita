@@ -684,7 +684,7 @@ void TTitleMenu::doCloseScreen(ArgClose*)
 bool TTitleMenu::doUpdateStateOpen()
 {
 	mMainScreen->update();
-	E2DCallBack_AnmBase* anm;
+	E2DCallBack_AnmBase* anm = nullptr; // otro mState: sin animación que esperar
 	switch (mState) {
 	case 0:
 		anm = &mAnim7;
@@ -693,7 +693,7 @@ bool TTitleMenu::doUpdateStateOpen()
 		anm = &mAnim6;
 		break;
 	}
-	return u8(anm->isFinish() != 0);
+	return anm ? u8(anm->isFinish() != 0) : u8(true);
 }
 
 /**

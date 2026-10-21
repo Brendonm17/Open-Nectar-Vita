@@ -344,7 +344,7 @@ u32 Creature::getGeneratorID()
  */
 bool Creature::stimulate(immut Interaction& interaction)
 {
-	PRINT("objType=%s creature %x got interaction %x\n", ObjType::getName(mObjType), &interaction);
+	PRINT("objType=%s creature %p got interaction %p\n", ObjType::getName(mObjType), this, &interaction);
 	return false;
 }
 

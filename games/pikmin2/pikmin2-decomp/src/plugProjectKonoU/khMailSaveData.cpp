@@ -46,8 +46,10 @@ void MailSaveData::write(Stream& stream)
  */
 void MailSaveData::set_history(s8 history)
 {
+	// Original: mPastLogs.byteView[i + 16] = [i + 15], que se sale de sus 16
+	// bytes para caer en mHistory (justo detrás). Lo mismo, sin salirse.
 	for (int i = 19; i; i--) {
-		mPastLogs.byteView[i + 16] = mPastLogs.byteView[i + 15];
+		mHistory.byteView[i] = mHistory.byteView[i - 1];
 	}
 	mHistory.byteView[0] = history;
 }

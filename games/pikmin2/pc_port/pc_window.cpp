@@ -1017,6 +1017,17 @@ static bool pc_window_read_gamepad(SDL_GameController* ctl, u16& button, s8& sti
         || abs(rx) > noticeZone || abs(ry) > noticeZone;
 }
 
+// Vigilante de cuelgues (pc_main.cpp): el tiempo dentro de SDL_PollEvent no
+// cuenta, Android bloquea ahí al pasar a segundo plano.
+extern "C" void pc_hang_set_in_poll(int inPoll);
+static int pc_window_poll_one(SDL_Event* event)
+{
+    pc_hang_set_in_poll(1);
+    const int got = SDL_PollEvent(event);
+    pc_hang_set_in_poll(0);
+    return got;
+}
+
 void pc_window_poll_events(PADStatus* pad) {
 #if PIKI_P2_HOST
     // Pikmin 2: el audio lo pauta la cola de SDL desde VIWaitForRetrace.
@@ -1027,7 +1038,7 @@ void pc_window_poll_events(PADStatus* pad) {
 #endif
 
     SDL_Event event;
-    while (SDL_PollEvent(&event)) {
+    while (pc_window_poll_one(&event)) {
         switch (event.type) {
             case SDL_QUIT:
                 sShouldClose = true;
@@ -1182,6 +1193,11 @@ void pc_window_poll_events(PADStatus* pad) {
                 }
 #endif
 #if PIKI_P2_HOST
+                // DEBUG: F4 alterna 30/60 FPS en caliente (comparar el ritmo de enemigos y HUD).
+                if (event.key.keysym.scancode == SDL_SCANCODE_F4 && !event.key.repeat) {
+                    const int mode = pc_settings_debug_toggle_fps_mode();
+                    printf("[PC DBG] F4: %s\n", mode ? "60 FPS" : "30 FPS (original)");
+                }
                 // DEBUG: F9 fuerza el fin del dia (lo consume GameSystem::update).
                 if (event.key.keysym.scancode == SDL_SCANCODE_F9 && !event.key.repeat) {
                     sDebugDayEndRequested = true;

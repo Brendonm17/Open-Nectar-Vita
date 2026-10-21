@@ -174,7 +174,7 @@ void DVDStream::init()
 {
 	mOffset  = 0;
 	mPending = mFileInfo.length;
-	sprintf(lastName, mPath);
+	sprintf(lastName, "%s", mPath);
 }
 
 /**
