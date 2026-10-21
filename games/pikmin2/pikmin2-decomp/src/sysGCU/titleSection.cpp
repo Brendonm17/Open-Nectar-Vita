@@ -3,6 +3,8 @@
 #include "pc_p2_coop.h"
 #include "randomizer/pc_randomizer.h"
 #include "randomizer/pc_randomizer_audit.h"
+extern "C" void pc_window_request_close(void);
+extern "C" void pc_window_input_reset_assignment(void);
 #endif
 #include "Title.h"
 #include "ebi/title/TTitle.h"
@@ -416,6 +418,11 @@ void Section::doUpdateMainTitle()
 		int id        = mMainTitleMgr.getSelectedMenu();
 		mIsMainActive = false;
 #ifdef PIKI_PC_PORT
+		// Solo Co-op conserva propietarios elegidos por jugador. El resto de
+		// modos debe volver al reparto automático, donde el mando usado es P1.
+		if (id != ebi::TMainTitleMgr::Select_Coop) {
+			pc_window_input_reset_assignment();
+		}
 		printf("[PC Port] Title menu selected id=%d (Story=%d Challenge=%d)\n", id, (int)ebi::TMainTitleMgr::Select_Story,
 		       (int)ebi::TMainTitleMgr::Select_Challenge);
 		// La tarjeta del Randomizer solo se usa entrando por su opción (o por
@@ -486,6 +493,9 @@ void Section::doUpdateMainTitle()
 			// Randomizer: la historia con su propia tarjeta
 			// (save/randomizer/card0) y sus ajustes al crear partida.
 			GameFlow::mActiveSectionFlag = GameFlow::SN_SingleGame;
+			break;
+		case ebi::TMainTitleMgr::Select_Exit:
+			pc_window_request_close();
 			break;
 #endif
 		case ebi::TMainTitleMgr::Select_NULL:

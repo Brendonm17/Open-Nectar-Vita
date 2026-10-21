@@ -302,6 +302,22 @@ void pc_p2_rnd_cave_loaded(const char* file, Game::Cave::CaveInfo* info, int flo
 		i++;
 	}
 
+	// La música de jefe solo arranca en subniveles marcados como de jefe
+	// (β = Boss: PSM::Scene_Cave::bossAppear la inicia al verlo). Un jefe que el
+	// Randomizer pone en un subnivel normal aparecía en silencio: se marca el
+	// subnivel como de jefe, como los de la consola (sin música hasta el jefe).
+	if (u32(fi->mParms.mFloorBetaType) == 0) {
+		bool boss = false;
+		auto isBoss = [](TekiInfo* teki) {
+			if (!teki || teki->mWeight <= 0) return false;
+			const PcP2EnemyInfo* e = pc_randomizer_enemy(int(teki->mEnemyID));
+			return e && e->cls == PC_P2E_Boss;
+		};
+		FOREACH_NODE(TekiInfo, fi->mTekiInfo.mChild, teki) { boss = boss || isBoss(teki); }
+		FOREACH_NODE(CapInfo, fi->mCapInfo.mChild, cap) { boss = boss || isBoss(cap->getTekiInfo()); }
+		if (boss) fi->mParms.mFloorBetaType.mValue = 1;
+	}
+
 	pc_p2_rnd_audit_cave(file, info, floorIndex);
 }
 

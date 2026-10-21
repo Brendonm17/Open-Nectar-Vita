@@ -22,6 +22,7 @@ extern "C" int pc_movie_active(void);
 #include <unordered_map>
 #include <unordered_set>
 #include <memory>
+#include <atomic>
 #include <mutex>
 #include <new>
 
@@ -1403,15 +1404,48 @@ static u64 sTexVariantClock = 0;
 constexpr size_t kTexVariantsPerObj = 16;
 constexpr u16 kTexVariantMaxSide = 256;
 // GXCopyTex: direccion de destino -> textura GL con la copia del framebuffer.
-struct PcEfbCopy { GLuint tex = 0; int w = 0, h = 0; unsigned hits = 0; u64 fingerprint = 0; };
-// La copia solo vive en GL: la memoria de destino no se toca. Si sus primeros
-// bytes cambian, ese bloque del heap ya es otra textura (p. ej. la nave cargada
-// al salir de una cueva donde se hizo la copia) y la copia es vieja.
-static u64 pc_efb_copy_fingerprint(uintptr_t addr) {
+struct PcEfbCopy { GLuint tex = 0; int w = 0, h = 0; unsigned hits = 0; u64 fingerprint = 0; size_t bytes = 32; };
+// La copia solo vive en GL: la memoria de destino no se toca. Si su contenido
+// cambia, ese bloque del heap ya es otra textura (p. ej. la nave cargada al
+// salir de una cueva donde se hizo la copia) y la copia es vieja. Se muestrean
+// 8 trozos de 32 bytes repartidos por toda la copia: solo los primeros bytes
+// no bastaban (una textura nueva que empieza con una esquina a ceros coincidía).
+static u64 pc_efb_copy_fingerprint(uintptr_t addr, size_t bytes) {
     const u8* p = reinterpret_cast<const u8*>(addr);
     u64 h = 1469598103934665603ull;
-    for (int i = 0; i < 32; i++) { h ^= p[i]; h *= 1099511628211ull; } // la copia minima (4x4 RGB565) ocupa 32 bytes
+    if (bytes < 32) bytes = 32; // la copia minima (4x4 RGB565) ocupa 32 bytes
+    for (int probe = 0; probe < 8; probe++) {
+        const size_t off = ((bytes - 32) / 7) * size_t(probe) & ~size_t(31);
+        for (int i = 0; i < 32; i++) { h ^= p[off + i]; h *= 1099511628211ull; }
+    }
     return h;
+}
+// Bytes que ocupa en memoria una copia de GXCopyTex (formatos GX_TF_* y GX_CTF_*).
+static size_t pc_efb_copy_bytes(int w, int h, u32 fmt) {
+    int bpp = 16;
+    switch (fmt) {
+        case GX_TF_RGBA8: case GX_TF_Z24X8: bpp = 32; break;
+        case GX_TF_I4: case 0x20 /* CTF_R4 */: case 0x30 /* CTF_Z4 */: bpp = 4; break;
+        case GX_TF_I8: case GX_TF_IA4: case GX_TF_Z8: case 0x22 /* RA4 */: case 0x27 /* A8 */: case 0x28 /* R8 */:
+        case 0x29 /* G8 */: case 0x2A /* B8 */: case 0x39 /* Z8M */: case 0x3A /* Z8L */: bpp = 8; break;
+        default: bpp = 16; break;
+    }
+    const size_t tw = size_t((w + 7) & ~7), th = size_t((h + 7) & ~7); // tiles completos
+    return tw * th * size_t(bpp) / 8;
+}
+// Rangos de heap liberados (freeAll, dispose, destroy) desde cualquier hilo:
+// el principal descarta las copias que vivían ahí antes de enlazar texturas.
+static std::mutex sEfbFreedMx;
+static std::pair<uintptr_t, uintptr_t> sEfbFreed[64];
+static int sEfbFreedCount = 0;
+static bool sEfbFreedOverflow = false;
+static std::atomic<bool> sEfbFreedPending { false };
+extern "C" void pc_gfx_note_heap_freed(const void* lo, const void* hi) {
+    if (!lo || hi <= lo) return;
+    std::lock_guard<std::mutex> lock(sEfbFreedMx);
+    if (sEfbFreedCount < 64) sEfbFreed[sEfbFreedCount++] = { uintptr_t(lo), uintptr_t(hi) };
+    else sEfbFreedOverflow = true;
+    sEfbFreedPending.store(true, std::memory_order_release);
 }
 static PcGfxHostMap<uintptr_t, PcEfbCopy> sEfbCopies;
 static PcGfxHostMap<uintptr_t, PcTlut> sTlutObjects;
@@ -2568,12 +2602,14 @@ static const char* fShaderTail =
     "uniform ivec4 uTevSwapTable[4];\n"
     "uniform ivec2 uTevSwapSel[16];\n"
     "bool alphaCompare(float value, float reference, int func) {\n"
+    "    value = clamp(floor(value * 255.0 + 0.5), 0.0, 255.0);\n"
+    "    reference = floor(reference * 255.0 + 0.5);\n"
     "    if (func == 0) return false;\n"
     "    if (func == 1) return value < reference;\n"
-    "    if (func == 2) return abs(value - reference) < (0.5 / 255.0);\n"
+    "    if (func == 2) return abs(value - reference) < 0.5;\n"
     "    if (func == 3) return value <= reference;\n"
     "    if (func == 4) return value > reference;\n"
-    "    if (func == 5) return abs(value - reference) >= (0.5 / 255.0);\n"
+    "    if (func == 5) return abs(value - reference) >= 0.5;\n"
     "    if (func == 6) return value >= reference;\n"
     "    return true;\n"
     "}\n"
@@ -7158,6 +7194,41 @@ void pc_gfx_load_tex_obj(GXTexObj* obj, GXTexMapID id) {
     uintptr_t key = (uintptr_t)obj;
     PcTextureSource sourceSnapshot;
     bool needsUpload = false;
+    if (sEfbFreedPending.load(std::memory_order_acquire)) {
+        std::pair<uintptr_t, uintptr_t> freed[64];
+        int count;
+        bool all;
+        {
+            std::lock_guard<std::mutex> lock(sEfbFreedMx);
+            count = sEfbFreedCount;
+            all   = sEfbFreedOverflow;
+            for (int i = 0; i < count; i++) freed[i] = sEfbFreed[i];
+            sEfbFreedCount    = 0;
+            sEfbFreedOverflow = false;
+            sEfbFreedPending.store(false, std::memory_order_relaxed);
+        }
+        for (auto c = sEfbCopies.begin(); c != sEfbCopies.end();) {
+            bool gone = all;
+            for (int i = 0; i < count && !gone; i++) gone = c->first >= freed[i].first && c->first < freed[i].second;
+            if (gone) {
+                SDL_Log("[EFBDBG] heap freed: drop copy %p %dx%d", (void*)c->first, c->second.w, c->second.h);
+                if (c->second.tex) {
+                    pc_gfx_flush_batch();
+                    for (int unit = 0; unit < 8; ++unit) {
+                        if (sBoundTextures[unit] == c->second.tex) sBoundTextures[unit] = 0;
+                        if (sActiveGLTextures[unit] == c->second.tex) {
+                            sActiveGLTextures[unit]  = 0;
+                            sHasActiveTextures[unit] = false;
+                        }
+                    }
+                    glDeleteTextures(1, &c->second.tex);
+                }
+                c = sEfbCopies.erase(c);
+            } else {
+                ++c;
+            }
+        }
+    }
     {
         std::lock_guard<std::mutex> lock(sTextureRegistryMutex);
         auto source = sTextureSources.find(key);
@@ -7175,13 +7246,16 @@ void pc_gfx_load_tex_obj(GXTexObj* obj, GXTexMapID id) {
                 }
             }
             if (copy != sEfbCopies.end() && copy->second.tex
-                && pc_efb_copy_fingerprint(copy->first) != copy->second.fingerprint) {
+                && pc_efb_copy_fingerprint(copy->first, copy->second.bytes) != copy->second.fingerprint) {
                 // Memoria reutilizada por otra textura: la copia ya no le corresponde.
+                SDL_Log("[EFBDBG] stale copy dropped at %p (%dx%d)", (void*)copy->first, copy->second.w, copy->second.h);
                 glDeleteTextures(1, &copy->second.tex);
                 sEfbCopies.erase(copy);
                 copy = sEfbCopies.end();
             }
             if (copy != sEfbCopies.end() && copy->second.tex) {
+                if (copy->second.hits % 600 == 0)
+                    SDL_Log("[EFBDBG] bind copy %p %dx%d hits=%u", (void*)copy->first, copy->second.w, copy->second.h, copy->second.hits);
                 ++copy->second.hits;
                 sActiveGLTextures[id] = copy->second.tex;
                 sHasActiveTextures[id] = true;
@@ -11835,7 +11909,14 @@ void pc_gfx_copy_tex(void* dest, GXBool clear) {
         pc_gfx_set_scissor(sGxSc[0], sGxSc[1], sGxSc[2], sGxSc[3]);
     }
     if (scissorWasEnabled) glEnable(GL_SCISSOR_TEST); else glDisable(GL_SCISSOR_TEST);
-    copy.fingerprint = pc_efb_copy_fingerprint(reinterpret_cast<uintptr_t>(dest));
+    copy.bytes       = pc_efb_copy_bytes(w, h, sTexCopyFmt);
+    copy.fingerprint = pc_efb_copy_fingerprint(reinterpret_cast<uintptr_t>(dest), copy.bytes);
+    // [EFBDBG] temporal: mapa de cuevas (copia R4 del radar).
+    if (sTexCopyFmt == GX_CTF_R4) {
+        SDL_Log("[EFBDBG] copy R4 dest=%p %dx%d src=(%u,%u,%u,%u) -> gl(%d,%d,%d,%d) ui43=%d hudWide=%d subrect=%d render=%dx%d",
+                dest, w, h, sTexCopySrc[0], sTexCopySrc[1], sTexCopySrc[2], sTexCopySrc[3], sx, sy, sw, sh, int(sUi43),
+                int(sHudWide), int(sViewSubrectOn), sRenderWidth, sRenderHeight);
+    }
 }
 
 // Diagnóstico (PIKMIN_WRAITH_DEBUG): ¿hay copia de GXCopyTex para esta

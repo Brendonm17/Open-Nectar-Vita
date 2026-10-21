@@ -15,6 +15,7 @@
 #include "zen/ogSub.h"
 #if defined(PIKI_PC_PORT)
 #include "pc_coop.h"
+#include "pc_window.h"
 #include "pc_speedrun.h"
 #include "randomizer/pc_randomizer.h"
 #include "settings/pc_settings.h"
@@ -78,13 +79,11 @@ void zen::ogScrTitleMgr::setGamePrefs()
 zen::ogScrTitleMgr::ogScrTitleMgr()
 {
 #if defined(PIKI_PC_PORT)
-	// Randomizer, Speedrun, Co-op y VS (bajo Start) como opciones del menú
-	// principal: cuatro huecos extra clonados del último. Con 6 ítems se
-	// compacta el paso a 30 px; con 7 (Challenge Mode) a 27 px, subiendo el
-	// panel para no pisar el logo ni el copyright. Advanced Options vive dentro
-	// de Options.
-	const PcMenuExtend extNoChallenge   = { 4, 30, -58, 'yoko', 40 };
-	const PcMenuExtend extWithChallenge = { 4, 27, -72, 'yoko', 40 };
+	// Randomizer, Speedrun, Co-op, VS y Exit como opciones del menú principal:
+	// cinco huecos extra clonados del último. Se compactan para no pisar el logo
+	// ni el copyright. Advanced Options vive dentro de Options.
+	const PcMenuExtend extNoChallenge   = { 5, 27, -72, 'yoko', 40 };
+	const PcMenuExtend extWithChallenge = { 5, 24, -84, 'yoko', 40 };
 	mMenuNoChallenge   = new DrawMenu("screen/blo/m_select.blo", false, false, &extNoChallenge);
 	mMenuWithChallenge = new DrawMenu("screen/blo/m_selec2.blo", false, false, &extWithChallenge);
 	pcInsertCoopItem(mMenuNoChallenge);
@@ -172,15 +171,16 @@ zen::ogScrTitleMgr::ogScrTitleMgr()
 }
 
 #if defined(PIKI_PC_PORT)
-// Tras clonar cuatro huecos, los textos quedan: Start / Co-op / VS / Options /
-// Speedrun / Randomizer [/ Challenge Mode] (en ambos pares he/hm: normal y
-// resaltado).
+// Tras clonar cinco huecos, los textos quedan: Start / Co-op / VS / Options /
+// Speedrun / Randomizer [/ Challenge Mode] / Exit (en ambos pares he/hm:
+// normal y resaltado).
 void zen::ogScrTitleMgr::pcInsertCoopItem(DrawMenu* menu)
 {
+	static char sExitLabel[]       = "Exit";
 	static char sRandomizerLabel[] = "Randomizer";
-	static char sSpeedrunLabel[] = "Speedrun";
-	static char sCoopLabel[]     = "Co-op";
-	static char sVsLabel[]       = "VS";
+	static char sSpeedrunLabel[]  = "Speedrun";
+	static char sCoopLabel[]      = "Co-op";
+	static char sVsLabel[]        = "VS";
 	static immut char* kFamilies[] = { "he%02d", "hm%02d" };
 	char buf[8];
 	for (int f = 0; f < 2; f++) {
@@ -189,25 +189,27 @@ void zen::ogScrTitleMgr::pcInsertCoopItem(DrawMenu* menu)
 		while (menu->getScreenPtr()->search(P2DPaneLibrary::makeTag(buf), false)) {
 			sprintf(buf, kFamilies[f], ++n);
 		}
-		if (n < 6) {
+		if (n < 7) {
 			continue;
 		}
-		P2DTextBox* box[7];
-		for (int i = 0; i < n && i < 7; i++) {
+		P2DTextBox* box[8];
+		for (int i = 0; i < n && i < 8; i++) {
 			sprintf(buf, kFamilies[f], i);
 			box[i] = static_cast<P2DTextBox*>(menu->getScreenPtr()->search(P2DPaneLibrary::makeTag(buf), true));
 		}
 		// Originales: 0 Start, 1 Options[, 2 Challenge]. Las cajas quedan
 		// (todas centradas en la misma X); solo viaja el texto. Orden PC:
-		// Start / Co-op / VS / Options / Speedrun / Randomizer / Challenge Mode.
+		// Start / Co-op / VS / Options / Speedrun / Randomizer /
+		// [Challenge Mode] / Exit.
 		char* optionsText   = box[1]->getString();
-		char* challengeText = n >= 7 ? box[2]->getString() : nullptr;
+		char* challengeText = n >= 8 ? box[2]->getString() : nullptr;
 		box[1]->setString(sCoopLabel);
 		box[2]->setString(sVsLabel);
 		box[3]->setString(optionsText);
 		box[4]->setString(sSpeedrunLabel);
 		box[5]->setString(sRandomizerLabel);
 		if (challengeText) box[6]->setString(challengeText);
+		box[n - 1]->setString(sExitLabel);
 	}
 }
 
@@ -388,12 +390,17 @@ zen::ogScrTitleMgr::TitleStatus zen::ogScrTitleMgr::update(Controller* input)
 		}
 #if defined(PIKI_PC_PORT)
 		// Orden en pantalla: Start / Co-op / VS / Options / Speedrun /
-		// Randomizer / Challenge Mode. Abajo se trabaja con el orden interno
+		// Randomizer / [Challenge Mode] / Exit. Abajo se trabaja con el orden
+		// interno
 		// de siempre (0 Start, 1 Speedrun, 2 Co-op, 3 VS, 4 Options, 5
-		// Challenge Mode) más 6 Randomizer.
-		static const int kPcRowToAction[7] = { 0, 2, 3, 4, 1, 6, 5 };
-		if (mCurrentSelection >= 0 && mCurrentSelection < 7) {
-			mCurrentSelection = kPcRowToAction[mCurrentSelection];
+		// Challenge Mode) más 6 Randomizer y 7 Exit.
+		static const int kPcRowToAction[7]          = { 0, 2, 3, 4, 1, 6, 7 };
+		static const int kPcChallengeRowToAction[8] = { 0, 2, 3, 4, 1, 6, 5, 7 };
+		const bool hasChallenge = mMainMenu == mMenuWithChallenge;
+		const int rowCount      = hasChallenge ? 8 : 7;
+		if (mCurrentSelection >= 0 && mCurrentSelection < rowCount) {
+			mCurrentSelection = hasChallenge ? kPcChallengeRowToAction[mCurrentSelection]
+			                                 : kPcRowToAction[mCurrentSelection];
 		}
 		if (forced >= 0) {
 			mCurrentSelection = forced;
@@ -419,6 +426,10 @@ zen::ogScrTitleMgr::TitleStatus zen::ogScrTitleMgr::update(Controller* input)
 			pc_coop_set_chosen_at_title(true);
 			mPendingExitStatus = STATUS_ExitToStoryMode;
 			mStatus            = STATUS_Exiting;
+			return mStatus;
+		}
+		if (mCurrentSelection == 7) {
+			pc_window_request_close();
 			return mStatus;
 		}
 		if (mCurrentSelection >= 0 && mCurrentSelection <= 3) {

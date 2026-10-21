@@ -2824,6 +2824,9 @@ void NaviAbsorbState::init(Navi* navi, StateArg* stateArg)
 	navi->mSoundObj->startSound(PSSE_PL_DRINK, 0);
 	mSubState             = ABSORB_Start;
 	mHasAbsorbed          = false;
+#ifdef PIKI_PC_PORT
+	mPcDopeGiven = false;
+#endif
 	Vector3f dropPosition = mDrop->getPosition();
 	navi->turnTo(dropPosition);
 	cameraMgr->controllerLock(navi->mNaviIndex);
@@ -2881,7 +2884,14 @@ void NaviAbsorbState::onKeyEvent(Navi* navi, SysShape::KeyEvent const& key)
 #else
 			P2ASSERTLINE(3968, mDrop->mObjectTypeID == OBJTYPE_Honey);
 #endif
+#ifdef PIKI_PC_PORT
+			if (!mPcDopeGiven) {
+				mPcDopeGiven = true;
+				navi->incDopeCount(mDrop->mHoneyType != HONEY_R);
+			}
+#else
 			navi->incDopeCount(mDrop->mHoneyType != HONEY_R);
+#endif
 			transit(navi, NSID_Walk, nullptr);
 		} else {
 			transit(navi, NSID_Walk, nullptr);
@@ -2896,6 +2906,14 @@ void NaviAbsorbState::onKeyEvent(Navi* navi, SysShape::KeyEvent const& key)
  */
 void NaviAbsorbState::cleanup(Navi* navi)
 {
+#ifdef PIKI_PC_PORT
+	// La gota ya se bebió pero el estado acabó (fin de la animación) antes del
+	// evento KEYEVENT_END que suma el spray: se perdía el spray.
+	if (mHasAbsorbed && !mPcDopeGiven && mDrop) {
+		mPcDopeGiven = true;
+		navi->incDopeCount(mDrop->mHoneyType != HONEY_R);
+	}
+#endif
 	cameraMgr->controllerUnLock(navi->mNaviIndex);
 	cameraMgr->finishDemoCamera(navi->mNaviIndex);
 }

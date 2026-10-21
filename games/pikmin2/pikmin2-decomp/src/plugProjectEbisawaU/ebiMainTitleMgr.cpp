@@ -172,6 +172,9 @@ void TMainTitleMgr::startMenuSet(s32, s32 select)
 	case Select_Randomizer:
 		id = mTitleMenu.menuNum() > PC_TITLE_RANDOMIZER ? PC_TITLE_RANDOMIZER : 0;
 		break;
+	case Select_Exit:
+		id = mTitleMenu.menuNum() > PC_TITLE_EXIT ? PC_TITLE_EXIT : 0;
+		break;
 #endif
 	default:
 		JUT_PANICLINE(177, "P2Assert");
@@ -368,6 +371,9 @@ void TMainTitleMgr::update()
 					break;
 				case PC_TITLE_RANDOMIZER:
 					mSelectedMenuOption = Select_Randomizer;
+					break;
+				case PC_TITLE_EXIT:
+					mSelectedMenuOption = Select_Exit;
 					break;
 #endif
 				}

@@ -31,6 +31,7 @@ struct TMainTitleMgr {
 		Select_Speedrun, // opciones del port (TTitleMenu::pcAddWordEntry)
 		Select_Coop,
 		Select_Randomizer,
+		Select_Exit,
 #endif
 	};
 

@@ -45,6 +45,8 @@ const f32 kPcCoopAdvance[]  = { 27.0f, 27.0f, 27.0f };
 const char kPcRandomizerWord[]     = "randomizer";
 const f32 kPcRandomizerAdvance[]   = { 26.0f, 27.0f, 27.0f, 27.0f, 27.0f, 30.0f, 22.0f, 26.0f, 26.0f };
 const char kPcRandomizerShortWord[] = "random";
+const char kPcExitWord[]             = "exit";
+const f32 kPcExitAdvance[]           = { 26.0f, 18.0f, 14.0f };
 // Fila siguiente a Extras (Nomake está a 100; las filas van cada ~36), antes
 // de que Coop baje un hueco las de debajo de Story.
 const f32 kPcSpeedrunRowY = 136.0f;
@@ -329,6 +331,11 @@ void TTitleMenu::pcLayoutRows(JKRArchive* arc)
 		rn->setOffset(rn->mTranslateX, lastY + rowStep);
 		lastY += rowStep;
 	}
+	if (mPcHasExit) {
+		J2DPane* exit = mCategoryPanes[PC_TITLE_EXIT];
+		exit->setOffset(exit->mTranslateX, lastY + rowStep);
+		lastY += rowStep;
+	}
 	if (mPcHasCoop) {
 		for (int i = 1; i < menuNum(); i++) {
 			if (i == PC_TITLE_COOP) {
@@ -449,6 +456,11 @@ void TTitleMenu::doSetArchive(JKRArchive* arc)
 			mPcHasRandomizer = pcAddWordEntry(arc, PC_TITLE_RANDOMIZER, kPcRandomizerShortWord, kPcRandomizerAdvance, "rn",
 			                                  "Nrandom", &panelist1[PC_TITLE_RANDOMIZER], &panelist2[PC_TITLE_RANDOMIZER])
 			                   != nullptr;
+		}
+		if (mPcHasRandomizer) {
+			mPcHasExit = pcAddWordEntry(arc, PC_TITLE_EXIT, kPcExitWord, kPcExitAdvance, "ex", "Nexit",
+			                            &panelist1[PC_TITLE_EXIT], &panelist2[PC_TITLE_EXIT])
+			          != nullptr;
 		}
 	}
 	if (mPcHasSpeedrun) {

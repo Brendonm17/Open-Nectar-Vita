@@ -192,7 +192,7 @@ struct PcConfig {
     int onionStep10 = 0;        // Y + arriba/abajo en la cebolla mueve de 10 en 10
     int instantWhistle = 0;     // los Pikmin silbados se unen sin la reacción de girarse
     int whistlePluck = 0;       // el silbato arranca los brotes bajo el cursor
-    int hideOlimarText = 0;     // sin los textos de la Drake (tutoriales y avisos)
+    int hideOlimarText = 0;     // sin los textos de la nave (tutoriales y avisos)
     // Cheats.
     int pikiInvincible = 0;     // los Pikmin no mueren (ataques, fuego, agua, gas, aplastados)
     int allFlowers = 0;         // todo Pikmin lleva flor
@@ -8286,7 +8286,7 @@ const GroupRow kCameraRows[] = {
 const GroupRow kGameplayRows[] = {
 #if PIKI_P2_HOST
     { SRC_MODS, 34, "Whistle Pluck", "Hold the whistle over sprouts to pluck them one after another." },
-    { SRC_MODS, 36, "Hide Drake Texts", "Cutscene texts in story mode fly by and advance on their own." },
+    { SRC_MODS, 36, "Hide Ship Texts", "Cutscene texts in story mode fly by and advance on their own." },
     { SRC_MODS, 25, "Instant Whistle Response", "Whistled Pikmin join the squad at once, without stopping to turn and look first." },
     { SRC_MODS, 23, "No Tripping", "Pikmin running in the squad never trip and fall behind." },
     { SRC_MODS, 40, "Eternal Night", "Always night above ground, whatever the day length." },

@@ -119,10 +119,10 @@ std::string compare_expr(uint8_t func, const char* value, const char* reference)
 	char buffer[256];
 	switch (func) {
 	case 1: snprintf(buffer, sizeof(buffer), "(%s < %s)", value, reference); break;
-	case 2: snprintf(buffer, sizeof(buffer), "(abs(%s - %s) < (0.5 / 255.0))", value, reference); break;
+	case 2: snprintf(buffer, sizeof(buffer), "(abs(%s - %s) < 0.5)", value, reference); break;
 	case 3: snprintf(buffer, sizeof(buffer), "(%s <= %s)", value, reference); break;
 	case 4: snprintf(buffer, sizeof(buffer), "(%s > %s)", value, reference); break;
-	case 5: snprintf(buffer, sizeof(buffer), "(abs(%s - %s) >= (0.5 / 255.0))", value, reference); break;
+	case 5: snprintf(buffer, sizeof(buffer), "(abs(%s - %s) >= 0.5)", value, reference); break;
 	case 6: snprintf(buffer, sizeof(buffer), "(%s >= %s)", value, reference); break;
 	default: return std::string();
 	}
@@ -562,8 +562,12 @@ std::string pc_tev_build_fragment_source(const PcTevShaderKey& key)
 		                                   key.alphaComp1 == CMP_ALWAYS);
 		if (!passes) out += "\tdiscard;\n";
 	} else {
-		std::string test0 = compare_expr(key.alphaComp0, "prev.a", "uAlphaRef0");
-		std::string test1 = compare_expr(key.alphaComp1, "prev.a", "uAlphaRef1");
+		// La consola compara enteros de 8 bits. En coma flotante un alfa de 1.0
+		// puede salir 1.0000001 (texA * rasA interpolado en GPUs móviles) y
+		// fallar "<= 255": desaparecían superficies opacas con alpha test.
+		out += "\tfloat alphaQ = clamp(floor(prev.a * 255.0 + 0.5), 0.0, 255.0);\n";
+		std::string test0 = compare_expr(key.alphaComp0, "alphaQ", "floor(uAlphaRef0 * 255.0 + 0.5)");
+		std::string test1 = compare_expr(key.alphaComp1, "alphaQ", "floor(uAlphaRef1 * 255.0 + 0.5)");
 		if (test0.empty()) test0 = (key.alphaComp0 == CMP_ALWAYS) ? "true" : "false";
 		if (test1.empty()) test1 = (key.alphaComp1 == CMP_ALWAYS) ? "true" : "false";
 		const char* combiner = key.alphaTestOp == 0 ? "&&"

@@ -19,3 +19,21 @@ s8 pc_pad_axis_from_sdl(int sdlAxisValue) {
     if (scaled < -127) return -127;
     return static_cast<s8>(scaled);
 }
+
+bool pc_gamepad_axis_is_mapped_elsewhere(const int* bindings, int bindingCount,
+                                         int axis, int nativeAction) {
+    if (!bindings || bindingCount <= 0 || axis < 0 || axis >= SDL_CONTROLLER_AXIS_MAX)
+        return false;
+
+    for (int action = 0; action < bindingCount; ++action) {
+        if (action == nativeAction)
+            continue;
+        const int bind = bindings[action];
+        if (bind < PC_GP_AXIS_BIND)
+            continue;
+        const int boundAxis = (bind - PC_GP_AXIS_BIND) / 2;
+        if (boundAxis == axis)
+            return true;
+    }
+    return false;
+}

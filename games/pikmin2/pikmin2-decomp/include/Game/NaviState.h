@@ -100,6 +100,9 @@ struct NaviAbsorbState : public NaviState {
 	u8 mSubState;           // _10
 	ItemHoney::Item* mDrop; // _14
 	bool mHasAbsorbed;      // _18
+#ifdef PIKI_PC_PORT
+	bool mPcDopeGiven; // el spray de esta gota ya se sumó
+#endif
 };
 
 struct NaviCarryBombArg : public StateArg {

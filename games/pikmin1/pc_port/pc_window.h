@@ -14,6 +14,7 @@ void pc_window_swap_buffers(void);
 void pc_window_set_swap_interval(int interval);
 void pc_window_shutdown(void);
 bool pc_window_should_close(void);
+void pc_window_request_close(void);
 int  pc_window_get_width(void);
 int  pc_window_get_height(void);
 
@@ -250,5 +251,9 @@ int pc_window_take_wheel_steps(void);
  * to overflow.
  */
 s8 pc_pad_axis_from_sdl(int sdlAxisValue);
+// The physical L/R trigger fallback must not also fire when that axis was
+// remapped to another action (for example, when L and R are swapped).
+bool pc_gamepad_axis_is_mapped_elsewhere(const int* bindings, int bindingCount,
+                                         int axis, int nativeAction);
 
 #endif // PC_WINDOW_H

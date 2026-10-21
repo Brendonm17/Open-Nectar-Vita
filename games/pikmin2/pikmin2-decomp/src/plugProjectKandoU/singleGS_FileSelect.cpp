@@ -119,6 +119,9 @@ void FileState::exec(SingleGameSection* game)
 			sPcCoopAssign = true;
 		} else if (!pc_speedrun_active()) {
 			// Selector de capitanes antes de la selección de partida.
+			// Una partida normal no debe heredar que el mando fuese P2 en la
+			// última sesión cooperativa.
+			pc_window_input_reset_assignment();
 			pc_captain_select_open();
 			sPcCaptainSelect = true;
 		}

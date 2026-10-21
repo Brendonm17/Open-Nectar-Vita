@@ -92,7 +92,7 @@ int pc_settings_get_onion_step10(void);
 /// Los Pikmin silbados se unen al grupo al instante, sin la reacción de LookAt.
 int pc_settings_get_instant_whistle(void);
 int pc_settings_get_whistle_pluck(void);
-int pc_settings_get_hide_olimar_text(void);   ///< P2: textos de la Drake
+int pc_settings_get_hide_olimar_text(void);   ///< P2: textos de la nave
 /// Cheats. Todos vuelven al original con el modo Hard activo.
 int pc_settings_get_piki_invincible(void);
 int pc_settings_get_all_flowers(void);

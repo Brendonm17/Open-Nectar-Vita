@@ -514,8 +514,13 @@ extern "C" void pc_sched_sleep_ms(int ms) { pc_host_sleep_us((long long)ms * 100
 
 // JKRHeap::free/freeAll: antes liberaban los objetos nativos de los mutex,
 // condiciones y colas de esa memoria. Ya no hay objetos nativos.
-extern "C" void pc_os_release_sync_range(const void*, const void*) {}
-extern "C" void pc_os_release_mutex_range(const void*, const void*) {}
+// Un heap libera un rango (freeAll, dispose, destroy). Los objetos del SO ya
+// no tienen nada que soltar; el renderer descarta las copias de pantalla
+// (GXCopyTex) que vivían ahí, o una textura cargada después en esa memoria
+// mostraría la copia vieja (la nave sin texturas al salir de una cueva).
+extern "C" void pc_gfx_note_heap_freed(const void* lo, const void* hi);
+extern "C" void pc_os_release_sync_range(const void* lo, const void* hi) { pc_gfx_note_heap_freed(lo, hi); }
+extern "C" void pc_os_release_mutex_range(const void* lo, const void* hi) { pc_gfx_note_heap_freed(lo, hi); }
 
 static std::unordered_map<DVDFileInfo*, FILE*> sDvdFiles;
 static std::vector<std::string> sDvdEntries;
