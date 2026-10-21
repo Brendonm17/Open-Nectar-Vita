@@ -304,6 +304,13 @@ void* JKRDvdRipper::loadToMainRAM(JKRDvdFile* jkrDvdFile, u8* file, JKRExpandSwi
  * @note Address: 0x8001F79C
  * @note Size: 0x174
  */
+#ifdef PIKI_PC_PORT
+// p2_os_host.cpp: sin turno mientras dura (trabajo puro sobre sus buffers,
+// como el DMA de la consola); el resto del juego sigue en paralelo.
+extern "C" void pc_sched_host_begin(void);
+extern "C" void pc_sched_host_end(void);
+#endif
+
 int JKRDecompressFromDVD(JKRDvdFile* file, void* destinationBuf, u32 size, u32 inMaxDest, u32 inFileOffset, u32 inSrcOffset, u32* inTsPtr)
 {
 	int interrupts = OSDisableInterrupts();
@@ -341,8 +348,16 @@ int JKRDecompressFromDVD(JKRDvdFile* file, void* destinationBuf, u32 size, u32 i
 	}
 
 	*tsPtr     = 0;
+#ifdef PIKI_PC_PORT
+	// Lectura y descompresión sin turno: solo tocan sus buffers y estado
+	// estático, protegido por decompMutex (de este hilo durante todo el bloque).
+	pc_sched_host_begin();
+#endif
 	u8* data   = firstSrcData();
 	u32 result = (data) ? decompSZS_subroutine(data, (u8*)destinationBuf) : -1;
+#ifdef PIKI_PC_PORT
+	pc_sched_host_end();
+#endif
 
 	JKRFree(szpBuf);
 	if (refBuf) {

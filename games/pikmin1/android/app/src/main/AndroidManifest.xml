@@ -22,6 +22,8 @@
         android:theme="@style/AppTheme"
         android:hardwareAccelerated="true"
         android:largeHeap="true">
+        <!-- Permite medir rendimiento con simpleperf desde adb (sin depurador). -->
+        <profileable android:shell="true" />
 
         <!-- SDLActivity pisa screenOrientation del manifest con lo que diga
              este hint (sin él deja la rotación libre y el juego se estira en

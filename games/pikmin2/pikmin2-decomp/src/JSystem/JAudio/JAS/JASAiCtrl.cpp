@@ -9,6 +9,8 @@
 #include "JSystem/JAudio/JAS/JASReport.h"
 #ifdef PIKI_PC_PORT
 #include "audio/p2_audio_host.h"
+extern "C" void pc_sched_host_begin(void);
+extern "C" void pc_sched_host_end(void);
 #endif
 
 namespace JASDriver {
@@ -223,8 +225,12 @@ void finishDSPFrame()
 	// heard from subframe n + 1. Mixing the whole frame first and running the
 	// seven updates afterwards delayed every change by a frame and collapsed
 	// the seven steps into one: short notes lost their attack or vanished.
+	// La mezcla es el trabajo del DSP, que en consola corría en paralelo a la
+	// CPU: se hace sin turno para que el principal no espere al audio.
 	for (int i = 0; i < getSubFrames(); ++i) {
+		pc_sched_host_begin();
 		pc_p2_audio_render_subframe(i);
+		pc_sched_host_end();
 		if (i != 0) {
 			JASAudioThread::snIntCount--;
 		}

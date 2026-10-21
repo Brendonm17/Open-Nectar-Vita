@@ -117,236 +117,394 @@ static u64 pc_ticks()
 	return (u64)(us * 40.5);
 }
 
-static std::mutex sMsgMutex;
-static std::condition_variable sMsgCv;
+// ─── Planificador cooperativo, como el de GameCube ─────────────────────────
+//
+// En la consola un solo hilo corre a la vez y solo cambia cuando se bloquea
+// (mensaje, condición, cola, suspensión) o cuando se despierta otro de más
+// prioridad (número menor). El código del juego lo da por hecho: tras
+// checkError() el segundo OSTryLockMutex gana porque el hilo de la tarjeta
+// (prioridad 17) no corre hasta que el principal (16) cede; el hilo de audio
+// (2) interrumpe al principal en cuanto recibe el mensaje DMA. Con hilos
+// nativos en paralelo esas suposiciones fallaban al azar (P2Assert al guardar
+// antes de una cueva, listas de JAudio compartidas, datos vistos a medias en
+// ARM...).
+//
+// Aquí cada hilo del juego (OSCreateThread y el principal) necesita "el turno"
+// para ejecutar código del juego. Se cede solo donde lo cedía la consola:
+// esperas de mensaje, condición, cola o mutex, suspensión, OSYieldThread y al
+// despertar a uno de más prioridad; además en las operaciones del host que en
+// consola eran asíncronas (lectura de disco, esperar el vsync), para que los
+// demás hilos avancen mientras tanto. Los mutex, condiciones y colas del juego
+// se implementan sobre el turno, sin objetos nativos: no hay mutex nativos
+// que se destruyan con un hilo esperando (crash al pulsar Begin).
+//
+// Todo el estado vive bajo gSchedMx. Sin memoria dinámica: operator new va al
+// heap del juego.
 
-// Dolphin synchronization objects have a fixed GameCube ABI and cannot hold
-// host pthread objects. Keep the native state in allocation-free registries:
-// OSInitMutex is called while JKR heap locks are being constructed, where any
-// use of std::unordered_map/operator new would recurse into the same heap.
-template <typename Key, size_t Capacity> struct PcSyncRegistryBase {
-	Key* keys[Capacity] {};
-	pthread_mutex_t registryLock = PTHREAD_MUTEX_INITIALIZER;
+enum PcSchedState {
+	kSchedNew,       // externo sin turno
+	kSchedRunning,   // tiene el turno
+	kSchedReady,     // quiere el turno
+	kSchedWaiting,   // bloqueado en waitKey
+	kSchedSuspended, // OSSuspendThread o recién creado
+	kSchedHostOp,    // operación del host sin turno (disco, vsync)
+	kSchedDead,
 };
 
-struct PcMutexRegistry : PcSyncRegistryBase<OSMutex, 4096> {
-	pthread_mutex_t values[4096];
-};
-struct PcCondRegistry : PcSyncRegistryBase<OSCond, 1024> {
-	pthread_cond_t values[1024];
-};
-struct PcQueueRegistry : PcSyncRegistryBase<OSThreadQueue, 1024> {
-	struct Value {
-		pthread_mutex_t mutex;
-		pthread_cond_t cond;
-		u64 generation;
-	} values[1024];
+struct PcSched {
+	OSThread* os;        // hilo de GameCube (prioridad e identidad)
+	pthread_cond_t cv;   // espera del turno
+	int state;
+	const void* waitKey; // cola en la que duerme
+	u64 readySeq;        // orden de llegada entre iguales
+	bool cancel;         // OSCancelThread: sale en su próxima espera
+	bool registered;
+	bool external;       // hilo del host que llama a funciones del SO
 };
 
-static PcMutexRegistry sMutexRegistry;
-static PcCondRegistry sCondRegistry;
-static PcQueueRegistry sQueueRegistry;
-static thread_local OSThread* sCurrentHostThread;
-
-// Cancelación cooperativa (OSCancelThread). Matar un hilo en cualquier punto
-// lo deja morir con cerrojos tomados (malloc, heap, E/S) y en Windows las
-// esperas de std::condition_variable ni siquiera son puntos de cancelación:
-// pthread_join se quedaba esperando para siempre (cuelgue al cambiar de
-// sección). El hilo marcado sale él mismo desde sus esperas.
 struct PcThreadArg {
 	OSThreadStartFunction func;
 	void* param;
 	OSThread* thread;
-	pthread_mutex_t mutex;
-	pthread_cond_t cond;
-	bool started;
-	bool suspended;
-	bool cancel;                // OSCancelThread lo pide (atómico)
-	bool waitForeign;           // en OSWaitCond: mutex del juego, no se toca
-	pthread_cond_t* waitCond;   // espera pthread en curso, para despertarla
-	pthread_mutex_t* waitMutex;
+	PcSched sched;
 };
 
-static thread_local PcThreadArg* tThreadArg = nullptr;
+static constexpr int kSchedMax = 64;
+static pthread_mutex_t gSchedMx = PTHREAD_MUTEX_INITIALIZER;
+static PcSched* gSchedThreads[kSchedMax];
+static std::atomic<PcSched*> gRunning { nullptr };
+static std::atomic<bool> gPreemptPending { false };
+static u64 gReadySeq    = 0;
+static int gSchedDisable = 0; // OSDisableScheduler
+static bool gMainBound   = false;
+static PcSched sMainSched;
 
-static bool pc_cancel_requested()
+static thread_local PcSched* tSched     = nullptr;
+static thread_local bool tSchedLocked   = false; // este hilo tiene gSchedMx
+static thread_local bool tIrqHeld       = false; // interrupciones desactivadas (por hilo, como el MSR)
+static thread_local bool tExiting       = false; // saliendo: no se bloquea ni pide el turno
+static thread_local int tHostDepth      = 0;
+static thread_local bool tHostReleased  = false;
+
+static void schedLock()
 {
-	return tThreadArg && __atomic_load_n(&tThreadArg->cancel, __ATOMIC_ACQUIRE);
+	pthread_mutex_lock(&gSchedMx);
+	tSchedLocked = true;
 }
-static void pc_cancel_exit() { pthread_exit(nullptr); }
-static void pc_wait_begin(pthread_cond_t* cond, pthread_mutex_t* mutex)
+static void schedUnlock()
 {
-	if (!tThreadArg) return;
-	__atomic_store_n(&tThreadArg->waitMutex, mutex, __ATOMIC_RELEASE);
-	__atomic_store_n(&tThreadArg->waitCond, cond, __ATOMIC_RELEASE);
-}
-static void pc_wait_end()
-{
-	if (!tThreadArg) return;
-	__atomic_store_n(&tThreadArg->waitCond, (pthread_cond_t*)nullptr, __ATOMIC_RELEASE);
-	__atomic_store_n(&tThreadArg->waitMutex, (pthread_mutex_t*)nullptr, __ATOMIC_RELEASE);
+	tSchedLocked = false;
+	pthread_mutex_unlock(&gSchedMx);
 }
 
-static void pc_init_recursive_mutex(pthread_mutex_t* m)
+static OSPriority schedPrio(const PcSched* s) { return s->os ? s->os->priority : 0; }
+
+// Reparto del turno por prioridad, para el informe [SCHED] de rendimiento.
+static long long gTurnNs[34]; // 0-31 prioridad, 32 nadie (operaciones del host), 33 hilo externo
+static std::chrono::steady_clock::time_point gTurnSince = std::chrono::steady_clock::now();
+static long long gMainHostNs = 0; // tiempo del principal sin turno en operaciones del host
+
+static void schedSetRunningLocked(PcSched* next)
 {
-	pthread_mutexattr_t attr;
-	pthread_mutexattr_init(&attr);
-	pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
-	pthread_mutex_init(m, &attr);
-	pthread_mutexattr_destroy(&attr);
+	const auto now = std::chrono::steady_clock::now();
+	PcSched* cur   = gRunning.load(std::memory_order_relaxed);
+	const int slot = !cur ? 32 : cur->external ? 33 : int(schedPrio(cur) & 31);
+	gTurnNs[slot] += std::chrono::duration_cast<std::chrono::nanoseconds>(now - gTurnSince).count();
+	gTurnSince = now;
+	gRunning.store(next, std::memory_order_relaxed);
 }
 
-// `reinit` is OSInitMutex: the game re-initialises an OSMutex whenever the
-// object that embeds it is (re)constructed. Heaps and objects get destroyed
-// and recreated at the same address between sections, so a stale native
-// mutex (possibly still locked by a dead owner) must be reset rather than
-// handed back as-is.
-static pthread_mutex_t* pc_native_mutex(OSMutex* key, bool create, bool reinit = false)
+static void schedRegisterLocked(PcSched* s)
 {
-	if (!key)
-		return nullptr;
-	pthread_mutex_lock(&sMutexRegistry.registryLock);
-	for (size_t i = 0; i < 4096; ++i) {
-		if (sMutexRegistry.keys[i] == key) {
-			if (reinit) {
-				pthread_mutex_t* m = &sMutexRegistry.values[i];
-				if (pthread_mutex_trylock(m) == 0) {
-					pthread_mutex_unlock(m);
-					pthread_mutex_destroy(m);
-					pc_init_recursive_mutex(m);
-				}
-				// else: genuinely held by a live thread; keep it.
-			}
-			pthread_mutex_unlock(&sMutexRegistry.registryLock);
-			return &sMutexRegistry.values[i];
+	if (s->registered) return;
+	for (int i = 0; i < kSchedMax; ++i) {
+		if (!gSchedThreads[i]) {
+			gSchedThreads[i] = s;
+			s->registered    = true;
+			return;
 		}
 	}
-	if (create) {
-		for (size_t i = 0; i < 4096; ++i) {
-			if (!sMutexRegistry.keys[i]) {
-				pc_init_recursive_mutex(&sMutexRegistry.values[i]);
-				sMutexRegistry.keys[i] = key;
-				pthread_mutex_unlock(&sMutexRegistry.registryLock);
-				return &sMutexRegistry.values[i];
-			}
-		}
+	fprintf(stderr, "[PC OS] scheduler: more than %d threads\n", kSchedMax);
+	schedUnlock();
+	abort();
+}
+static void schedUnregisterLocked(PcSched* s)
+{
+	for (int i = 0; i < kSchedMax; ++i) {
+		if (gSchedThreads[i] == s) gSchedThreads[i] = nullptr;
 	}
-	pthread_mutex_unlock(&sMutexRegistry.registryLock);
-	return nullptr;
+	s->registered = false;
 }
 
-// Called when memory that may hold OSMutex/OSCond/OSThreadQueue objects is
-// freed (JKRHeap::free / dispose), so slots are reusable and never point at
-// dead objects.
-static void pc_os_release_range(const void* begin, const void* end, bool mutexesOnly)
+static PcSched* schedPickLocked()
 {
-	const uintptr_t lo = (uintptr_t)begin, hi = (uintptr_t)end;
-	pthread_mutex_lock(&sMutexRegistry.registryLock);
-	for (size_t i = 0; i < 4096; ++i) {
-		const uintptr_t k = (uintptr_t)sMutexRegistry.keys[i];
-		if (k >= lo && k < hi) {
-			pthread_mutex_t* m = &sMutexRegistry.values[i];
-			if (pthread_mutex_trylock(m) != 0) {
-				// Still held by a live thread: destroying it is undefined and
-				// that thread will unlock it later. Keep the slot; OSInitMutex
-				// on a reused address takes the same path (see pc_native_mutex).
-				fprintf(stderr, "[PC OS] freed memory holds a locked OSMutex %p; slot kept\n", (void*)k);
-				continue;
-			}
-			pthread_mutex_unlock(m);
-			pthread_mutex_destroy(m);
-			sMutexRegistry.keys[i] = nullptr;
-		}
+	PcSched* best = nullptr;
+	for (int i = 0; i < kSchedMax; ++i) {
+		PcSched* t = gSchedThreads[i];
+		if (!t || t->state != kSchedReady) continue;
+		if (!best || schedPrio(t) < schedPrio(best) || (schedPrio(t) == schedPrio(best) && t->readySeq < best->readySeq)) best = t;
 	}
-	pthread_mutex_unlock(&sMutexRegistry.registryLock);
-	if (mutexesOnly)
+	return best;
+}
+
+static bool schedReadyAboveLocked(OSPriority prio, bool orEqual)
+{
+	for (int i = 0; i < kSchedMax; ++i) {
+		PcSched* t = gSchedThreads[i];
+		if (t && t->state == kSchedReady && (schedPrio(t) < prio || (orEqual && schedPrio(t) == prio))) return true;
+	}
+	return false;
+}
+
+static void schedUpdatePendingLocked()
+{
+	PcSched* running = gRunning.load(std::memory_order_relaxed);
+	gPreemptPending.store(running && schedReadyAboveLocked(schedPrio(running), false), std::memory_order_relaxed);
+}
+
+static void schedDispatchLocked()
+{
+	PcSched* next = schedPickLocked();
+	schedSetRunningLocked(next);
+	if (next) {
+		next->state = kSchedRunning;
+		if (next->os) next->os->state = OS_THREAD_STATE_RUNNING;
+		pthread_cond_signal(&next->cv);
+	}
+	schedUpdatePendingLocked();
+}
+
+static void schedMakeReadyLocked(PcSched* s)
+{
+	if (s->state == kSchedDead || s->state == kSchedRunning) return;
+	s->waitKey = nullptr;
+	if (s->os && s->os->suspend > 0) {
+		s->state = kSchedSuspended;
 		return;
-	pthread_mutex_lock(&sCondRegistry.registryLock);
-	for (size_t i = 0; i < 1024; ++i) {
-		const uintptr_t k = (uintptr_t)sCondRegistry.keys[i];
-		if (k >= lo && k < hi) {
-			pthread_cond_destroy(&sCondRegistry.values[i]);
-			sCondRegistry.keys[i] = nullptr;
-		}
 	}
-	pthread_mutex_unlock(&sCondRegistry.registryLock);
-	pthread_mutex_lock(&sQueueRegistry.registryLock);
-	for (size_t i = 0; i < 1024; ++i) {
-		const uintptr_t k = (uintptr_t)sQueueRegistry.keys[i];
-		if (k >= lo && k < hi) {
-			pthread_cond_destroy(&sQueueRegistry.values[i].cond);
-			pthread_mutex_destroy(&sQueueRegistry.values[i].mutex);
-			sQueueRegistry.keys[i] = nullptr;
-		}
-	}
-	pthread_mutex_unlock(&sQueueRegistry.registryLock);
+	s->state    = kSchedReady;
+	s->readySeq = ++gReadySeq;
+	if (s->os) s->os->state = OS_THREAD_STATE_READY;
+	if (!gRunning.load(std::memory_order_relaxed)) schedDispatchLocked();
+	else schedUpdatePendingLocked();
 }
 
-extern "C" void pc_os_release_sync_range(const void* begin, const void* end)
+static void schedGiveUpLocked(PcSched* s, int state)
 {
-	pc_os_release_range(begin, end, false);
+	s->state = state;
+	if (state == kSchedReady) s->readySeq = ++gReadySeq;
+	if (s->os) s->os->state = state == kSchedReady ? OS_THREAD_STATE_READY : OS_THREAD_STATE_WAITING;
+	if (gRunning.load(std::memory_order_relaxed) == s) {
+		schedSetRunningLocked(nullptr);
+		schedDispatchLocked();
+	}
 }
 
-// JKRHeap::freeAll: solo los mutex (el registro que se agotaba). Una cola o
-// condición de ese montón puede tener aún un hilo esperando (cargador en
-// segundo plano) y pthread_cond_destroy aborta en ese caso.
-extern "C" void pc_os_release_mutex_range(const void* begin, const void* end)
+// El hilo s termina: sale del reparto y pasa el turno. No vuelve.
+[[noreturn]] static void schedExitLocked(PcSched* s)
 {
-	pc_os_release_range(begin, end, true);
+	s->state = kSchedDead;
+	if (gRunning.load(std::memory_order_relaxed) == s) {
+		schedSetRunningLocked(nullptr);
+		schedDispatchLocked();
+	}
+	schedUnregisterLocked(s);
+	if (s->os) s->os->state = OS_THREAD_STATE_MORIBUND;
+	tExiting = true;
+	schedUnlock();
+	pthread_exit(nullptr);
 }
 
-static pthread_cond_t* pc_native_cond(OSCond* key, bool create)
+static void schedWaitTurnLocked(PcSched* s)
 {
-	if (!key)
-		return nullptr;
-	pthread_mutex_lock(&sCondRegistry.registryLock);
-	for (size_t i = 0; i < 1024; ++i) {
-		if (sCondRegistry.keys[i] == key) {
-			pthread_mutex_unlock(&sCondRegistry.registryLock);
-			return &sCondRegistry.values[i];
-		}
+	while (gRunning.load(std::memory_order_relaxed) != s) {
+		if (s->cancel) schedExitLocked(s);
+		pthread_cond_wait(&s->cv, &gSchedMx);
 	}
-	if (create) {
-		for (size_t i = 0; i < 1024; ++i) {
-			if (!sCondRegistry.keys[i]) {
-				pthread_cond_init(&sCondRegistry.values[i], nullptr);
-				sCondRegistry.keys[i] = key;
-				pthread_mutex_unlock(&sCondRegistry.registryLock);
-				return &sCondRegistry.values[i];
-			}
-		}
-	}
-	pthread_mutex_unlock(&sCondRegistry.registryLock);
-	return nullptr;
 }
 
-static PcQueueRegistry::Value* pc_native_queue(OSThreadQueue* key, bool create)
+// Las claves de espera son siempre OSThreadQueue (la cola del mutex, de la
+// condición o de la cola de mensajes). Como el SDK, su head marca que hay
+// alguien esperando: soltar un mutex sin esperas no necesita el cerrojo.
+static void schedBlockLocked(PcSched* s, const void* key)
 {
-	if (!key)
-		return nullptr;
-	pthread_mutex_lock(&sQueueRegistry.registryLock);
-	for (size_t i = 0; i < 1024; ++i) {
-		if (sQueueRegistry.keys[i] == key) {
-			pthread_mutex_unlock(&sQueueRegistry.registryLock);
-			return &sQueueRegistry.values[i];
-		}
-	}
-	if (create) {
-		for (size_t i = 0; i < 1024; ++i) {
-			if (!sQueueRegistry.keys[i]) {
-				auto& value = sQueueRegistry.values[i];
-				pthread_mutex_init(&value.mutex, nullptr);
-				pthread_cond_init(&value.cond, nullptr);
-				value.generation = 0;
-				sQueueRegistry.keys[i] = key;
-				pthread_mutex_unlock(&sQueueRegistry.registryLock);
-				return &value;
-			}
-		}
-	}
-	pthread_mutex_unlock(&sQueueRegistry.registryLock);
-	return nullptr;
+	if (!s) return; // antes de OSInit no hay con quién esperar
+	if (key) ((OSThreadQueue*)key)->head = s->os;
+	s->waitKey = key;
+	schedGiveUpLocked(s, kSchedWaiting);
+	schedWaitTurnLocked(s);
 }
+
+static void schedWakeLocked(const void* key)
+{
+	for (int i = 0; i < kSchedMax; ++i) {
+		PcSched* t = gSchedThreads[i];
+		if (t && t->state == kSchedWaiting && t->waitKey == key) schedMakeReadyLocked(t);
+	}
+	if (key) ((OSThreadQueue*)key)->head = nullptr;
+}
+
+// Tras despertar a alguien: si hay uno de más prioridad, corre ya (como el
+// __OSReschedule de la consola).
+static void schedRescheduleLocked(PcSched* s)
+{
+	if (!s || tExiting || gSchedDisable > 0 || gRunning.load(std::memory_order_relaxed) != s) return;
+	if (!schedReadyAboveLocked(schedPrio(s), false)) return;
+	schedGiveUpLocked(s, kSchedReady);
+	schedWaitTurnLocked(s);
+}
+
+static void schedYieldLocked(PcSched* s)
+{
+	if (!s || tExiting || gSchedDisable > 0 || gRunning.load(std::memory_order_relaxed) != s) return;
+	if (!schedReadyAboveLocked(schedPrio(s), true)) return;
+	schedGiveUpLocked(s, kSchedReady);
+	schedWaitTurnLocked(s);
+}
+
+// ¿Sigue vivo el dueño de un mutex? La consola soltaba los mutex de un hilo
+// cancelado; aquí se reconoce al dueño muerto y se le quita.
+static bool schedOwnerAliveLocked(const OSThread* owner)
+{
+	if (!owner) return false;
+	for (int i = 0; i < kSchedMax; ++i) {
+		PcSched* t = gSchedThreads[i];
+		if (t && t->os == owner && t->state != kSchedDead) return true;
+	}
+	return false;
+}
+
+// El principal lo fija OSInit, y solo él: en Android los constructores
+// estáticos corren en el hilo de UI de Java y el juego en el de SDL; atar el
+// principal al primero que llamara dejaba al juego esperando un turno que
+// nunca llegaba (pantalla negra al arrancar).
+static void schedBindMainLocked()
+{
+	if (gMainBound) return;
+	gMainBound    = true;
+	sMainSched.os = &sMainThread;
+	pthread_cond_init(&sMainSched.cv, nullptr);
+	tSched = &sMainSched;
+	schedRegisterLocked(&sMainSched);
+	sMainSched.state = kSchedRunning;
+	schedSetRunningLocked(&sMainSched);
+}
+
+// Hilo actual. Antes de OSInit no hay hilos del juego y no hay turnos
+// (nullptr: la llamada corre sin más). Después, cualquier hilo del host que
+// llame a una función del SO es "externo": pide el turno durante la llamada.
+static PcSched* schedSelfLocked()
+{
+	if (tSched) return tSched;
+	if (!gMainBound) return nullptr;
+	static thread_local PcSched ext;
+	static thread_local OSThread extThread;
+	if (!ext.os) {
+		memset(&extThread, 0, sizeof(extThread));
+		extThread.priority = -1; // por delante de todos: entra y sale enseguida
+		extThread.base     = -1;
+		ext.os             = &extThread;
+		ext.external       = true;
+		ext.state          = kSchedNew;
+		pthread_cond_init(&ext.cv, nullptr);
+	}
+	tSched = &ext;
+	schedRegisterLocked(&ext);
+	return tSched;
+}
+
+// Toda función pública del SO corre con gSchedMx tomado y con el turno: un
+// hilo externo, o uno que está en una operación del host, lo pide durante la
+// llamada y lo devuelve al acabar (un externo con interrupciones desactivadas
+// lo conserva hasta reactivarlas, como su sección crítica).
+namespace {
+struct PcSchedCall {
+	PcSched* self = nullptr;
+	int prevState = kSchedNew;
+	bool borrowed = false;
+	PcSchedCall()
+	{
+		schedLock();
+		self = schedSelfLocked();
+		if (self && !tExiting && gRunning.load(std::memory_order_relaxed) != self) {
+			prevState = self->state;
+			borrowed  = true;
+			schedMakeReadyLocked(self);
+			schedWaitTurnLocked(self);
+		}
+	}
+	~PcSchedCall()
+	{
+		if (!tSchedLocked) return; // salió del hilo (pthread_exit con desenrollado)
+		if (self && gRunning.load(std::memory_order_relaxed) == self && !tIrqHeld && (self->external || (borrowed && prevState == kSchedHostOp)))
+			schedGiveUpLocked(self, self->external ? kSchedNew : kSchedHostOp);
+		schedUnlock();
+	}
+	PcSchedCall(const PcSchedCall&)            = delete;
+	PcSchedCall& operator=(const PcSchedCall&) = delete;
+};
+} // namespace
+
+static inline bool schedOwnsTurn()
+{
+	PcSched* s = tSched;
+	return s && !s->external && gRunning.load(std::memory_order_relaxed) == s;
+}
+
+// Punto de cambio al reactivar interrupciones o soltar un mutex: si mientras
+// tanto quedó listo uno de más prioridad (acabó su lectura de disco, el
+// principal salió del vsync), se le da paso, como hacía la interrupción.
+static void schedPreemptPoint()
+{
+	if (!gPreemptPending.load(std::memory_order_relaxed) || tIrqHeld || tExiting || !schedOwnsTurn()) return;
+	schedLock();
+	schedRescheduleLocked(tSched);
+	schedUnlock();
+}
+
+// Operaciones del host que en consola eran asíncronas: el hilo suelta el turno
+// mientras dura y lo pide al acabar. Dentro no se toca estado del juego.
+extern "C" void pc_sched_host_begin(void)
+{
+	if (++tHostDepth != 1) return;
+	tHostReleased = false;
+	PcSched* s    = tSched;
+	if (!s || s->external || tExiting) return;
+	schedLock();
+	if (gRunning.load(std::memory_order_relaxed) == s) {
+		schedGiveUpLocked(s, kSchedHostOp);
+		tHostReleased = true;
+		if (s == &sMainSched) gMainHostNs -= std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+	}
+	schedUnlock();
+}
+extern "C" void pc_sched_host_end(void)
+{
+	if (tHostDepth <= 0 || --tHostDepth != 0 || !tHostReleased) return;
+	tHostReleased = false;
+	PcSched* s    = tSched;
+	schedLock();
+	if (s->cancel) schedExitLocked(s);
+	if (gRunning.load(std::memory_order_relaxed) != s) {
+		schedMakeReadyLocked(s);
+		schedWaitTurnLocked(s);
+	}
+	if (s == &sMainSched) gMainHostNs += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+	schedUnlock();
+}
+
+static void pc_host_sleep_us(long long us)
+{
+	pc_sched_host_begin();
+	if (us > 0) std::this_thread::sleep_for(std::chrono::microseconds(us));
+	pc_sched_host_end();
+}
+extern "C" void pc_sched_sleep_ms(int ms) { pc_host_sleep_us((long long)ms * 1000); }
+
+// JKRHeap::free/freeAll: antes liberaban los objetos nativos de los mutex,
+// condiciones y colas de esa memoria. Ya no hay objetos nativos.
+extern "C" void pc_os_release_sync_range(const void*, const void*) {}
+extern "C" void pc_os_release_mutex_range(const void*, const void*) {}
 
 static std::unordered_map<DVDFileInfo*, FILE*> sDvdFiles;
 static std::vector<std::string> sDvdEntries;
@@ -410,6 +568,10 @@ void OSInit(void)
 	sMainThread.base     = 16;
 	__OSCurrentThread    = &sMainThread;
 	__OSCurrentContext   = &sDefaultContext;
+	// El hilo que llama a OSInit es el principal: tiene el turno.
+	schedLock();
+	schedBindMainLocked();
+	schedUnlock();
 	__OSBusClock         = 162000000;
 	__OSCoreClock        = 486000000;
 	printf("[PC Port] OSInit() arena=%p size=%zu\n", sArenaLo, kArenaSize);
@@ -466,80 +628,57 @@ void OSTicksToCalendarTime(OSTime ticks, OSCalendarTime* td)
 	memset(td, 0, sizeof(*td));
 }
 
-// Interrupciones: en la consola, desactivarlas es la seccion critica que usan
-// JAudio, JKernel y los PS* para compartir listas con el hilo de audio (colas
-// de JASPortCmd, secuencias, tareas de BGM). Aqui son hilos de verdad, asi que
-// es un cerrojo global; cada hilo sabe si lo tiene. Las esperas (mutex, colas,
-// dormir) lo sueltan mientras bloquean, como hace el cambio de contexto en GC.
-static std::timed_mutex sIrqMutex;
-static thread_local bool tIrqHeld = false;
-// Diagnostico: quien tiene el cerrojo (direccion de quien llamo a
-// OSDisableInterrupts, relativa al ejecutable para addr2line).
-static std::atomic<const void*> sIrqOwnerSite{nullptr};
-static std::atomic<unsigned long> sIrqOwnerThread{0};
-static void pcIrqReportStall()
-{
-	static std::atomic<int> reports{0};
-	if (reports.fetch_add(1) >= 5) return;
-	const void* site = sIrqOwnerSite.load();
-	Dl_info info{};
-	uintptr_t rel = (uintptr_t)site;
-	if (site && dladdr(site, &info) && info.dli_fbase) rel -= (uintptr_t)info.dli_fbase;
-	fprintf(stderr,
-	        "[PC OS] Interrupt lock: thread %lu waiting >2s; held by thread %lu, taken at rel=0x%lx "
-	        "(addr2line -Cfe pikmin2_pc 0x%lx)\n",
-	        (unsigned long)pthread_self(), sIrqOwnerThread.load(), (unsigned long)rel, (unsigned long)rel);
-}
-static void pcIrqLock(const void* site = __builtin_return_address(0))
-{
-	if (!sIrqMutex.try_lock_for(std::chrono::seconds(2))) {
-		pcIrqReportStall();
-		sIrqMutex.lock();
-	}
-	tIrqHeld = true;
-	sIrqOwnerSite.store(site);
-	sIrqOwnerThread.store((unsigned long)pthread_self());
-}
-static void pcIrqUnlock()
-{
-	tIrqHeld = false;
-	sIrqMutex.unlock();
-}
-namespace {
-// Sin memoria dinamica: el operator new del port va al heap del juego.
-struct PcIrqRelease {
-	const bool held;
-	explicit PcIrqRelease(bool active = true) : held(active && tIrqHeld)
-	{
-		if (held) pcIrqUnlock();
-	}
-	~PcIrqRelease()
-	{
-		if (held) pcIrqLock();
-	}
-};
-} // namespace
+// Interrupciones: estado de cada hilo (en consola, el MSR de su contexto). La
+// exclusión entre hilos ya la da el turno del planificador; al reactivarlas se
+// da paso a un hilo de más prioridad que quedara listo, como hacía la
+// interrupción pendiente.
 BOOL OSDisableInterrupts()
 {
-	if (tIrqHeld) return FALSE;
-	pcIrqLock(__builtin_return_address(0));
-	return TRUE;
+	const BOOL prev = !tIrqHeld;
+	if (!schedOwnsTurn()) {
+		PcSchedCall call;
+		tIrqHeld = true;
+		return prev;
+	}
+	tIrqHeld = true;
+	return prev;
 }
 BOOL OSEnableInterrupts()
 {
-	if (!tIrqHeld) return TRUE;
-	pcIrqUnlock();
-	return FALSE;
+	const BOOL prev = !tIrqHeld;
+	if (!schedOwnsTurn()) {
+		PcSchedCall call;
+		tIrqHeld = false;
+		return prev;
+	}
+	tIrqHeld = false;
+	schedPreemptPoint();
+	return prev;
 }
 BOOL OSRestoreInterrupts(BOOL level)
 {
 	const BOOL prev = !tIrqHeld;
-	if (level && tIrqHeld) pcIrqUnlock();
-	else if (!level && !tIrqHeld) pcIrqLock();
+	if (!schedOwnsTurn()) {
+		PcSchedCall call;
+		tIrqHeld = !level;
+		return prev;
+	}
+	tIrqHeld = !level;
+	if (level) schedPreemptPoint();
 	return prev;
 }
-s32 OSDisableScheduler() { return 0; }
-s32 OSEnableScheduler() { return 0; }
+s32 OSDisableScheduler()
+{
+	PcSchedCall call;
+	return gSchedDisable++;
+}
+s32 OSEnableScheduler()
+{
+	PcSchedCall call;
+	const s32 prev = gSchedDisable;
+	if (gSchedDisable > 0 && --gSchedDisable == 0) schedRescheduleLocked(call.self);
+	return prev;
+}
 
 void* OSGetArenaLo() { return sArenaLo; }
 void* OSGetArenaHi() { return sArenaHi; }
@@ -605,163 +744,196 @@ void* OSInitAlloc(void* arenaStart, void* arenaEnd, int maxHeaps)
 	return arenaStart;
 }
 
+// ─── Mutex, condiciones, colas y mensajes sobre el turno (como el SDK) ─────
+static thread_local OSThread* sCurrentHostThread;
+
 void OSInitMutex(OSMutex* mutex)
 {
 	if (!mutex)
 		return;
+	PcSchedCall call;
 	memset(mutex, 0, sizeof(*mutex));
-	if (!pc_native_mutex(mutex, true, true))
-		OSPanic(__FILE__, __LINE__, "host mutex registry exhausted");
 }
 void OSLockMutex(OSMutex* mutex)
 {
-	pthread_mutex_t* native = pc_native_mutex(mutex, true);
-	if (!native)
-		OSPanic(__FILE__, __LINE__, "host mutex registry exhausted");
-	if (pthread_mutex_trylock(native) != 0) {
-		PcIrqRelease irq;
-		pthread_mutex_lock(native);
+	if (!mutex)
+		return;
+	// Vía rápida: solo quien tiene el turno toca los mutex del juego, así que
+	// tomarlo libre (o el propio) no necesita el cerrojo del planificador. El
+	// heap del juego lo hace miles de veces por frame.
+	if (schedOwnsTurn()) {
+		OSThread* cur = OSGetCurrentThread();
+		if (!mutex->thread) {
+			mutex->thread = cur;
+			mutex->count  = 1;
+			return;
+		}
+		if (mutex->thread == cur) {
+			mutex->count++;
+			return;
+		}
 	}
-	mutex->thread = OSGetCurrentThread();
-	mutex->count++;
+	PcSchedCall call;
+	OSThread* cur = OSGetCurrentThread();
+	for (;;) {
+		if (!mutex->thread || (mutex->thread != cur && !schedOwnerAliveLocked(mutex->thread))) {
+			mutex->thread = cur;
+			mutex->count  = 1;
+			return;
+		}
+		if (mutex->thread == cur) {
+			mutex->count++;
+			return;
+		}
+		if (tExiting)
+			return;
+		schedBlockLocked(call.self, &mutex->queue);
+	}
 }
 void OSUnlockMutex(OSMutex* mutex)
 {
-	pthread_mutex_t* native = pc_native_mutex(mutex, false);
-	if (!native || mutex->thread != OSGetCurrentThread() || mutex->count <= 0)
+	if (!mutex)
 		return;
-	if (--mutex->count == 0)
+	if (schedOwnsTurn()) {
+		if (mutex->thread != OSGetCurrentThread() || mutex->count <= 0)
+			return;
+		if (--mutex->count > 0)
+			return;
 		mutex->thread = nullptr;
-	pthread_mutex_unlock(native);
+		// Nadie esperando y nadie de más prioridad listo: nada más que hacer.
+		if (!mutex->queue.head && !gPreemptPending.load(std::memory_order_relaxed))
+			return;
+		PcSchedCall call;
+		schedWakeLocked(&mutex->queue);
+		schedRescheduleLocked(call.self);
+		return;
+	}
+	PcSchedCall call;
+	if (mutex->thread != OSGetCurrentThread() || mutex->count <= 0)
+		return;
+	if (--mutex->count == 0) {
+		mutex->thread = nullptr;
+		schedWakeLocked(&mutex->queue);
+		schedRescheduleLocked(call.self);
+	}
 }
 BOOL OSTryLockMutex(OSMutex* mutex)
 {
-	pthread_mutex_t* native = pc_native_mutex(mutex, true);
-	if (!native || pthread_mutex_trylock(native) != 0)
+	if (!mutex)
 		return FALSE;
-	mutex->thread = OSGetCurrentThread();
-	mutex->count++;
-	return TRUE;
+	if (schedOwnsTurn()) {
+		OSThread* cur = OSGetCurrentThread();
+		if (!mutex->thread) {
+			mutex->thread = cur;
+			mutex->count  = 1;
+			return TRUE;
+		}
+		if (mutex->thread == cur) {
+			mutex->count++;
+			return TRUE;
+		}
+	}
+	PcSchedCall call;
+	OSThread* cur = OSGetCurrentThread();
+	if (!mutex->thread || (mutex->thread != cur && !schedOwnerAliveLocked(mutex->thread))) {
+		mutex->thread = cur;
+		mutex->count  = 1;
+		return TRUE;
+	}
+	if (mutex->thread == cur) {
+		mutex->count++;
+		return TRUE;
+	}
+	return FALSE;
 }
 void OSInitCond(OSCond* cond)
 {
-	if (cond)
-		memset(cond, 0, sizeof(*cond));
-	if (cond && !pc_native_cond(cond, true))
-		OSPanic(__FILE__, __LINE__, "host condition registry exhausted");
+	if (!cond)
+		return;
+	PcSchedCall call;
+	memset(cond, 0, sizeof(*cond));
 }
-// pthread_cond_wait vuelve a tomar el mutex al cancelarse el hilo y quien
-// esperaba ya no sigue para soltarlo: el siguiente que lo use se colgaba.
-static void pc_cancel_unlock_mutex(void* mutex)
-{
-#ifdef __ANDROID__
-	// Aquí el hilo sale por pthread_exit desde el manejador de SIGUSR2 (ver
-	// OSCancelThread), no por pthread_cancel: pthread_cond_wait no vuelve a
-	// tomar el mutex, y soltarlo era soltar uno ajeno, a menudo ya destruido
-	// (FORTIFY abortaba al pulsar Begin en el título).
-	(void)mutex;
-#else
-	pthread_mutex_unlock(static_cast<pthread_mutex_t*>(mutex));
-#endif
-}
-
 void OSWaitCond(OSCond* cond, OSMutex* mutex)
 {
-	pthread_cond_t* nativeCond = pc_native_cond(cond, true);
-	pthread_mutex_t* nativeMutex = pc_native_mutex(mutex, false);
-	if (!nativeCond || !nativeMutex || mutex->thread != OSGetCurrentThread() || mutex->count <= 0)
+	if (!cond || !mutex)
 		return;
-	const int lockCount = mutex->count;
-	mutex->count = 0;
-	mutex->thread = nullptr;
-	for (int i = 1; i < lockCount; ++i)
-		pthread_mutex_unlock(nativeMutex);
-	// Sin cerrojo de interrupciones durante la espera: al volver se retoma con
-	// trylock para no bloquearse con otro hilo que lo tenga y quiera este mutex.
-	const bool irqHeld = tIrqHeld;
-	if (irqHeld) pcIrqUnlock();
-	// El mutex es del juego y freeAll lo destruye antes que el hilo (el hilo
-	// no lo tiene tomado mientras espera): OSCancelThread no lo toca ni
-	// despierta esta espera, que al volver lo tomaría ya destruido (bionic
-	// aborta). Sale por el método forzoso de cada plataforma.
-	if (tThreadArg) __atomic_store_n(&tThreadArg->waitForeign, true, __ATOMIC_RELEASE);
-	if (!pc_cancel_requested()) {
-		pthread_cleanup_push(pc_cancel_unlock_mutex, nativeMutex);
-		pthread_cond_wait(nativeCond, nativeMutex);
-		pthread_cleanup_pop(0);
-	}
-	if (tThreadArg) __atomic_store_n(&tThreadArg->waitForeign, false, __ATOMIC_RELEASE);
-	if (pc_cancel_requested()) {
-		pthread_mutex_unlock(nativeMutex);
-		pc_cancel_exit();
-	}
-	if (irqHeld) {
-		while (!sIrqMutex.try_lock()) {
-			pthread_mutex_unlock(nativeMutex);
-			std::this_thread::yield();
-			pthread_mutex_lock(nativeMutex);
-		}
-		tIrqHeld = true;
-	}
-	for (int i = 1; i < lockCount; ++i)
-		pthread_mutex_lock(nativeMutex);
-	mutex->thread = OSGetCurrentThread();
-	mutex->count = lockCount;
+	PcSchedCall call;
+	OSThread* cur = OSGetCurrentThread();
+	if (mutex->thread != cur || mutex->count <= 0)
+		return;
+	const s32 count = mutex->count;
+	mutex->count    = 0;
+	mutex->thread   = nullptr;
+	schedWakeLocked(&mutex->queue);
+	if (!tExiting)
+		schedBlockLocked(call.self, &cond->queue);
+	while (mutex->thread && mutex->thread != cur && schedOwnerAliveLocked(mutex->thread) && !tExiting)
+		schedBlockLocked(call.self, &mutex->queue);
+	mutex->thread = cur;
+	mutex->count  = count;
 }
 void OSSignalCond(OSCond* cond)
 {
-	if (pthread_cond_t* native = pc_native_cond(cond, false))
-		pthread_cond_signal(native);
+	if (!cond)
+		return;
+	PcSchedCall call;
+	schedWakeLocked(&cond->queue);
+	schedRescheduleLocked(call.self);
 }
 
 void OSInitThreadQueue(OSThreadQueue* queue)
 {
 	if (queue)
 		queue->head = queue->tail = nullptr;
-	if (queue && !pc_native_queue(queue, true))
-		OSPanic(__FILE__, __LINE__, "host thread-queue registry exhausted");
 }
-OSThread* OSGetCurrentThread() { return sCurrentHostThread ? sCurrentHostThread : &sMainThread; }
+OSThread* OSGetCurrentThread()
+{
+	if (sCurrentHostThread)
+		return sCurrentHostThread;
+	if (tSched && tSched->external)
+		return tSched->os;
+	return &sMainThread;
+}
 BOOL OSIsThreadTerminated(OSThread* thread)
 {
 	return !thread || thread->state == OS_THREAD_STATE_MORIBUND || thread->state == OS_THREAD_STATE_NULL;
 }
 
-
-static void pc_thread_cancel_cleanup(void* p)
+// Al terminar un hilo (vuelta de su función, OSExitThread u OSCancelThread):
+// sale del reparto y pasa el turno. Idempotente.
+static void pc_thread_exit_cleanup(void* p)
 {
 	PcThreadArg* arg = (PcThreadArg*)p;
-	// Cancellation unwinds through PcIrqRelease, whose destructor re-takes the
-	// interrupt lock; a thread dying with it held would freeze every other one.
-	if (tIrqHeld)
-		pcIrqUnlock();
+	const bool wasLocked = tSchedLocked;
+	if (!wasLocked) schedLock();
+	if (arg->sched.registered) {
+		arg->sched.state = kSchedDead;
+		if (gRunning.load(std::memory_order_relaxed) == &arg->sched) {
+			schedSetRunningLocked(nullptr);
+			schedDispatchLocked();
+		}
+		schedUnregisterLocked(&arg->sched);
+	}
 	arg->thread->state = OS_THREAD_STATE_MORIBUND;
-	arg->thread->specific[1] = nullptr;
+	schedUnlock();
 	sCurrentHostThread = nullptr;
+	tSched             = nullptr;
 }
 
 static void* pc_thread_entry(void* p)
 {
-	PcThreadArg* arg            = (PcThreadArg*)p;
-	void* ret                   = nullptr;
-	sCurrentHostThread          = arg->thread;
-	tThreadArg                  = arg;
-	pthread_cleanup_push(pc_thread_cancel_cleanup, arg);
-	pthread_mutex_lock(&arg->mutex);
-	while (!arg->started)
-		pthread_cond_wait(&arg->cond, &arg->mutex);
-	pthread_mutex_unlock(&arg->mutex);
-	if (pc_cancel_requested())
-		pc_cancel_exit();
-	arg->thread->state          = OS_THREAD_STATE_RUNNING;
-	ret                         = arg->func(arg->param);
-	arg->thread->state          = OS_THREAD_STATE_MORIBUND;
-	arg->thread->val            = ret;
-	arg->thread->specific[1]    = nullptr;
-	sCurrentHostThread          = nullptr;
-	// arg no se libera: OSCancelThread puede estar usándolo a la vez (los
-	// hilos del juego son pocos y viven casi toda la partida).
-	pthread_cleanup_pop(0);
+	PcThreadArg* arg   = (PcThreadArg*)p;
+	void* ret          = nullptr;
+	sCurrentHostThread = arg->thread;
+	tSched             = &arg->sched;
+	pthread_cleanup_push(pc_thread_exit_cleanup, arg);
+	// Creado suspendido: espera a OSResumeThread y a su turno.
+	schedLock();
+	schedWaitTurnLocked(&arg->sched);
+	schedUnlock();
+	ret              = arg->func(arg->param);
+	arg->thread->val = ret;
+	pthread_cleanup_pop(1);
 	return ret;
 }
 
@@ -771,29 +943,29 @@ BOOL OSCreateThread(OSThread* thread, OSThreadStartFunction func, void* param, v
 	(void)stackSize;
 	if (!thread || !func)
 		return FALSE;
+	PcSchedCall call;
 	memset(thread, 0, sizeof(*thread));
 	thread->priority = priority;
 	thread->base     = priority;
 	thread->attr     = attr;
 	thread->state    = OS_THREAD_STATE_READY;
-	PcThreadArg* arg = (PcThreadArg*)malloc(sizeof(PcThreadArg));
+	thread->suspend  = 1; // como en la consola: nace suspendido
+	// arg no se libera nunca: OSCancelThread y el hilo pueden usarlo a la vez
+	// (los hilos del juego son pocos y viven casi toda la partida).
+	PcThreadArg* arg = (PcThreadArg*)calloc(1, sizeof(PcThreadArg));
 	if (!arg)
 		return FALSE;
-	arg->func      = func;
-	arg->param     = param;
-	arg->thread    = thread;
-	arg->started   = false;
-	arg->suspended = false;
-	arg->cancel    = false;
-	arg->waitForeign = false;
-	arg->waitCond  = nullptr;
-	arg->waitMutex = nullptr;
-	pthread_mutex_init(&arg->mutex, nullptr);
-	pthread_cond_init(&arg->cond, nullptr);
+	arg->func         = func;
+	arg->param        = param;
+	arg->thread       = thread;
+	arg->sched.os     = thread;
+	arg->sched.state  = kSchedSuspended;
+	pthread_cond_init(&arg->sched.cv, nullptr);
+	schedRegisterLocked(&arg->sched);
 	pthread_t pt;
 	if (pthread_create(&pt, nullptr, pc_thread_entry, arg) != 0) {
-		pthread_cond_destroy(&arg->cond);
-		pthread_mutex_destroy(&arg->mutex);
+		schedUnregisterLocked(&arg->sched);
+		pthread_cond_destroy(&arg->sched.cv);
 		free(arg);
 		return FALSE;
 	}
@@ -804,105 +976,41 @@ BOOL OSCreateThread(OSThread* thread, OSThreadStartFunction func, void* param, v
 
 void OSExitThread(void* val)
 {
-	if (OSThread* current = OSGetCurrentThread()) {
-		current->val   = val;
-		current->state = OS_THREAD_STATE_MORIBUND;
-	}
-	pthread_exit(val);
+	PcSched* s = tSched;
+	if (OSThread* current = OSGetCurrentThread())
+		current->val = val;
+	// El principal y los hilos externos no salen por aquí.
+	if (!s || s == &sMainSched || s->external)
+		return;
+	schedLock();
+	schedExitLocked(s);
 }
 void OSCancelThread(OSThread* thread)
 {
 	if (!thread || thread->state == OS_THREAD_STATE_MORIBUND || !thread->specific[0])
 		return;
-	const pthread_t native = (pthread_t)(uintptr_t)thread->specific[0];
-	const bool self        = pthread_equal(native, pthread_self());
-	if (PcThreadArg* arg = (PcThreadArg*)thread->specific[1]) {
-		__atomic_store_n(&arg->cancel, true, __ATOMIC_RELEASE);
-		pthread_mutex_lock(&arg->mutex);
-		arg->started = true;
-		arg->suspended = false;
-		pthread_cond_broadcast(&arg->cond);
-		pthread_mutex_unlock(&arg->mutex);
-		// Despierta la espera pthread en curso (OSWaitCond/OSSleepThread):
-		// con su mutex, el hilo ve la marca antes de volver a dormirse.
-		// Solo OSSleepThread la registra, y solo si su cola sigue viva: con el
-		// cerrojo del registro tomado nadie puede destruirla mientras tanto.
-		pthread_mutex_t* waitMutex = __atomic_load_n(&arg->waitMutex, __ATOMIC_ACQUIRE);
-		pthread_cond_t* waitCond   = __atomic_load_n(&arg->waitCond, __ATOMIC_ACQUIRE);
-		if (waitCond && waitMutex && !self) {
-			pthread_mutex_lock(&sQueueRegistry.registryLock);
-			for (size_t i = 0; i < 1024; ++i) {
-				if (sQueueRegistry.keys[i] && &sQueueRegistry.values[i].cond == waitCond
-				    && &sQueueRegistry.values[i].mutex == waitMutex) {
-					pthread_mutex_lock(waitMutex);
-					pthread_cond_broadcast(waitCond);
-					pthread_mutex_unlock(waitMutex);
-					break;
-				}
-			}
-			pthread_mutex_unlock(&sQueueRegistry.registryLock);
-		}
-	}
-	if (self) {
-		thread->state       = OS_THREAD_STATE_MORIBUND;
-		thread->specific[0] = nullptr;
-		pc_cancel_exit();
-	}
-	{
-		// Y las colas de mensajes (std::condition_variable compartida).
-		std::lock_guard<std::mutex> lock(sMsgMutex);
-	}
-	sMsgCv.notify_all();
-	// Medio segundo para salir por su cuenta; si no (hilo ocupado fuera de
-	// las esperas del port), el método forzoso de cada plataforma.
-	bool exited       = false;
-	PcThreadArg* warg = (PcThreadArg*)thread->specific[1];
-	const bool foreign = warg && __atomic_load_n(&warg->waitForeign, __ATOMIC_ACQUIRE);
-	if (!foreign) {
-		PcIrqRelease irq;
-		for (int i = 0; i < 500 && !(exited = thread->state == OS_THREAD_STATE_MORIBUND); ++i)
-			std::this_thread::sleep_for(std::chrono::milliseconds(1));
-	}
-	if (exited) {
-		PcIrqRelease irq;
-		pthread_join(native, nullptr);
-		thread->specific[0] = nullptr;
+	PcThreadArg* arg = (PcThreadArg*)thread->specific[1];
+	if (!arg)
 		return;
+	const pthread_t native = (pthread_t)(uintptr_t)thread->specific[0];
+	PcSched* s             = &arg->sched;
+	schedLock();
+	if (s == tSched) {
+		thread->specific[0] = nullptr;
+		schedExitLocked(s);
 	}
-#ifdef __ANDROID__
-	// bionic no tiene pthread_cancel: una señal cuyo manejador sale del hilo.
-	// Los hilos del juego esperan en condvars (sin el mutex tomado), que es
-	// donde el original los cancelaba.
-	{
-		static bool installed = false;
-		if (!installed) {
-			struct sigaction sa;
-			memset(&sa, 0, sizeof(sa));
-			sa.sa_handler = [](int) { pthread_exit(nullptr); };
-			sigaction(SIGUSR2, &sa, nullptr);
-			installed = true;
-		}
-		if (pthread_equal(native, pthread_self())) {
-			pthread_exit(nullptr);
-		}
-		pthread_kill(native, SIGUSR2);
+	// Quien cancela tiene el turno, así que el otro está aparcado: en una
+	// espera del planificador o en una operación del host (lectura de disco).
+	// Sale en cuanto despierta, sin pedir el turno; nunca a la fuerza (morir
+	// con un cerrojo tomado dejaba el juego colgado o abortaba).
+	s->cancel = true;
+	if (s->state != kSchedDead) {
+		s->state = kSchedDead;
+		schedUpdatePendingLocked();
 	}
-#else
-	pthread_cancel(native);
-#endif
-	{
-		// The target may need the interrupt lock to unwind (PcIrqRelease).
-		// Sin esperar para siempre: un hilo que no sale congelaba el juego.
-		PcIrqRelease irq;
-		for (int i = 0; i < 2500 && !(exited = thread->state == OS_THREAD_STATE_MORIBUND); ++i)
-			std::this_thread::sleep_for(std::chrono::milliseconds(1));
-		if (exited) {
-			pthread_join(native, nullptr);
-		} else {
-			fprintf(stderr, "[PC Port] OSCancelThread: thread did not exit, detached\n");
-			pthread_detach(native);
-		}
-	}
+	pthread_cond_signal(&s->cv);
+	schedUnlock();
+	pthread_join(native, nullptr);
 	thread->state       = OS_THREAD_STATE_MORIBUND;
 	thread->specific[0] = nullptr;
 }
@@ -913,79 +1021,58 @@ void OSDetachThread(OSThread* thread)
 }
 s32 OSResumeThread(OSThread* thread)
 {
-	if (!thread || !thread->specific[1])
+	if (!thread)
 		return 0;
-	PcThreadArg* arg = (PcThreadArg*)thread->specific[1];
-	pthread_mutex_lock(&arg->mutex);
-	arg->started = true;
-	arg->suspended = false;
-	thread->suspend = 0;
-	pthread_cond_broadcast(&arg->cond);
-	pthread_mutex_unlock(&arg->mutex);
-	return 0;
+	PcSchedCall call;
+	const s32 prev = thread->suspend;
+	if (prev > 0 && --thread->suspend == 0) {
+		PcThreadArg* arg = (PcThreadArg*)thread->specific[1];
+		if (arg && arg->sched.state == kSchedSuspended)
+			schedMakeReadyLocked(&arg->sched);
+	}
+	schedRescheduleLocked(call.self);
+	return prev;
 }
 s32 OSSuspendThread(OSThread* thread)
 {
-	if (!thread || !thread->specific[1])
+	if (!thread)
 		return 0;
 	PcThreadArg* arg = (PcThreadArg*)thread->specific[1];
-	PcIrqRelease irq(thread == OSGetCurrentThread());
-	pthread_mutex_lock(&arg->mutex);
-	arg->suspended = true;
-	thread->suspend = 1;
-	if (thread == OSGetCurrentThread()) {
-		thread->state = OS_THREAD_STATE_WAITING;
-		pthread_cleanup_push(pc_cancel_unlock_mutex, &arg->mutex);
-		while (arg->suspended && !pc_cancel_requested())
-			pthread_cond_wait(&arg->cond, &arg->mutex);
-		pthread_cleanup_pop(0);
-		if (pc_cancel_requested()) {
-			pthread_mutex_unlock(&arg->mutex);
-			pc_cancel_exit();
+	// El principal no se suspende (antes tampoco): solo lo hace en la ruta de
+	// error fatal, que en el port ya ha abortado con su informe.
+	if (thread == &sMainThread || !arg)
+		return 0;
+	PcSchedCall call;
+	const s32 prev = thread->suspend++;
+	if (prev == 0) {
+		PcSched* s = &arg->sched;
+		if (s == call.self) {
+			schedGiveUpLocked(s, kSchedSuspended);
+			schedWaitTurnLocked(s);
+		} else if (s->state == kSchedReady) {
+			s->state = kSchedSuspended;
+			schedUpdatePendingLocked();
 		}
-		thread->state = OS_THREAD_STATE_RUNNING;
 	}
-	pthread_mutex_unlock(&arg->mutex);
-	return 0;
+	return prev;
 }
 void OSSleepThread(OSThreadQueue* queue)
 {
-	PcQueueRegistry::Value* value = pc_native_queue(queue, true);
-	if (!value)
-		return;
-	// The caller checked its wake condition with interrupts disabled. Sample the
-	// generation before letting go of the interrupt lock, or an
-	// OSWakeupThread landing in between is lost and this sleeps forever.
-	// Order stays interrupt lock -> queue mutex: the interrupt lock is only
-	// re-taken after the queue mutex is released.
-	pthread_mutex_lock(&value->mutex);
-	const u64 generation = value->generation;
-	const bool irqHeld   = tIrqHeld;
-	if (irqHeld)
-		pcIrqUnlock();
-	pc_wait_begin(&value->cond, &value->mutex);
-	pthread_cleanup_push(pc_cancel_unlock_mutex, &value->mutex);
-	while (generation == value->generation && !pc_cancel_requested())
-		pthread_cond_wait(&value->cond, &value->mutex);
-	pthread_cleanup_pop(0);
-	pc_wait_end();
-	pthread_mutex_unlock(&value->mutex);
-	if (pc_cancel_requested())
-		pc_cancel_exit();
-	if (irqHeld)
-		pcIrqLock();
+	PcSchedCall call;
+	if (!tExiting)
+		schedBlockLocked(call.self, queue);
 }
 void OSWakeupThread(OSThreadQueue* queue)
 {
-	PcQueueRegistry::Value* value = pc_native_queue(queue, false);
-	if (!value)
-		return;
-	pthread_mutex_lock(&value->mutex);
-	++value->generation;
-	pthread_cond_broadcast(&value->cond);
-	pthread_mutex_unlock(&value->mutex);
+	PcSchedCall call;
+	schedWakeLocked(queue);
+	schedRescheduleLocked(call.self);
 }
-void OSYieldThread() { std::this_thread::yield(); }
+void OSYieldThread()
+{
+	PcSchedCall call;
+	schedYieldLocked(call.self);
+}
 OSPriority OSGetThreadPriority(OSThread* thread) { return thread ? thread->priority : 0; }
 
 void OSInitMessageQueue(OSMessageQueue* queue, OSMessage* msgArray, s32 msgCount)
@@ -996,68 +1083,50 @@ void OSInitMessageQueue(OSMessageQueue* queue, OSMessage* msgArray, s32 msgCount
 }
 BOOL OSSendMessage(OSMessageQueue* queue, OSMessage msg, s32 flags)
 {
-	PcIrqRelease irq((flags & OS_MESSAGE_BLOCK) != 0);
-	std::unique_lock<std::mutex> lock(sMsgMutex);
-	for (;;) {
-		if (queue->usedCount < queue->msgCount) {
-			s32 idx                         = (queue->firstIndex + queue->usedCount) % queue->msgCount;
-			queue->msgArray[idx]            = msg;
-			queue->usedCount++;
-			sMsgCv.notify_all();
-			return TRUE;
-		}
-		if (!(flags & OS_MESSAGE_BLOCK))
+	PcSchedCall call;
+	while (queue->msgCount <= queue->usedCount) {
+		if (!(flags & OS_MESSAGE_BLOCK) || tExiting)
 			return FALSE;
-		if (pc_cancel_requested()) {
-			lock.unlock();
-			pc_cancel_exit();
-		}
-		sMsgCv.wait(lock);
+		schedBlockLocked(call.self, &queue->queueSend);
 	}
+	const s32 idx        = (queue->firstIndex + queue->usedCount) % queue->msgCount;
+	queue->msgArray[idx] = msg;
+	queue->usedCount++;
+	schedWakeLocked(&queue->queueReceive);
+	schedRescheduleLocked(call.self);
+	return TRUE;
 }
 BOOL OSJamMessage(OSMessageQueue* queue, OSMessage msg, s32 flags)
 {
-	// Like OSSendMessage but the message is received next (LIFO slot).
-	PcIrqRelease irq((flags & OS_MESSAGE_BLOCK) != 0);
-	std::unique_lock<std::mutex> lock(sMsgMutex);
-	for (;;) {
-		if (queue->usedCount < queue->msgCount) {
-			queue->firstIndex                  = (queue->firstIndex + queue->msgCount - 1) % queue->msgCount;
-			queue->msgArray[queue->firstIndex] = msg;
-			queue->usedCount++;
-			sMsgCv.notify_all();
-			return TRUE;
-		}
-		if (!(flags & OS_MESSAGE_BLOCK))
+	// Como OSSendMessage, pero se recibe el siguiente (al frente de la cola).
+	PcSchedCall call;
+	while (queue->msgCount <= queue->usedCount) {
+		if (!(flags & OS_MESSAGE_BLOCK) || tExiting)
 			return FALSE;
-		if (pc_cancel_requested()) {
-			lock.unlock();
-			pc_cancel_exit();
-		}
-		sMsgCv.wait(lock);
+		schedBlockLocked(call.self, &queue->queueSend);
 	}
+	queue->firstIndex                  = (queue->firstIndex + queue->msgCount - 1) % queue->msgCount;
+	queue->msgArray[queue->firstIndex] = msg;
+	queue->usedCount++;
+	schedWakeLocked(&queue->queueReceive);
+	schedRescheduleLocked(call.self);
+	return TRUE;
 }
 BOOL OSReceiveMessage(OSMessageQueue* queue, OSMessage* msgPtr, s32 flags)
 {
-	PcIrqRelease irq((flags & OS_MESSAGE_BLOCK) != 0);
-	std::unique_lock<std::mutex> lock(sMsgMutex);
-	for (;;) {
-		if (queue->usedCount > 0) {
-			if (msgPtr)
-				*msgPtr = queue->msgArray[queue->firstIndex];
-			queue->firstIndex = (queue->firstIndex + 1) % queue->msgCount;
-			queue->usedCount--;
-			sMsgCv.notify_all();
-			return TRUE;
-		}
-		if (!(flags & OS_MESSAGE_BLOCK))
+	PcSchedCall call;
+	while (queue->usedCount == 0) {
+		if (!(flags & OS_MESSAGE_BLOCK) || tExiting)
 			return FALSE;
-		if (pc_cancel_requested()) {
-			lock.unlock();
-			pc_cancel_exit();
-		}
-		sMsgCv.wait(lock);
+		schedBlockLocked(call.self, &queue->queueReceive);
 	}
+	if (msgPtr)
+		*msgPtr = queue->msgArray[queue->firstIndex];
+	queue->firstIndex = (queue->firstIndex + 1) % queue->msgCount;
+	queue->usedCount--;
+	schedWakeLocked(&queue->queueSend);
+	schedRescheduleLocked(call.self);
+	return TRUE;
 }
 
 void OSCreateAlarm(OSAlarm* alarm)
@@ -1091,7 +1160,7 @@ void OSProtectRange(u32, void*, u32, u32) {}
 void OSSetSaveRegion(void*, void*) {}
 OSErrorHandler OSSetErrorHandler(OSError, OSErrorHandler) { return nullptr; }
 // Process exit while the audio/DVD host threads are still running: std::exit()
-// would run static destructors (sMsgCv...) under threads waiting on them and
+// would run static destructors under threads waiting on them and
 // abort. Close the audio sink first -- JASAudioThread may be inside
 // SDL_QueueAudio -- then leave without destructors.
 static void pc_host_quit()
@@ -1163,6 +1232,9 @@ void PPCSync() {}
 u32 SIProbe(s32) { return 0; }
 
 extern "C" u32 gPcSectionTicks;
+// Section::loading: pantalla de carga activa (más tiempo para el hilo que carga).
+static bool sPcLoadingScreen = false;
+extern "C" void pc_sched_set_loading_screen(int on) { sPcLoadingScreen = on != 0; }
 extern "C" int pc_p2_retrace_hz(void); // sysGCU/system.cpp: 120 con FPS Mode 120, si no 60
 extern "C" bool pc_window_monitor_vsync_locked(void);
 extern "C" void pc_window_monitor_vsync_fallback(void);
@@ -1171,6 +1243,12 @@ void VIInit() { printf("[PC Port] VIInit()\n"); }
 void VIFlush() {}
 void VIWaitForRetrace()
 {
+	// Solo el principal dibuja y presenta. Los hilos de carga la llaman en sus
+	// reintentos de lectura (JKRDvdRipper, JKRFile): esperan un campo sin turno.
+	if (tSched && tSched != &sMainSched) {
+		pc_host_sleep_us(16667);
+		return;
+	}
 	sRetraceCount++;
 	// PIKMIN_HEAP_DEBUG=N: memoria libre del system heap (el de la tarjeta) y
 	// del heap actual cada N retraces, para ver quien lo va consumiendo.
@@ -1274,7 +1352,11 @@ void VIWaitForRetrace()
 		const int retraceHz = pc_p2_retrace_hz();
 		const u32 swapEvery = (sRefreshHz > 0 && retraceHz > sRefreshHz) ? u32((retraceHz + sRefreshHz - 1) / sRefreshHz) : 1u;
 		if (sRetraceCount % swapEvery == 0) {
+			// El swap puede esperar al refresco: es la espera del vsync de la
+			// consola, sin turno, para que corran los demás hilos.
+			pc_sched_host_begin();
 			SDL_GL_SwapWindow(window);
+			pc_sched_host_end();
 		}
 		// Some drivers accept interval 1 but do not actually block. In that
 		// case the game would race far above the monitor and its adaptive delta
@@ -1337,9 +1419,79 @@ void VIWaitForRetrace()
 			sNext += std::chrono::microseconds((long long)sPeriodUs);
 			auto now = std::chrono::steady_clock::now();
 			if (now < sNext) {
+				pc_sched_host_begin();
 				std::this_thread::sleep_until(sNext);
+				pc_sched_host_end();
 			} else if (now - sNext > std::chrono::milliseconds(100)) {
 				sNext = now; // fell far behind: do not try to catch up
+			}
+		}
+	}
+	// En la consola el principal siempre esperaba al siguiente campo, y en esa
+	// espera corrían los hilos de menos prioridad (carga, tarjeta). El frame
+	// ya les dio el tiempo que el principal pasó sin turno (swap, ritmo, disco);
+	// si siguen queriendo el turno se completa hasta 1 ms en juego, el 40 % del
+	// frame si llevan varios frames con trabajo (una carga de verdad) y el 75 %
+	// en las pantallas de carga. Se vuelve antes en cuanto terminan.
+	{
+		static int sLoaderBusyFrames = 0;
+		static long long sBudgetNs   = 0;
+		schedLock();
+		const bool busy          = schedReadyAboveLocked(0x7fffffff, false);
+		const long long givenNs  = gMainHostNs;
+		gMainHostNs              = 0;
+		schedUnlock();
+		sLoaderBusyFrames = busy ? sLoaderBusyFrames + 1 : 0;
+		if (busy) {
+			const double periodUs = 1e6 / double(pc_p2_retrace_hz());
+			long long budgetUs    = 1000;
+			if (sPcLoadingScreen) budgetUs = (long long)(periodUs * 0.75);
+			else if (sLoaderBusyFrames >= 3) budgetUs = (long long)(periodUs * 0.40);
+			budgetUs -= givenNs / 1000;
+			if (budgetUs > 0) {
+				const auto start = std::chrono::steady_clock::now();
+				const auto until = start + std::chrono::microseconds(budgetUs);
+				pc_sched_host_begin();
+				while (gRunning.load(std::memory_order_relaxed) != nullptr && std::chrono::steady_clock::now() < until)
+					std::this_thread::sleep_for(std::chrono::microseconds(100));
+				pc_sched_host_end();
+				sBudgetNs += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+				schedLock();
+				gMainHostNs = 0; // no cuenta para el frame siguiente
+				schedUnlock();
+			}
+		}
+		// Informe cada 5 s (siempre en Android, en escritorio con PIKMIN_FPS_LOG):
+		// frames, cesión extra y reparto del turno por prioridad.
+#if defined(__ANDROID__)
+		static const bool sSchedLog = true;
+#else
+		static const bool sSchedLog = getenv("PIKMIN_FPS_LOG") != nullptr;
+#endif
+		if (sSchedLog) {
+			static auto sLogT0  = std::chrono::steady_clock::now();
+			static u32 sLogRet  = sRetraceCount;
+			static u32 sLogTick = gPcSectionTicks;
+			const auto now      = std::chrono::steady_clock::now();
+			const double secs   = std::chrono::duration<double>(now - sLogT0).count();
+			if (secs >= 5.0) {
+				long long turn[34];
+				schedLock();
+				schedSetRunningLocked(gRunning.load(std::memory_order_relaxed)); // cierra el tramo actual
+				memcpy(turn, gTurnNs, sizeof(turn));
+				memset(gTurnNs, 0, sizeof(gTurnNs));
+				schedUnlock();
+				char line[512];
+				int n = snprintf(line, sizeof(line), "[SCHED] retrace %.1f Hz, game %.1f Hz, extra %.1f ms/s, turn%%:",
+				                 (sRetraceCount - sLogRet) / secs, (gPcSectionTicks - sLogTick) / secs, sBudgetNs / 1e6 / secs);
+				for (int i = 0; i < 34 && n < (int)sizeof(line) - 24; i++) {
+					const double pct = turn[i] / 1e7 / secs;
+					if (pct < 0.5) continue;
+					if (i < 32) n += snprintf(line + n, sizeof(line) - n, " p%d=%.0f", i, pct);
+					else n += snprintf(line + n, sizeof(line) - n, " %s=%.0f", i == 32 ? "host" : "ext", pct);
+				}
+				SDL_Log("%s", line);
+				sLogT0 = now; sLogRet = sRetraceCount; sLogTick = gPcSectionTicks; sBudgetNs = 0;
 			}
 		}
 	}
@@ -1597,7 +1749,7 @@ s32 DVDConvertPathToEntrynum(char* path)
 	std::lock_guard<std::mutex> lock(sDvdMutex);
 	return pc_dvd_entry_for(p);
 }
-s32 DVDReadPrio(DVDFileInfo* fileInfo, void* addr, s32 length, s32 offset, s32)
+static s32 pc_dvd_read_locked(DVDFileInfo* fileInfo, void* addr, s32 length, s32 offset)
 {
 	std::lock_guard<std::mutex> lock(sDvdMutex);
 	auto it = sDvdFiles.find(fileInfo);
@@ -1611,6 +1763,15 @@ s32 DVDReadPrio(DVDFileInfo* fileInfo, void* addr, s32 length, s32 offset, s32)
 	if (read_bytes < length)
 		memset(static_cast<u8*>(addr) + read_bytes, 0, (size_t)(length - read_bytes));
 	return length;
+}
+s32 DVDReadPrio(DVDFileInfo* fileInfo, void* addr, s32 length, s32 offset, s32)
+{
+	// En la consola la lectura era DMA y el hilo dormía: sin turno mientras
+	// dura (fuera de sDvdMutex, que nadie con turno debe esperar).
+	pc_sched_host_begin();
+	const s32 result = pc_dvd_read_locked(fileInfo, addr, length, offset);
+	pc_sched_host_end();
+	return result;
 }
 BOOL DVDReadAsyncPrio(DVDFileInfo* fileInfo, void* addr, s32 length, s32 offset, DVDCallback callback, s32 prio)
 {

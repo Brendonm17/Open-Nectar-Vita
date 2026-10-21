@@ -1,6 +1,6 @@
 #include "Morimura/Zukan.h"
 #ifdef PIKI_PC_PORT
-extern "C" void pc_gfx_p2_extend_edge_color(float gxY0, float gxY1, float stripW);
+extern "C" void pc_gfx_p2_black_sides(void);
 #endif
 #include "Game/ResultTexMgr.h"
 #include "Game/IllustratedBook.h"
@@ -994,7 +994,7 @@ void TZukanBase::doDraw(Graphics& gfx)
 	// Pantallas anchas: el fondo (vineta oscura) solo existe en el 4:3; los
 	// laterales toman el color del borde, fila a fila. Antes de los fundidos.
 	graf->setPort();
-	pc_gfx_p2_extend_edge_color(0.0f, 448.0f, 6.0f);
+	pc_gfx_p2_black_sides();
 #endif
 	JUtility::TColor color;
 	color.set(0, 0, 0, 0);

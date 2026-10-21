@@ -109,13 +109,28 @@ bool JKRDecomp::orderSync(u8* srcBuffer, u8* destBuffer, u32 srcLen, u32 destLen
  * @note Address: 0x8001CBDC
  * @note Size: 0x8C
  */
+#ifdef PIKI_PC_PORT
+// p2_os_host.cpp: sin turno mientras dura (trabajo puro sobre sus buffers,
+// como el DMA de la consola); el resto del juego sigue en paralelo.
+extern "C" void pc_sched_host_begin(void);
+extern "C" void pc_sched_host_end(void);
+#endif
+
 void JKRDecomp::decode(u8* p1, u8* p2, u32 p3, u32 p4)
 {
+#ifdef PIKI_PC_PORT
+	// El hilo de descompresión tiene más prioridad que el principal: con el
+	// turno, cada archivo congelaba el juego mientras se descomprimía.
+	pc_sched_host_begin();
+#endif
 	JKRCompression compression = checkCompressed(p1);
 	if (compression == COMPRESSION_YAY0)
 		decodeSZP(p1, p2, p3, p4);
 	else if (compression == COMPRESSION_YAZ0)
 		decodeSZS(p1, p2, p3, p4);
+#ifdef PIKI_PC_PORT
+	pc_sched_host_end();
+#endif
 }
 
 /**

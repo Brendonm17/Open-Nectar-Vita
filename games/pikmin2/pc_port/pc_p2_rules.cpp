@@ -13,6 +13,8 @@
 #include "System.h"
 #include "settings/pc_settings.h"
 
+extern "C" void pc_sched_sleep_ms(int ms); // p2_os_host.cpp
+
 namespace {
 // Mismas escalas que el Hard de Pikmin 1.
 const float kTekiLifeScale  = 1.33f;
@@ -93,7 +95,8 @@ void pc_p2_rules_erase_current_save(void)
 			pc_erased_notice_queue();
 			return;
 		}
-		SDL_Delay(5);
+		// Espera al hilo de la tarjeta (menos prioridad): sin turno, o no corre.
+		pc_sched_sleep_ms(5);
 	}
 	std::printf("[P2 rules] permadeath: no se pudo encolar el borrado de la partida %d\n", slot);
 }

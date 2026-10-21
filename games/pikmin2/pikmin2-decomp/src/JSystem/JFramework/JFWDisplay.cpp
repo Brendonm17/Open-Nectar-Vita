@@ -502,14 +502,23 @@ void JFWThreadAlarmHandler(OSAlarm* p_alarm, OSContext* p_ctx)
  * @note Address: 0x8008A788
  * @note Size: 0xBC
  */
+#ifdef PIKI_PC_PORT
+extern "C" void pc_sched_host_begin(void);
+extern "C" void pc_sched_host_end(void);
+#endif
+
 void JFWDisplay::threadSleep(OSTime time)
 {
 #ifdef PIKI_PC_PORT
 	// Port: OSSetAlarm no dispara y OSSuspendThread vuelve al instante en el
 	// hilo principal, asi que waitForTick() se quedaba en espera activa
 	// (OSGetTime en bucle). Se duerme de verdad; OSTime va a 40.5 ticks/us.
+	// Sin turno mientras duerme (p2_os_host.cpp): en consola era una alarma y
+	// los demás hilos corrían durante la espera.
 	if (time > 0) {
+		pc_sched_host_begin();
 		std::this_thread::sleep_for(std::chrono::microseconds((long long)(time / 40.5)));
+		pc_sched_host_end();
 	}
 	return;
 #endif

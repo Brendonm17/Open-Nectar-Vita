@@ -150,8 +150,16 @@ Section::~Section()
  * @note Address: N/A
  * @note Size: 0x90
  */
+#ifdef PIKI_PC_PORT
+extern "C" void pc_sched_set_loading_screen(int on); // p2_os_host.cpp
+#endif
+
 void Section::loading()
 {
+#ifdef PIKI_PC_PORT
+	// Pantalla de carga: el hilo que carga recibe la mayor parte de cada frame.
+	pc_sched_set_loading_screen(1);
+#endif
 	doLoadingStart();
 	do {
 		bool isLoading;
@@ -164,6 +172,9 @@ void Section::loading()
 			endFrame();
 		} while (isLoading);
 	} while (sys->isDvdErrorOccured());
+#ifdef PIKI_PC_PORT
+	pc_sched_set_loading_screen(0);
+#endif
 }
 
 /**

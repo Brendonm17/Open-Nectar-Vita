@@ -2,6 +2,23 @@
 #include "System.h"
 #include "types.h"
 
+// Peticiones a la tarjeta. En consola los hilos son cooperativos: tras
+// checkError() (que despierta al hilo de la tarjeta) el segundo
+// OSTryLockMutex siempre ganaba. Aquí el hilo de la tarjeta corre en
+// paralelo, puede tomar el mutex entre las dos llamadas y la petición fallaba
+// (P2Assert en ebiSaveMgr.cpp:159 al guardar antes de entrar en una cueva).
+// Quien pide ya comprobó que la tarjeta está libre: se espera a que el hilo
+// suelte el mutex (lo hace al acabar cada comando).
+#ifdef PIKI_PC_PORT
+static inline BOOL pcCardRequestLock(OSMutex* mutex)
+{
+	OSLockMutex(mutex);
+	return TRUE;
+}
+#else
+#define pcCardRequestLock OSTryLockMutex
+#endif
+
 static CARDMemoryCard ATTRIBUTE_ALIGN(32) sCardWorkArea;
 
 /**
@@ -154,7 +171,7 @@ void MemoryCardMgr::releaseCurrentCommand()
 bool MemoryCardMgr::cardFormat(ECardSlot slot)
 {
 	bool result = false;
-	if (OSTryLockMutex(&mOsMutex)) {
+	if (pcCardRequestLock(&mOsMutex)) {
 		result = true;
 		if (slot == CARDSLOT_SlotA) {
 			setCommand(COMMAND_FormatSlotA);
