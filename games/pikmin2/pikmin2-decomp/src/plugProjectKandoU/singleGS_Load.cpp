@@ -18,6 +18,7 @@ namespace SingleGame {
 // se espera al menos lo que tardaba la consola.
 static const f32 kPcMinLoadShowTime = 5.0f;
 static f32 sPcLoadShowTime          = 0.0f;
+extern "C" void pc_sched_set_loading_screen(int on); // p2_os_host.cpp
 #endif
 
 /**
@@ -109,8 +110,15 @@ void LoadState::exec(SingleGameSection* game)
 		if (mHasDrawn && !mHasLoadBegun) {
 			sys->dvdLoadUseCallBack(&game->mDvdThread, game->mLoadGameCallback);
 			mHasLoadBegun = true;
+#ifdef PIKI_PC_PORT
+			// Mientras carga, el hilo de carga recibe casi todo el frame.
+			pc_sched_set_loading_screen(1);
+#endif
 		}
 #ifdef PIKI_PC_PORT
+		if (game->mDvdThread.mMode == DvdThreadCommand::CM_Completed) {
+			pc_sched_set_loading_screen(0);
+		}
 		sPcLoadShowTime += sys->mDeltaTime;
 		if (game->mDvdThread.mMode == DvdThreadCommand::CM_Completed && sPcLoadShowTime >= kPcMinLoadShowTime) {
 #else
@@ -153,6 +161,9 @@ void LoadState::draw(SingleGameSection* game, Graphics& gfx)
  */
 void LoadState::cleanup(SingleGameSection*)
 {
+#ifdef PIKI_PC_PORT
+	pc_sched_set_loading_screen(0);
+#endif
 }
 
 } // namespace SingleGame

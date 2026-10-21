@@ -8,6 +8,10 @@
 #include "types.h"
 #include "Game/SingleGame.h"
 #include "TParticle2dMgr.h"
+
+#ifdef PIKI_PC_PORT
+extern "C" void pc_sched_set_loading_screen(int on); // p2_os_host.cpp
+#endif
 #include "PSSystem/PSSystemIF.h"
 
 namespace Game {
@@ -89,9 +93,18 @@ void LoadState::exec(VsGameSection* section)
 		floor.mCaveID = id.getID();
 		Screen::gGame2DMgr->open_Floor(floor);
 		sys->dvdLoadUseCallBack(&mDvdThreadCommand, mDelegate);
+#ifdef PIKI_PC_PORT
+		// Mientras carga, el hilo de carga recibe casi todo el frame.
+		pc_sched_set_loading_screen(1);
+#endif
 		mIsLoadStarted  = true;
 		mIsGameStarting = false;
 	} else {
+#ifdef PIKI_PC_PORT
+		if (mDvdThreadCommand.mMode == DvdThreadCommand::CM_Completed) {
+			pc_sched_set_loading_screen(0);
+		}
+#endif
 		section->BaseHIOSection::doUpdate();
 		if (particle2dMgr) {
 			particle2dMgr->update();
@@ -140,6 +153,9 @@ void LoadState::draw(VsGameSection* section, Graphics& graphic)
  */
 void LoadState::cleanup(VsGameSection*)
 {
+#ifdef PIKI_PC_PORT
+	pc_sched_set_loading_screen(0);
+#endif
 }
 
 } // namespace VsGame

@@ -8734,7 +8734,18 @@ static void vbo_ring_frame_begin() {
 
 // Draws whatever has accumulated. Safe to call at any time: a no-op when no
 // batch is open, which is what makes it cheap to place at every flush point.
+#if PIKI_P2_HOST
+extern "C" void pc_sched_preempt_point(void);
+#endif
+
 void pc_gfx_flush_batch(void) {
+#if PIKI_P2_HOST
+    // En consola el audio y la carga interrumpían al principal en cualquier
+    // momento; aquí solo cambia de hilo donde el juego llama al SO. Dibujar un
+    // frame apenas lo hace, así que cada lote es un punto de cesión: si un
+    // hilo de más prioridad (audio, disco) espera turno, corre ya.
+    pc_sched_preempt_point();
+#endif
     if (!sBatchOpen || sBatchVerts.empty()) {
         sBatchOpen  = false;
         sBatchPrims = 0;

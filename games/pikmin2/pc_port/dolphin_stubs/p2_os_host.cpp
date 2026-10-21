@@ -256,6 +256,14 @@ static bool schedReadyAboveLocked(OSPriority prio, bool orEqual)
 	return false;
 }
 
+// Algún otro hilo del juego está en una operación del host (leyendo del disco).
+static bool schedOtherInHostOpLocked(const PcSched* self)
+{
+	for (int i = 0; i < kSchedMax; i++)
+		if (gSchedThreads[i] && gSchedThreads[i] != self && gSchedThreads[i]->state == kSchedHostOp) return true;
+	return false;
+}
+
 static void schedUpdatePendingLocked()
 {
 	PcSched* running = gRunning.load(std::memory_order_relaxed);
@@ -461,6 +469,9 @@ static void schedPreemptPoint()
 	schedRescheduleLocked(tSched);
 	schedUnlock();
 }
+
+// Punto de cesión para código del port que corre mucho sin llamar al SO.
+extern "C" void pc_sched_preempt_point(void) { schedPreemptPoint(); }
 
 // Operaciones del host que en consola eran asíncronas: el hilo suelta el turno
 // mientras dura y lo pide al acabar. Dentro no se toca estado del juego.
@@ -1437,7 +1448,9 @@ void VIWaitForRetrace()
 		static int sLoaderBusyFrames = 0;
 		static long long sBudgetNs   = 0;
 		schedLock();
-		const bool busy          = schedReadyAboveLocked(0x7fffffff, false);
+		// En pantallas de carga también cuenta un hilo leyendo del disco: al
+		// acabar la lectura querrá el turno y no debe esperar al frame siguiente.
+		const bool busy = schedReadyAboveLocked(0x7fffffff, false) || (sPcLoadingScreen && schedOtherInHostOpLocked(&sMainSched));
 		const long long givenNs  = gMainHostNs;
 		gMainHostNs              = 0;
 		schedUnlock();
@@ -1452,8 +1465,16 @@ void VIWaitForRetrace()
 				const auto start = std::chrono::steady_clock::now();
 				const auto until = start + std::chrono::microseconds(budgetUs);
 				pc_sched_host_begin();
-				while (gRunning.load(std::memory_order_relaxed) != nullptr && std::chrono::steady_clock::now() < until)
+				while (std::chrono::steady_clock::now() < until) {
+					if (gRunning.load(std::memory_order_relaxed) == nullptr) {
+						if (!sPcLoadingScreen) break;
+						schedLock();
+						const bool reading = schedOtherInHostOpLocked(&sMainSched);
+						schedUnlock();
+						if (!reading) break;
+					}
 					std::this_thread::sleep_for(std::chrono::microseconds(100));
+				}
 				pc_sched_host_end();
 				sBudgetNs += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
 				schedLock();

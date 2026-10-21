@@ -31,6 +31,24 @@ APK over the old one.
 * Achievement toasts and keyboard input no longer use memory that is freed
   when the game changes area.
 
+* **Fixed a crash after pressing Begin on Android** and a crash when leaving
+  the Piklopedia.
+* **Fixed the "memory card" crash when entering a cave** and other rare
+  crashes and freezes caused by the game's threads running at the same time.
+  Pikmin 2 now schedules its threads like the GameCube did: one at a time,
+  by priority, so code written for the console no longer races on PC and
+  Android.
+
+## Pikmin 2: performance
+
+* **Piklopedia and Treasure Hoard run at full speed on Android** and their
+  3D models load quickly. In widescreen their side bars are now black
+  instead of copying the edge colour, which stalled phone GPUs every frame.
+* **Faster loading screens** when entering an area, a cave floor or a
+  2-Player Battle / Challenge stage.
+* Sound mixing runs alongside the game, as the GameCube's DSP did, which
+  frees frame time on phones without crackling.
+
 ## Pikmin 1: crashes
 
 * Fixed a crash when the collision search gave up, and another with more
