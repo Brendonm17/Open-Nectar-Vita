@@ -98,10 +98,16 @@ void pc_p2_audio_render_subframe(u32 index)
 void pc_p2_audio_queue(const s16* interleaved, size_t frames)
 {
 	if (sOpened && interleaved && frames) {
-		PikiAudioSinkQueue(interleaved, frames);
+		if (!PikiAudioSinkQueue(interleaved, frames)) {
+			// Device removal and backend resets are recoverable on Windows.
+			// Mark it closed so pc_p2_audio_init retries instead of leaving the
+			// game permanently silent after the first queue error.
+			PikiAudioSinkClose();
+			sOpened = false;
+		}
 	}
 	static u32 reportCounter = 0;
-	if (std::getenv("PIKMIN_AUDIO_LOG") && ++reportCounter >= 57) {
+	if (std::getenv("PIKMIN_AUDIO_LOG") && interleaved && frames && ++reportCounter >= 57) {
 		reportCounter = 0;
 		int peak = 0;
 		for (size_t i = 0; i < frames * 2; ++i) {

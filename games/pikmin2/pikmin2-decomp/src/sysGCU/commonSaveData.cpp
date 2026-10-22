@@ -29,7 +29,13 @@ void Mgr::setDefault()
 	mFlags.clear();
 	mCardSerialNo  = 0;
 	mSaveSlotIndex = 0;
-	mSoundMode     = 0;
+#ifdef PIKI_PC_PORT
+	// A PC has no persistent GameCube IPL sound-mode setting. Start new saves
+	// in stereo; setup() below then honours this saved game option directly.
+	mSoundMode     = SM_Stereo;
+#else
+	mSoundMode     = SM_Mono;
+#endif
 	mMusicVol      = 0xFF;
 	mSeVol         = -1;
 	mIsRumble      = true;
@@ -114,6 +120,20 @@ void Mgr::read(Stream& input)
  */
 void Mgr::setup()
 {
+#ifdef PIKI_PC_PORT
+	// On console Mono is also stored in the IPL through OSSetSoundMode. The
+	// host OS calls are stubs, so consulting OSGetSoundMode here used to turn
+	// a saved Mono choice back into Stereo on every launch.
+	switch (mSoundMode) {
+	case SM_Mono: setSoundModeMono(); break;
+	case SM_Stereo: setSoundModeStereo(); break;
+	case SM_SurroundSound: setSoundModeSurround(); break;
+	default:
+		mSoundMode = SM_Stereo;
+		setSoundModeStereo();
+		break;
+	}
+#else
 	BOOL soundModeCheck = OSGetSoundMode();
 	switch (soundModeCheck) {
 	case false:
@@ -140,6 +160,7 @@ void Mgr::setup()
 		}
 		break;
 	}
+#endif
 	setBgmVolume(mMusicVol / 255.0f);
 	setSeVolume(mSeVol / 255.0f);
 	setDeflicker();

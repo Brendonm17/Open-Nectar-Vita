@@ -263,7 +263,7 @@ void checkEntriedSeq()
 				}
 
 			} else {
-				if ((u32)dataPtr == 0xFFFFFFFF) {
+				if (dataPtr == reinterpret_cast<u8*>(static_cast<uintptr_t>(-1))) {
 					continue;
 				}
 				if (heapIdx != 255) {

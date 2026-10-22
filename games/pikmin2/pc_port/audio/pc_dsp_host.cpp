@@ -142,6 +142,11 @@ s16 clampToS16(s32 value)
 	return static_cast<s16>(value);
 }
 
+s32 multiplyQ15(s32 sample, s32 gain)
+{
+	return static_cast<s32>((static_cast<s64>(sample) * gain) >> 15);
+}
+
 /// Unpacks predictor pair @p index from the engine's Q11 coefficient table.
 void adpcmCoefficients(u32 index, s32& coef1, s32& coef2)
 {
@@ -158,19 +163,20 @@ void adpcmCoefficients(u32 index, s32& coef1, s32& coef2)
 }
 
 /**
- * @brief Decodes one 4-bit ADPCM block into @p out.
+ * @brief Decodes one Nintendo AFC block (four- or two-bit) into @p out.
  *
  * Nintendo's block layout: a header byte carrying the scale exponent in the
- * high nibble and the predictor index in the low nibble, then eight bytes of
- * two samples each, most significant nibble first.
+ * high nibble and the predictor index in the low nibble. AFC4 stores two
+ * samples in each of eight bytes; AFC2 stores four samples in four bytes.
  *
- * @param history1 Previous sample, updated in place.
- * @param history2 Sample before that, updated in place.
+ * @param history1 Sample before the previous one, updated in place.
+ * @param history2 Previous sample, updated in place.
  * @return false if the block is not resident in ARAM.
  */
-bool decodeAdpcm4Block(u32 aramOffset, s16* out, s16& history1, s16& history2)
+bool decodeAdpcmBlock(u32 aramOffset, u16 sourceType, s16* out, s16& history1, s16& history2)
 {
-	const u8* block = pc_aram_read(aramOffset, 9);
+	const u32 blockBytes = sourceType == kSourceAdpcm4 ? 9 : 5;
+	const u8* block      = pc_aram_read(aramOffset, blockBytes);
 	if (block == nullptr) {
 		pc_audio_drop(PCAD_AramMiss);
 		return false;
@@ -186,15 +192,25 @@ bool decodeAdpcm4Block(u32 aramOffset, s16* out, s16& history1, s16& history2)
 	adpcmCoefficients(predictor, coef1, coef2);
 
 	for (int i = 0; i < 16; ++i) {
-		const u8 byte = block[1 + (i >> 1)];
-		s32 nibble    = (i & 1) ? (byte & 0x0F) : (byte >> 4);
-		if (nibble > 7) {
-			nibble -= 16; // Sign extend the 4-bit residual.
+		s32 residual;
+		if (sourceType == kSourceAdpcm4) {
+			const u8 byte = block[1 + (i >> 1)];
+			residual      = (i & 1) ? (byte & 0x0F) : (byte >> 4);
+			if (residual > 7) residual -= 16; // Sign extend four bits.
+		} else {
+			const u8 byte = block[1 + (i >> 2)];
+			const u8 shift = static_cast<u8>(6 - (i & 3) * 2);
+			residual       = (byte >> shift) & 0x03;
+			if (residual > 1) residual -= 4; // Sign extend two bits.
+			// AFC2 keeps the same predictor scale as AFC4 and expands its
+			// two-bit residual to the four-bit domain used by the DSP.
+			residual *= 4;
 		}
 
 		// Predictor coefficients are Q11, so the history term shifts by 11.
-		const s32 predicted = (coef1 * history2 + coef2 * history1) >> 11;
-		const s32 sample    = clampToS16((nibble << scale) + predicted);
+		const s32 predicted = static_cast<s32>((static_cast<s64>(coef1) * history2
+		                                        + static_cast<s64>(coef2) * history1) >> 11);
+		const s32 sample    = clampToS16(residual * static_cast<s32>(1u << scale) + predicted);
 
 		out[i]   = static_cast<s16>(sample);
 		history1 = history2;
@@ -207,7 +223,9 @@ bool decodeAdpcm4Block(u32 aramOffset, s16* out, s16& history1, s16& history2)
 s16 readPcmSample(const DSPchannel_& channel, u32 sampleIndex)
 {
 	if (channel.samplesSourceType == kSourcePcm16) {
-		const u8* at = pc_aram_read(channel.baseAddress + sampleIndex * 2, 2);
+		const u64 address = static_cast<u64>(channel.baseAddress) + static_cast<u64>(sampleIndex) * 2;
+		if (address > UINT32_MAX) return 0;
+		const u8* at = pc_aram_read(static_cast<u32>(address), 2);
 		if (at == nullptr) {
 			return 0;
 		}
@@ -215,11 +233,13 @@ s16 readPcmSample(const DSPchannel_& channel, u32 sampleIndex)
 		return static_cast<s16>((static_cast<u16>(at[0]) << 8) | at[1]);
 	}
 
-	const u8* at = pc_aram_read(channel.baseAddress + sampleIndex, 1);
+	const u64 address = static_cast<u64>(channel.baseAddress) + sampleIndex;
+	if (address > UINT32_MAX) return 0;
+	const u8* at = pc_aram_read(static_cast<u32>(address), 1);
 	if (at == nullptr) {
 		return 0;
 	}
-	return static_cast<s16>(static_cast<s8>(*at) << 8);
+	return static_cast<s16>(static_cast<s16>(static_cast<s8>(*at)) * 256);
 }
 
 /// Per-channel decode state the voice parameter block has no room for.
@@ -268,7 +288,8 @@ s16 fetchSample(DSPchannel_& channel, HostVoice& voice, u32 index)
 	case kSourcePcm16:
 		return readPcmSample(channel, index);
 
-	case kSourceAdpcm4: {
+	case kSourceAdpcm4:
+	case kSourceAdpcm2: {
 		const u32 block = index >> 4;
 		if (block != voice.blockIndex) {
 			// Decoding is sequential, so a jump backwards or a skip forwards
@@ -277,9 +298,12 @@ s16 fetchSample(DSPchannel_& channel, HostVoice& voice, u32 index)
 				voice.history1 = channel.loopYN2;
 				voice.history2 = channel.loopYN1;
 			}
-			if (!decodeAdpcm4Block(channel.baseAddress + block * 9,
-			                       voice.blockSamples, voice.history1,
-			                       voice.history2)) {
+			const u32 blockBytes = channel.samplesSourceType == kSourceAdpcm4 ? 9 : 5;
+			const u64 address = static_cast<u64>(channel.baseAddress) + static_cast<u64>(block) * blockBytes;
+			if (address > UINT32_MAX
+			    || !decodeAdpcmBlock(static_cast<u32>(address), channel.samplesSourceType,
+			                         voice.blockSamples, voice.history1,
+			                         voice.history2)) {
 				return 0;
 			}
 			voice.blockIndex = block;
@@ -393,12 +417,13 @@ void renderFxLines(u32 frameSamples)
 			fx.index = (fx.index + 1) % fx.subframes;
 			for (int i = 0; i < 8; ++i) fx.history[i] = buffer[PC_DSP_SUBFRAME_SAMPLES + i];
 			for (u32 i = 0; i < PC_DSP_SUBFRAME_SAMPLES; ++i) {
-				s32 acc = 0;
-				for (int j = 0; j < 8; ++j) acc += static_cast<s32>(buffer[i + j]) * fx.coeffs[j];
-				const s32 out = (static_cast<s32>(clampToS16(acc >> 15)) * trimQ15) >> 15;
+				s64 acc = 0;
+				for (int j = 0; j < 8; ++j) acc += static_cast<s64>(buffer[i + j]) * fx.coeffs[j];
+				const s32 filtered = static_cast<s32>(std::clamp<s64>(acc >> 15, -32768, 32767));
+				const s32 out = multiplyQ15(filtered, trimQ15);
 				for (int d = 0; d < 2; ++d) {
 					if (!fx.dest[d] || !fx.volume[d]) continue;
-					const s32 v = (out * fx.volume[d]) >> 15;
+					const s32 v = multiplyQ15(out, fx.volume[d]);
 					switch (fx.dest[d]) {
 					case kBusDryLeft: sBusLeft[sub + i] += v; break;
 					case kBusDryRight: sBusRight[sub + i] += v; break;
@@ -713,12 +738,14 @@ void pc_dsp_host_render_frame(DSPchannel_* channels, u32 channelCount, s16* out,
 						// en s[p], fila 63 en s[p+1]); despues vienen otras tablas.
 						const u16* table = reinterpret_cast<const u16*>(sResampleFilter);
 						const u16* c     = &table[((frac >> 10) & 0x3F) * 4];
-						const s32 acc    = voice.taps[0] * static_cast<s16>(c[0]) + voice.taps[1] * static_cast<s16>(c[1])
-						              + voice.taps[2] * static_cast<s16>(c[2]) + voice.taps[3] * static_cast<s16>(c[3]);
-						interpolated = clampToS16(acc >> 15);
+						const s64 acc    = static_cast<s64>(voice.taps[0]) * static_cast<s16>(c[0])
+						              + static_cast<s64>(voice.taps[1]) * static_cast<s16>(c[1])
+						              + static_cast<s64>(voice.taps[2]) * static_cast<s16>(c[2])
+						              + static_cast<s64>(voice.taps[3]) * static_cast<s16>(c[3]);
+						interpolated = static_cast<s32>(std::clamp<s64>(acc >> 15, -32768, 32767));
 					} else {
 						const s32 s0 = voice.taps[1], s1 = voice.taps[2];
-						interpolated = s0 + (((s1 - s0) * static_cast<s32>(frac)) >> kPhaseShift);
+						interpolated = s0 + static_cast<s32>((static_cast<s64>(s1 - s0) * frac) >> kPhaseShift);
 					}
 				}
 
@@ -729,10 +756,12 @@ void pc_dsp_host_render_frame(DSPchannel_* channels, u32 channelCount, s16* out,
 				const s32 volR = startR + ((endR - startR) * t) / n;
 
 				const u32 slot = sub + i;
-				sBusLeft[slot] += (interpolated * volL) >> 15;
-				sBusRight[slot] += (interpolated * volR) >> 15;
+				const s32 mixedL = multiplyQ15(interpolated, volL);
+				const s32 mixedR = multiplyQ15(interpolated, volR);
+				sBusLeft[slot] += mixedL;
+				sBusRight[slot] += mixedR;
 				if (sLevels) {
-					const s32 cl = (interpolated * volL) >> 15, cr = (interpolated * volR) >> 15;
+					const s32 cl = mixedL, cr = mixedR;
 					levelSum += 0.5 * (double(cl) * cl + double(cr) * cr);
 					levelPeak = std::max(levelPeak, std::max(std::abs(cl), std::abs(cr)));
 					levelGain = std::max(levelGain, std::max(std::abs(volL), std::abs(volR)));
@@ -742,7 +771,7 @@ void pc_dsp_host_render_frame(DSPchannel_* channels, u32 channelCount, s16* out,
 					for (int f = 0; f < kFxLines; ++f) {
 						if (!sFx[f].enabled) continue;
 						const s32 vol = fxStart[f] + ((fxEnd[f] - fxStart[f]) * t) / n;
-						sFx[f].input[slot] += (interpolated * vol) >> 15;
+						sFx[f].input[slot] += multiplyQ15(interpolated, vol);
 					}
 				}
 				produced = true;
@@ -916,14 +945,15 @@ void busLogFrame()
 	if (++sBusLog.frames < 400) return;
 	std::fprintf(stderr, "[PC DSP bus] voices/frame=%.1f auto=%.1f", sBusLog.voices / 400.0, sBusLog.autoVoices / 400.0);
 	if (sBusLog.autoVoices) {
-		std::fprintf(stderr, " autoLvl=%llu fx=%llu surr=[%u %u %u %u]", sBusLog.autoLevel / sBusLog.autoVoices,
-		             sBusLog.fxSend / sBusLog.autoVoices, sBusLog.surroundHist[0], sBusLog.surroundHist[1],
+		std::fprintf(stderr, " autoLvl=%llu fx=%llu surr=[%u %u %u %u]",
+		             static_cast<unsigned long long>(sBusLog.autoLevel / sBusLog.autoVoices),
+		             static_cast<unsigned long long>(sBusLog.fxSend / sBusLog.autoVoices), sBusLog.surroundHist[0], sBusLog.surroundHist[1],
 		             sBusLog.surroundHist[2], sBusLog.surroundHist[3]);
 	}
 	for (int i = 0; i < 13; ++i) {
 		if (!sBusLog.busVoices[i]) continue;
 		std::fprintf(stderr, " %04x:%u/%llu", i < 12 ? kBusLogIds[i] : 0xFFFF, sBusLog.busVoices[i],
-		             sBusLog.busVolume[i] / sBusLog.busVoices[i]);
+		             static_cast<unsigned long long>(sBusLog.busVolume[i] / sBusLog.busVoices[i]));
 	}
 	std::fprintf(stderr, "\n");
 	sBusLog = BusLogStats();

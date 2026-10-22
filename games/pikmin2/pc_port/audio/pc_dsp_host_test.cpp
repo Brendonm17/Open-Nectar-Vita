@@ -58,6 +58,12 @@ void writePcm16(u32 offset, const std::vector<s16>& samples)
 	}
 }
 
+void writeBytes(u32 offset, const std::vector<u8>& bytes)
+{
+	u8* at = pc_aram_write(offset, bytes.size());
+	if (at != nullptr) std::memcpy(at, bytes.data(), bytes.size());
+}
+
 /// A voice playing PCM16 from kAramBase at unity gain into the dry left bus.
 DSPchannel_ makeChannel(u32 length)
 {
@@ -362,6 +368,68 @@ int main()
 		}
 		check(audibleBeforeEnd, "subframe-length 3D effect is audible before ending");
 		check(channel.done == DSP_TRUE, "short 3D effect still reports completion");
+	}
+
+	// 16. All three intermediate/centre buses used by stereo and mono must
+	// reach both output channels. These were the missing effects from #135.
+	for (u16 bus : { u16(0x09A0), u16(0x0FA0), u16(0x0B00) }) {
+		DSPchannel_ channel = makeChannel(static_cast<u32>(source.size()));
+		for (int m = 0; m < 6; ++m) {
+			channel.mixChannels[m].id            = 0;
+			channel.mixChannels[m].currentVolume = 0;
+			channel.mixChannels[m].targetVolume  = 0;
+		}
+		channel.mixChannels[0].id            = bus;
+		channel.mixChannels[0].currentVolume = static_cast<u16>(kFullScale);
+		channel.mixChannels[0].targetVolume  = static_cast<u16>(kFullScale);
+		std::memset(out.data(), 0, out.size() * sizeof(s16));
+		pc_dsp_host_render_frame(&channel, 1, out.data(), kFrame);
+		bool left = false, right = false;
+		for (u32 i = 0; i < kFrame; ++i) {
+			left  |= out[i * 2] != 0;
+			right |= out[i * 2 + 1] != 0;
+		}
+		check(left && right, "stereo/mono centre bus reaches both channels");
+	}
+
+	// 17. Pikmin 2 banks use both Nintendo AFC encodings. AFC2 is five bytes
+	// per 16 samples; treating it as an oscillator made every such effect
+	// silent even though AFC4 effects worked.
+	{
+		const u32 afc4Base = kAramBase + 0x10000;
+		const u32 afc2Base = kAramBase + 0x10100;
+		// Predictor 0, scale 4. Repeating positive residuals need no table.
+		writeBytes(afc4Base, { 0x40, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77 });
+		writeBytes(afc2Base, { 0x40, 0x55, 0x55, 0x55, 0x55 });
+		for (const auto encoded : { std::pair<u32, u16>(afc4Base, 9), std::pair<u32, u16>(afc2Base, 5) }) {
+			DSPchannel_ channel       = makeChannel(16);
+			channel.baseAddress       = encoded.first;
+			channel.samplesSourceType = encoded.second;
+			std::memset(out.data(), 0, out.size() * sizeof(s16));
+			pc_dsp_host_render_frame(&channel, 1, out.data(), kFrame);
+			bool audible = false;
+			for (u32 i = 0; i < 16; ++i) audible |= out[i * 2] != 0 || out[i * 2 + 1] != 0;
+			check(audible, encoded.second == 5 ? "AFC2 voice is decoded" : "AFC4 voice is decoded");
+		}
+	}
+
+	// 18. Six full-scale sends may legally target one output bus. Their gain
+	// sum exceeds 16 bits, so sample*gain must be evaluated in 64 bits before
+	// the final output saturation.
+	{
+		std::vector<s16> loud(64, 32767);
+		const u32 loudBase = kAramBase + 0x10200;
+		writePcm16(loudBase, loud);
+		DSPchannel_ channel = makeChannel(64);
+		channel.baseAddress = loudBase;
+		channel.isLooping   = DSP_TRUE;
+		for (int m = 0; m < 6; ++m) {
+			channel.mixChannels[m].id            = 0x0D00;
+			channel.mixChannels[m].currentVolume = static_cast<u16>(kFullScale);
+			channel.mixChannels[m].targetVolume  = static_cast<u16>(kFullScale);
+		}
+		pc_dsp_host_render_frame(&channel, 1, out.data(), kFrame);
+		check(out[0] >= 32760, "multi-bus gain saturates without signed overflow");
 	}
 
 	pc_dsp_host_shutdown();

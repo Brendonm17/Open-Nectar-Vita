@@ -414,6 +414,11 @@ void TChannel::setWaveInfo(JASWaveInfo const& info, u32 dataOffset, u32 blockCou
 {
 	static u8 COMP_BLOCKSAMPLES[8] = { 0x10, 0x10, 0x01, 0x01, 0x01, 0x10, 0x10, 0x01 };
 	static u8 COMP_BLOCKBYTES[8]   = { 0x9, 0x5, 0x8, 0x10, 0x1, 0x1, 0x1, 0x1 };
+	if (info.mFormat >= 8) {
+		mBytesPerBlock = 0;
+		mSampleCount   = 0;
+		return;
+	}
 
 	mDataOffset      = dataOffset;
 	mSamplesPerBlock = COMP_BLOCKSAMPLES[info.mFormat];
@@ -684,8 +689,9 @@ void TChannel::setDistFilter(s16 distFilter)
 void TChannel::setBusConnect(u8 index, u8 connectType)
 {
 	static const u16 connect_table[12] = { 0x000, 0xD00, 0xD60, 0xDC0, 0xE20, 0xE80, 0xEE0, 0xCA0, 0xF40, 0xFA0, 0xB00, 0x9A0 };
+	if (index >= 6) return;
 	TMixer* mixer                      = &mMixer[index];
-	mixer->mBusConnect                 = connect_table[connectType];
+	mixer->mBusConnect                 = connectType < 12 ? connect_table[connectType] : connect_table[0];
 }
 
 } // namespace JASDsp
