@@ -167,6 +167,7 @@ static void pc_hang_watchdog_start()
 // backtrace() de bionic solo existe desde API 33: en el resto la pila salía
 // vacía. _Unwind_Backtrace (libunwind del NDK) atraviesa el marco de la señal.
 #include <unwind.h>
+#include <ucontext.h>
 struct PcUnwindState {
 	void** cur;
 	void** end;
@@ -186,6 +187,25 @@ static int pc_backtrace(void** frames, int max)
 	PcUnwindState state = { frames, frames + max };
 	_Unwind_Backtrace(pc_unwind_frame, &state);
 	return int(state.cur - frames);
+}
+
+// _Unwind_Backtrace empieza dentro del manejador en algunas versiones de
+// Android. El PC guardado por el kernel siempre señala la instruccion que
+// fallo y hace simbolizable el informe incluso cuando no se puede desenrollar.
+static uintptr_t pc_fault_pc(void* context)
+{
+	if (!context) return 0;
+#if defined(__aarch64__)
+	return (uintptr_t)static_cast<ucontext_t*>(context)->uc_mcontext.pc;
+#elif defined(__arm__)
+	return (uintptr_t)static_cast<ucontext_t*>(context)->uc_mcontext.arm_pc;
+#elif defined(__x86_64__)
+	return (uintptr_t)static_cast<ucontext_t*>(context)->uc_mcontext.gregs[REG_RIP];
+#elif defined(__i386__)
+	return (uintptr_t)static_cast<ucontext_t*>(context)->uc_mcontext.gregs[REG_EIP];
+#else
+	return 0;
+#endif
 }
 #else
 static int pc_backtrace(void** frames, int max) { return backtrace(frames, max); }
@@ -243,7 +263,7 @@ extern "C" void pc_crash_handler(int sig, siginfo_t* info, void* ucontext)
 			return;
 		}
 	}
-#else
+#elif !defined(__ANDROID__)
 	(void)ucontext;
 #endif
 	static volatile sig_atomic_t entered = 0;
@@ -262,7 +282,12 @@ extern "C" void pc_crash_handler(int sig, siginfo_t* info, void* ucontext)
 	}
 
 	void* frames[64];
-	int   count = pc_backtrace(frames, 64);
+	int   count = 0;
+#ifdef __ANDROID__
+	const uintptr_t faultPc = pc_fault_pc(ucontext);
+	if (faultPc) frames[count++] = (void*)faultPc;
+#endif
+	count += pc_backtrace(frames + count, 64 - count);
 
 	uintptr_t base = pc_module_base();
 	FILE* outs[2] = { stderr, fopen(kPcCrashFile, "w") };

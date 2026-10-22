@@ -393,3 +393,28 @@ void DemoEventMgr::act(int sender, int event)
 	}
 	}
 }
+
+#if defined(PIKI_PC_PORT)
+/**
+ * Finish the first-seed transition when an onion discovery movie is skipped
+ * after its Boot event but before the boot animation reaches its action key.
+ *
+ * Boot events dispatched by the skip path already enter GOAL_BootEmit, and a
+ * normally completed boot has moved on again, so limiting this recovery to
+ * GOAL_BootInit also prevents a second seed from being created.
+ */
+void DemoEventMgr::finishOnionBootAfterSkip(Creature* target)
+{
+	if (!target || target->mObjType != OBJTYPE_Goal) {
+		return;
+	}
+
+	GoalItem* goal = static_cast<GoalItem*>(target);
+	if (!goal->mSAICtx.mStateMachine || !playerState->hasBootContainer(goal->mOnionColour)) {
+		return;
+	}
+	if (C_SAI(goal)->getCurrID(goal) == GoalAI::GOAL_BootInit) {
+		C_SAI(goal)->start(goal, GoalAI::GOAL_BootEmit);
+	}
+}
+#endif

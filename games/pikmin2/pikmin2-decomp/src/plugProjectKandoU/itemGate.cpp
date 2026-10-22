@@ -407,7 +407,11 @@ void ItemGate::changeMaterial()
 {
 	int jointIdx = (mIsElectric) ? 0 : mModel->getJoint("move")->mJointIndex;
 
-	bool showJoint = mCentrePlatInstance->isFlag(PLATFLAG_CollisionActive) && mLod.isFlag(AILOD_IsVisible);
+	// Al caer el ultimo segmento, PlatMgr elimina la plataforma central. El
+	// objeto de la compuerta sigue en su manager y aun puede recibir una pasada
+	// de materiales; no se debe consultar la instancia ya eliminada (#153).
+	bool showJoint = mCentrePlatInstance && mCentrePlatInstance->isFlag(PLATFLAG_CollisionActive)
+	              && mLod.isFlag(AILOD_IsVisible);
 	mModel->jointVisible(showJoint, (u16)jointIdx);
 	if (mIsElectric) {
 		mMatAnimator->animate(30.0f);
@@ -778,18 +782,33 @@ void GateDownState::onKeyEvent(Game::ItemGate* gate, const SysShape::KeyEvent& k
 	gate->mSegmentsDown++;
 	gate->mCurrentSegmentHealth = gate->mMaxSegmentHealth;
 	if (gate->mSegmentsDown == gate->mMaxSegments) {
-		gate->mCentrePlatInstance->setCollision(false);
-		platMgr->delInstance(gate->mCentrePlatInstance);
+		if (gate->mCentrePlatInstance) {
+			gate->mCentrePlatInstance->setCollision(false);
+			if (platMgr) {
+				platMgr->delInstance(gate->mCentrePlatInstance);
+			}
+			gate->mCentrePlatInstance = nullptr;
+		}
 		gate->setAlive(false);
-		gate->mWayPoint->setOpen(true);
+		if (gate->mWayPoint) {
+			gate->mWayPoint->setOpen(true);
+		}
 		if (gate->mIsElectric) {
-			gate->mEgateEfxA->fade();
-			gate->mEgateEfxBC->fade();
+			if (gate->mEgateEfxA) {
+				gate->mEgateEfxA->fade();
+			}
+			if (gate->mEgateEfxBC) {
+				gate->mEgateEfxBC->fade();
+			}
 		}
 		gate->mSoundEvent.finish();
-		P2ASSERTLINE(997, gate->mSoundObj->getCastType() == PSM::CCT_WorkItem);
-		static_cast<PSM::WorkItem*>(gate->mSoundObj)->eventFinish();
-		PSSystem::spSysIF->playSystemSe(PSSE_SY_WORK_FINISH, 0);
+		if (gate->mSoundObj) {
+			P2ASSERTLINE(997, gate->mSoundObj->getCastType() == PSM::CCT_WorkItem);
+			static_cast<PSM::WorkItem*>(gate->mSoundObj)->eventFinish();
+		}
+		if (PSSystem::spSysIF) {
+			PSSystem::spSysIF->playSystemSe(PSSE_SY_WORK_FINISH, 0);
+		}
 	} else if (gate->mDamage > 0.0f) {
 		transit(gate, GATESTATE_Damaged, nullptr);
 	} else {

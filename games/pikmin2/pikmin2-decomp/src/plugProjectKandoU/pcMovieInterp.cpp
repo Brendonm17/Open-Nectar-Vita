@@ -199,6 +199,11 @@ extern "C" void pc_movie_interp_note_clear(void)
 // se interpola: se repite la imagen exacta.
 static void* sTickMapBefore = nullptr;
 static void* sTickMapAfter  = nullptr;
+static Game::BaseGameSection* sTickSectionBefore = nullptr;
+static Game::BaseGameSection* sTickSectionAfter  = nullptr;
+static Graphics* sTickGraphicsBefore             = nullptr;
+static Graphics* sTickGraphicsAfter              = nullptr;
+static Camera* sTickCamera                       = nullptr;
 // pc_heap_freeall_serial (JKRHeap::freeAll) al empezar y acabar el tick: si
 // cambió, el tick vació un montón (cambio de subnivel) y los viewports o
 // cámaras pueden estar en memoria liberada.
@@ -209,8 +214,11 @@ static unsigned sTickFreeAfter  = 0;
 extern "C" void pc_movie_interp_begin_tick(void)
 {
 	PcHostAlloc pcHostAlloc;
-	sTickMapBefore  = Game::mapMgr;
-	sTickFreeBefore = pc_heap_freeall_serial;
+	sTickMapBefore      = Game::mapMgr;
+	sTickSectionBefore  = Game::gameSystem ? Game::gameSystem->mSection : nullptr;
+	sTickGraphicsBefore = sys ? sys->mGfx : nullptr;
+	sTickFreeBefore     = pc_heap_freeall_serial;
+	sTickCamera         = nullptr;
 	sRecording = true;
 	sEntered.clear();
 	sEnteredSet.clear();
@@ -219,9 +227,46 @@ extern "C" void pc_movie_interp_begin_tick(void)
 extern "C" void pc_movie_interp_end_tick(void)
 {
 	PcHostAlloc pcHostAlloc;
-	sTickMapAfter  = Game::mapMgr;
-	sTickFreeAfter = pc_heap_freeall_serial;
+	sTickMapAfter      = Game::mapMgr;
+	sTickSectionAfter  = Game::gameSystem ? Game::gameSystem->mSection : nullptr;
+	sTickGraphicsAfter = sys ? sys->mGfx : nullptr;
+	sTickFreeAfter     = pc_heap_freeall_serial;
 	sRecording = false;
+
+	// Una transicion puede destruir la seccion, el mapa, sus modelos y la tabla
+	// de viewports dentro del propio update. No se debe ni muestrear esos modelos
+	// ni volver a recorrer esa tabla desde el frame intermedio.
+	const bool stable = sTickSectionBefore && sTickSectionBefore == sTickSectionAfter && sTickMapBefore
+	                 && sTickMapBefore == sTickMapAfter && sTickGraphicsBefore
+	                 && sTickGraphicsBefore == sTickGraphicsAfter && sTickFreeBefore == sTickFreeAfter;
+	if (!stable) {
+		sEntered.clear();
+		sEnteredSet.clear();
+		sPrev.clear();
+		sCur.clear();
+		return;
+	}
+
+	// Capturamos la camara mientras el tick y su seccion siguen vivos. El frame
+	// repetido usa solo este puntero validado; #150 se producia al consultar de
+	// nuevo Graphics::mViewports despues de que una transicion lo invalidase.
+	Graphics* gfx = sTickGraphicsAfter;
+	if (gfx->mViewports && gfx->mActiveViewports > 0 && gfx->mActiveViewports <= gfx->mMaxViewports
+	    && gfx->mActiveViewports <= 4) {
+		Viewport* visible = nullptr;
+		for (int i = 0; i < gfx->mActiveViewports; i++) {
+			Viewport* vp = gfx->getViewport(i);
+			if (vp && vp->viewable()) {
+				if (visible) {
+					visible = nullptr; // pantalla partida: no interpolar
+					break;
+				}
+				visible = vp;
+			}
+		}
+		sTickCamera = visible ? visible->mCamera : nullptr;
+	}
+
 	sPrev.swap(sCur);
 	sCur.clear();
 	for (J3DModel* model : sEntered) {
@@ -276,24 +321,13 @@ extern "C" bool pc_movie_interp_begin_frame(float alpha)
 	if (!section || !gfx) {
 		return false;
 	}
-	if (!Game::mapMgr || sTickMapBefore != sTickMapAfter || Game::mapMgr != sTickMapAfter
-	    || sTickFreeBefore != sTickFreeAfter || pc_heap_freeall_serial != sTickFreeAfter) {
+	if (!Game::mapMgr || section != sTickSectionAfter || gfx != sTickGraphicsAfter || sTickMapBefore != sTickMapAfter
+	    || Game::mapMgr != sTickMapAfter || sTickFreeBefore != sTickFreeAfter
+	    || pc_heap_freeall_serial != sTickFreeAfter) {
 		noteResult(kNoView, 0, 0);
 		return false;
 	}
-	// El juego registra siempre dos viewports (Olimar y Louie); en un jugador
-	// solo uno es visible. Con pantalla partida no se interpola.
-	Viewport* vp = nullptr;
-	for (int i = 0; i < gfx->mActiveViewports; i++) {
-		Viewport* v = gfx->getViewport(i);
-		if (v && v->viewable()) {
-			if (vp) {
-				return false;
-			}
-			vp = v;
-		}
-	}
-	Camera* cam = vp ? vp->mCamera : nullptr;
+	Camera* cam = sTickCamera;
 	if (!cam) {
 		noteResult(kNoView, 0, 0);
 		return false;

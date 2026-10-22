@@ -418,6 +418,10 @@ void CinematicPlayer::skipScene(int sceneSkipFlag)
 				past = true;
 			}
 			if (demoEventMgr) {
+				// Boot can already have fired while its animation has not yet
+				// reached the action key that creates the first seed. In that
+				// interval there is no remaining movie event to recover above.
+				demoEventMgr->finishOnionBootAfterSkip(mTarget);
 				demoEventMgr->mPcSkipping = false;
 			}
 		}

@@ -131,6 +131,9 @@ public:
 	DemoEventMgr();
 
 	void act(int, int);
+#if defined(PIKI_PC_PORT)
+	void finishOnionBootAfterSkip(Creature*);
+#endif
 
 	// unused/inlined:
 	immut char* getEventName(int, int);

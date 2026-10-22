@@ -635,7 +635,8 @@ void System::parseArchiveDirectory(immut char* arcPath, immut char* dirPath)
 	DVDStream::numOpen++;
 	if (!stream.mIsOpen) {
 		stream.close();
-		ERROR("Could not open archive file!!\n");
+		ERROR("The installed game data is incomplete.\n\nMissing archive: %s\nArchive index: %s\n\nOpen Nectar Launcher can repair the installation.\n",
+		      dirPath, arcPath);
 	}
 
 	// inline?
