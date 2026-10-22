@@ -169,6 +169,10 @@ set(PIKMIN_GAME_VERSION "VERSION_GPIE01_01" CACHE STRING
     "Game release to build: VERSION_GPIE01_01 (USA Rev 1), VERSION_GPIE01_00, \
 VERSION_GPIP01_00 (PAL), VERSION_GPIJ01_01, VERSION_GPIJ01_02")
 
+# __FILE__ (asserts, informes de crash) sin la ruta absoluta de la máquina
+# que compila.
+add_compile_options("-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}/=")
+
 add_compile_definitions(
     PIKI_PC_PORT=1
     ${PIKMIN_GAME_VERSION}

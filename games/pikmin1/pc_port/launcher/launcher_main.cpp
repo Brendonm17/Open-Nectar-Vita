@@ -871,9 +871,10 @@ bool installPikmin2Assets(const fs::path& image, const fs::path& gameDirectory, 
         failure = "Extraction failed: " + error;
         return false;
     }
-    if (!fs::is_directory(partialAssets / "user")) {
+    if (!fs::is_directory(partialAssets / "user") || !fs::is_regular_file(partialAssets / "AudioRes/Conductor.arc")
+        || !fs::is_directory(partialAssets / "AudioRes/Seqs")) {
         fs::remove_all(partialAssets, ec);
-        failure = "The image does not contain the expected Pikmin 2 files.";
+        failure = "The image is incomplete or modified (missing Pikmin 2 files). Use a full, unmodified dump (not NKit or trimmed).";
         return false;
     }
     {

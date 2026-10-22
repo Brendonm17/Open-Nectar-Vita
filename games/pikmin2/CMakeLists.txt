@@ -156,6 +156,10 @@ else()
     set(P2_OUTPUT_NAME "nectar2-pal")
 endif()
 
+# __FILE__ (asserts, informes de crash) sin la ruta absoluta de la máquina
+# que compila: queda "pikmin2-decomp/...".
+add_compile_options("-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}/=")
+
 # ─── Definiciones de compilacion ───
 add_compile_definitions(
     PIKI_PC_PORT=1
