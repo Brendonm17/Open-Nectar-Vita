@@ -1,6 +1,6 @@
 #pragma once
 
-// Mapas VS de Open Nectar (map.json, formato 1; docs/PLAN_EDITOR_MAPAS.md §3).
+// Mapas de Open Nectar (map.json, formatos 1 y 2; docs/PLAN_EDITOR_MAPAS.md §3).
 //
 // Dos niveles:
 //  - MapDoc: lo que guarda el JSON, tal cual (el editor lo modifica y lo
@@ -15,6 +15,16 @@
 #include <vector>
 
 namespace nectar {
+
+/// Lo que aguanta el juego en un mapa (contando las copias de J2). Enemigos:
+/// TekiMgr reserva 80; los jefes van al montón de enemigos. Construcciones y
+/// pastillas salen de los gestores de objetos y pastillas (agrandados en el
+/// port; ver pc_vs_arena.h, que repite estos números).
+constexpr int kMapMaxPellets = 48, kMapMaxPieces = 32, kMapMaxGuards = 16, kMapMaxObjects = 64;
+constexpr int kMapMaxTekis = 80, kMapMaxBosses = 40, kMapMaxEnemies = kMapMaxTekis + kMapMaxBosses;
+/// Malla del mapa compilado (por memoria y por la caché de mallas del port).
+/// Los originales llegan a ~39.000 vértices y ~26.000 triángulos.
+constexpr std::size_t kMapMaxVertices = 250000, kMapMaxTriangles = 300000;
 
 // ── Documento (map.json) ───────────────────────────────────────────────────
 
@@ -69,6 +79,12 @@ struct DocEnemy {
 	std::string type = "swallow";
 	double x = 0, z = 0, face = 0;
 	DocReaction reaction;
+	/// Misiones de varios días y campañas: si vuelve a salir tras derrotarlo.
+	/// "auto" (los jefes no, los demás sí), "always", "never" o "days" (a los
+	/// respawnDays días).
+	std::string respawn = "auto";
+	int respawnDays     = 1;
+	int fromDay = 0, untilDay = 0; ///< solo sale esos días (0 = sin límite)
 };
 
 /// Construcción que funciona como en el juego (objectKinds()): puentes y
@@ -90,11 +106,14 @@ struct DocGuard {
 
 /// Malla estática de un .mod del juego metida en el mapa.
 struct DocProp {
-	std::string asset; ///< ruta en dataDir, p. ej. "objects/hinderrock/cube10.mod"
+	/// Ruta en dataDir, p. ej. "objects/hinderrock/cube10.mod", o "map:..."
+	/// (un archivo de la carpeta del mapa: mallas importadas, en meshes/).
+	std::string asset;
 	double x = 0, y = 0, z = 0;
 	double rx = 0, ry = 0, rz = 0; ///< grados
 	double scale    = 1;
 	bool collide    = true;
+	bool ground     = false; ///< se pisa: su colisión es suelo y no corta caminos
 };
 
 /// Material del suelo: uno de los de un .mod de escenario del juego.
@@ -132,6 +151,118 @@ struct DocGen {
 	std::string data;             ///< el generador en crudo, en base64
 	double x = 0, y = 0, z = 0;
 	std::string label, model; ///< para el editor
+	/// Mapa espejo (VS): el juego pone otro igual en el lado de J2. Los que
+	/// vienen de importar un escenario, no.
+	bool mirror = false;
+};
+
+/// Lo que se puede cambiar de un generador del juego (DocGen::data) sin
+/// tocar lo demás: solo se reescriben los parámetros que ya tiene.
+struct GenSettings {
+	std::string object; ///< "teki", "boss", "plnt", "item", "work", "piki"...
+	std::string area;   ///< "pint" (en el punto) o "circ" (en un círculo)
+	std::string type;   ///< "1one" (uno), "aton" (varios a la vez) o "irnd" (entre mín. y máx.)
+	int teki = -1, boss = -1;
+	bool hasRadius = false, hasCount = false, hasMinCount = false, hasFace = false, hasRebirth = false;
+	float radius    = 0; ///< circ: radio
+	int count       = 1; ///< aton: cuántos; irnd: máximo
+	int minCount    = 1; ///< irnd: mínimo
+	int face        = 0; ///< 1one: giro en grados
+	int rebirthDays = 0; ///< días hasta que vuelve a salir (0 = no vuelve)
+	/// Cuántos puede haber a la vez (para los límites).
+	int maxCount() const { return type == "1one" ? 1 : count; }
+};
+bool readGenSettings(const DocGen& g, GenSettings& out);
+void writeGenSettings(DocGen& g, const GenSettings& s);
+
+/// Modos en los que se puede jugar un mapa (máscara de bits).
+enum MapMode : unsigned { MAPMODE_VS = 1u, MAPMODE_SOLO = 2u, MAPMODE_COOP = 4u };
+/// "vs", "solo", "coop".
+const char* mapModeName(MapMode mode);
+
+// Solo y coop (sección "story"): no se reflejan con la simetría.
+struct DocStoryOnion {
+	int color   = 1; ///< 0 azul, 1 roja, 2 amarilla
+	double x = 0, z = 0;
+	bool buried = false; ///< hay que descubrirla; si no, está desde el principio
+};
+
+struct DocShipPart {
+	std::string id = "uf01"; ///< una de shipParts()
+	double x = 0, z = 0;
+};
+
+struct DocRules {
+	/// "parts" (piezas de la nave), "pellets", "pikmin" (llegar a N Pikmin),
+	/// "boss" (derrotar a todos los jefes), "survive" (aguantar los días) o
+	/// "waves" (aguantar N oleadas: disparadores marcados como oleada).
+	std::string objective = "parts";
+	int target = 0; ///< cuántos hacen falta; 0 = todos (en "pikmin", obligatorio)
+	int days   = 1;
+	int startPikmin[3] = { 0, 10, 0 }; ///< azul, roja, amarilla
+	/// Pikmin al cumplir la misión para bronce, plata y oro (0 = sin medallas).
+	int medals[3] = { 0, 0, 0 };
+	/// Límite de tiempo del día en segundos (0 = sin): al acabar, "lose"
+	/// (se pierde) o "endday" (se acaba el día).
+	int timeLimit = 0;
+	std::string timeLimitEnd = "lose";
+};
+
+/// Condición de un disparador.
+struct DocCondition {
+	/// "parts" / "pellets" / "bosses" / "enemies" (N entregadas o derrotados),
+	/// "day" (desde el día N), "hour" (el reloj llega a las N), "time" (N
+	/// segundos desde que empieza el día), "after" (N segundos desde que saltó
+	/// el disparador `index`), "area" (un capitán dentro del círculo x, z,
+	/// radius), "object" (la construcción `index` terminada o rota) o
+	/// "pikmin" (N Pikmin de `color`; -1 = en total).
+	std::string type = "parts";
+	int count  = 1;
+	int color  = -1;
+	int index  = 0;
+	double x = 0, z = 0, radius = 200;
+};
+
+/// Acción de un disparador.
+struct DocAction {
+	/// "message" (text en pantalla), "textbox" (text en un cuadro que pausa
+	/// el juego), "spawn" (reaction en x, z), "spawn_at" (reaction junto a la
+	/// construcción `index`), "break" (romper o terminar la construcción
+	/// `index`), "win", "lose", "endday", "countdown" (cuenta atrás de
+	/// `seconds`; al acabar, `then`: "lose", "win", "endday" o "") o "camera"
+	/// (la cámara mira `seconds` segundos lo que haya en x, z; nadie se mueve).
+	std::string type = "message";
+	std::string text;
+	double x = 0, z = 0;
+	int index   = 0;
+	int seconds = 60;
+	std::string then;
+	DocReaction reaction;
+};
+
+/// Disparador de la misión: cuando se cumplen sus condiciones (todas, o
+/// cualquiera con `any`), hace sus acciones. Una vez por partida, o con
+/// `repeat` cada `cooldown` segundos (`times` veces como mucho; 0 = sin fin).
+/// `wave`: cada vez cuenta como una oleada (objetivo "waves").
+struct DocTrigger {
+	std::vector<DocCondition> conditions;
+	bool any = false;
+	std::vector<DocAction> actions;
+	bool repeat  = false;
+	int cooldown = 30;
+	int times    = 0;
+	bool wave    = false;
+};
+
+struct DocStory {
+	bool present = false;   ///< hay sección "story" en el JSON
+	DocSpot captains[2];    ///< [1] solo en coop
+	int captainCount = 1;
+	DocSpot ship;
+	std::vector<DocStoryOnion> onions;
+	std::vector<DocShipPart> parts;
+	DocRules rules;
+	std::vector<DocTrigger> triggers;
 };
 
 /// Formas para empezar un terreno.
@@ -139,9 +270,15 @@ enum class TerrainShape { Rectangle, Oval, Cross, TwoIslands, Ring };
 
 struct MapDoc {
 	std::string name = "Mapa nuevo", author, version = "1.0";
+	unsigned modes = MAPMODE_VS; ///< MapMode; solo VS = se guarda en formato 1
 	double minX = -1600, maxX = 1600, minZ = -900, maxZ = 900, wallHeight = 150;
 	bool symmetric = true; ///< "rotate180"
 	std::string baseStage = "stages/chal0.ini";
+	/// Misiones: música de una zona del juego ("practice", "forest", "cave",
+	/// "yakushima", "last"; vacío = la de siempre) y horas del día (0 = las
+	/// del juego).
+	std::string music;
+	double startHour = 0, endHour = 0;
 	double sun[3]         = { 0.32, -0.92, 0.23 };
 	std::string sourceMod = "courses/practice/practice.mod";
 	double cell           = 50;
@@ -149,6 +286,9 @@ struct MapDoc {
 	/// Escenario del juego como base (su .mod tal cual, con sus caminos);
 	/// vacío = terreno del editor.
 	std::string course;
+	/// Carpeta del map.json (no se guarda: la pone quien lo abre), para los
+	/// archivos "map:..." de los props.
+	std::string dir;
 	std::vector<DocGen> gens;
 
 	std::vector<DocWall> walls;
@@ -158,6 +298,18 @@ struct MapDoc {
 	double routeStep = 150, routeMargin = 100;
 	std::vector<double> barrierX;
 	std::vector<std::pair<double, double>> passes;
+	/// Caminos a mano: enlaces que se unen siempre (de a a b, con su altura;
+	/// p. ej. entre dos alturas o por encima de una malla) y zonas (contornos
+	/// en planta) donde no hay caminos.
+	struct RouteLink {
+		double a[3], b[3];
+	};
+	std::vector<RouteLink> routeLinks;
+	std::vector<std::vector<std::pair<double, double>>> routeBlocks;
+	/// Ambiente: brillo (luz y luz ambiente), tinte de la luz (0-255) y
+	/// distancia de la niebla (1 = la del escenario base).
+	double brightness = 1, fogScale = 1;
+	int tint[3] = { 255, 255, 255 };
 
 	DocSpot bases[2], rockets[2], gates[2], bombPiles[2];
 	DocOnion onions[2][3];
@@ -167,6 +319,8 @@ struct MapDoc {
 	std::vector<DocGuard> guards;
 	std::vector<DocEnemy> enemies;
 	std::vector<DocObject> objects;
+
+	DocStory story;
 };
 
 /// Lee un map.json (solo la sintaxis y los tipos; lo demás, en expandMap).
@@ -185,6 +339,10 @@ void applyTerrainShape(MapDoc& doc, TerrainShape shape);
 /// Cambia el tamaño del terreno añadiendo o quitando celdas por cada lado
 /// (negativo = quitar). Lo que había se queda donde estaba.
 void resizeTerrain(MapDoc& doc, int left, int right, int top, int bottom);
+/// Cambia el tamaño de celda (más detalle con celdas pequeñas) sin cambiar lo
+/// que mide el mapa: todo se reparte de nuevo (alturas, suelo, agua y
+/// materiales, interpolados). false si saldrían más de 400 celdas por lado.
+bool resampleTerrain(MapDoc& doc, double cell);
 
 // ── Mapa desplegado ─────────────────────────────────────────────────────────
 
@@ -215,11 +373,14 @@ struct MapPiece {
 	int kind;
 	std::uint32_t part; ///< 0 = la que toque por `kind`
 };
+enum { MAPRESPAWN_Auto = -1, MAPRESPAWN_Always = 0, MAPRESPAWN_Never = -2 }; ///< o > 0: a los N días
 struct MapEnemy {
 	float x, z, face;
 	int teki; ///< tipo de enemigo del juego, o -1
 	int boss; ///< tipo de jefe (GENBOSS_*), o -1
 	MapReaction reaction;
+	int respawn = MAPRESPAWN_Auto;
+	int fromDay = 0, untilDay = 0;
 };
 enum MapObjectKind { MAPOBJ_Bridge, MAPOBJ_BridgeLong, MAPOBJ_SlopeUp, MAPOBJ_SlopeDown, MAPOBJ_PushRock, MAPOBJ_GateSoft, MAPOBJ_GateHard, MAPOBJ_GateBomb,
                      MAPOBJ_Key, MAPOBJ_KeyDoor, MAPOBJ_Nectar };
@@ -241,12 +402,79 @@ struct MapProp {
 	std::string asset;
 	float x, y, z, rx, ry, rz, scale; ///< rotación en radianes
 	bool collide;
+	bool ground = false;
+};
+
+enum MapObjective { MAPGOAL_Parts, MAPGOAL_Pellets, MAPGOAL_Pikmin, MAPGOAL_Boss, MAPGOAL_Survive, MAPGOAL_Waves };
+enum MapCondType {
+	MAPCOND_Parts,
+	MAPCOND_Pellets,
+	MAPCOND_Bosses,
+	MAPCOND_Day,
+	MAPCOND_Hour,
+	MAPCOND_Time,
+	MAPCOND_After,
+	MAPCOND_Area,
+	MAPCOND_Object,
+	MAPCOND_Pikmin,
+	MAPCOND_Enemies,
+};
+struct MapCondition {
+	int type, count, color, index;
+	float x, z, radius;
+};
+enum MapActType { MAPACT_Message, MAPACT_Textbox, MAPACT_Spawn, MAPACT_SpawnAt, MAPACT_Break, MAPACT_Win, MAPACT_Lose, MAPACT_EndDay, MAPACT_Countdown, MAPACT_Camera };
+enum MapThen { MAPTHEN_None, MAPTHEN_Lose, MAPTHEN_Win, MAPTHEN_EndDay };
+struct MapAction {
+	int type;
+	std::string text;
+	float x, z;
+	int index; ///< construcción: ya en la lista desplegada (con gemelos)
+	int seconds, then;
+	MapReaction reaction;
+};
+struct MapTrigger {
+	std::vector<MapCondition> conditions;
+	bool any;
+	std::vector<MapAction> actions;
+	bool repeat;
+	float cooldown;
+	int times;
+	bool wave;
+};
+struct MapStoryOnion {
+	float x, z;
+	int color;
+	bool buried;
+};
+struct MapShipPart {
+	float x, z;
+	std::uint32_t id; ///< 'uf01'...
+};
+struct MapStory {
+	MapSpot captains[2], ship;
+	int captainCount = 1;
+	std::vector<MapStoryOnion> onions;
+	std::vector<MapShipPart> parts;
+	int objective = MAPGOAL_Parts;
+	int target = 0, days = 1;
+	int startPikmin[3] = { 0, 0, 0 };
+	int medals[3]      = { 0, 0, 0 };
+	int timeLimit      = 0;
+	int timeLimitEnd   = MAPTHEN_Lose;
+	std::vector<MapTrigger> triggers;
 };
 
 struct MapData {
+	unsigned modes = MAPMODE_VS;
+	MapStory story; ///< solo si modes tiene SOLO o COOP
 	std::string name, author, baseStage, sourceMod;
+	int music = -1;                  ///< índice en musicNames(), o -1
+	float startHour = 0, endHour = 0; ///< 0 = las del juego
 	std::string course;                               ///< ver MapDoc::course
+	std::string dir;                                  ///< ver MapDoc::dir
 	std::vector<std::uint8_t> genDefault, genPlants; ///< .gen listos (vacíos = sin)
+	int genTekis = 0, genBosses = 0; ///< enemigos y jefes que pueden sacar los generadores
 	float minX, maxX, minZ, maxZ, wallHeight, cell;
 	float sunDir[3];
 	// Terreno editable (grid = false: el rectángulo llano).
@@ -263,6 +491,13 @@ struct MapData {
 	float routeStep, routeMargin;
 	std::vector<float> barrierX;
 	std::vector<MapSpot> passes;
+	struct RouteLink {
+		float a[3], b[3];
+	};
+	std::vector<RouteLink> routeLinks;                       ///< ver MapDoc::routeLinks (con los del espejo)
+	std::vector<std::vector<std::pair<float, float>>> routeBlocks;
+	float brightness = 1, fogScale = 1;
+	int tint[3] = { 255, 255, 255 };
 	MapSpot bases[2], rockets[2], gates[2], bombPiles[2];
 	MapSpot onions[2][3];
 	std::vector<MapPellet> pellets;
@@ -306,6 +541,10 @@ const std::vector<ShipPartInfo>& shipParts();
 /// la geometría (el editor dibuja así mapas aún sin terminar).
 bool expandMap(const MapDoc& doc, MapData& out, std::string& error, bool validate = true);
 
+/// Comprueba que el mapa ya desplegado se puede jugar en ese modo (expandMap
+/// ya lo hace con todos los modos que declara). false con el motivo si no.
+bool validateMapMode(const MapData& map, MapMode mode, std::string& error);
+
 /// Lo de los dos pasos de una vez.
 bool parseMap(const std::string& text, MapData& out, std::string& error);
 
@@ -314,6 +553,9 @@ bool parseMap(const std::string& text, MapData& out, std::string& error);
 float terrainHeight(const MapData& map, float x, float z);
 /// True si en (x, z) hay suelo (con terreno, la celda no está vacía).
 bool terrainSolid(const MapData& map, float x, float z);
+
+/// Músicas de zona que puede usar un mapa (en el orden de las zonas del juego).
+const std::vector<const char*>& musicNames();
 
 /// Nombres de las piezas y cebollas en el JSON.
 const char* pieceKindName(int kind);

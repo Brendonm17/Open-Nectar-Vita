@@ -1168,7 +1168,9 @@ void pc_window_poll_events(PADStatus* pad) {
                     sMousePressedMask |= SDL_BUTTON(event.button.button);
                 // Menú F1 abierto: el clic izquierdo es un toque (misma lógica
                 // que la pantalla táctil: seleccionar fila / pulsar la ya elegida).
-                if (sSettingsMenuOpen && event.button.button == SDL_BUTTON_LEFT && event.button.which != SDL_TOUCH_MOUSEID) {
+                // (También en el mapa de zonas de las campañas: elegir zona con el ratón.)
+                if ((sSettingsMenuOpen || pc_campaign_map_active()) && event.button.button == SDL_BUTTON_LEFT
+                    && event.button.which != SDL_TOUCH_MOUSEID) {
                     int ww = 0, wh = 0;
                     SDL_GetWindowSize(sWindow, &ww, &wh);
                     if (ww > 0 && wh > 0) pc_settings_touch_tap(event.button.x / float(ww), event.button.y / float(wh));
@@ -1618,6 +1620,20 @@ int pc_window_take_wheel_steps(void) {
     return steps;
 }
 
+// Driver VSync (swap interval 1) wanted for the given logical interval.
+// Monitor mode always uses it as its clock. On Windows the fixed 30/60 modes
+// use it too: the software deadline alone only averages the rate and tears
+// (issue #144); DWM does not show the multi-refresh waits seen on Mesa.
+static int driver_swap_interval_for(int interval) {
+    if (!sVsyncEnabled) return 0;
+    if (interval == 0 && pc_frame_vsync_lock()) return 1;
+#if defined(_WIN32)
+    return 1;
+#else
+    return 0;
+#endif
+}
+
 void pc_window_set_swap_interval(int interval) {
     // 0 is meaningful here: it is the port's 120 Hz mode. Only negatives are
     // nonsense.
@@ -1625,8 +1641,8 @@ void pc_window_set_swap_interval(int interval) {
     // The monitor-rate mode is the one case where the display itself is the
     // clock: swap interval 1 gives us phase-aligned frames instead of a timer
     // which merely averages the same number of frames per second. Fixed 30/60
-    // modes keep the driver wait off and use the existing VI/software pacing.
-    const int driverInterval = (interval == 0 && pc_frame_vsync_lock() && sVsyncEnabled) ? 1 : 0;
+    // modes keep the VI/software pacing (plus the driver wait on Windows).
+    const int driverInterval = driver_swap_interval_for(interval);
     if (sLogicalRetraceInterval == interval && sDriverSwapInterval == driverInterval) return;
     if (SDL_GL_SetSwapInterval(driverInterval) == 0) {
         sDriverSwapInterval = driverInterval;
@@ -1792,7 +1808,7 @@ void pc_window_set_vsync_enabled(bool enabled) {
     sVsyncEnabled = enabled;
     // Re-evaluate the driver interval even if the logical clamp did not
     // change. This also turns real VSync off immediately when the user does.
-    const int wanted = (sLogicalRetraceInterval == 0 && pc_frame_vsync_lock() && sVsyncEnabled) ? 1 : 0;
+    const int wanted = driver_swap_interval_for(sLogicalRetraceInterval);
     if (wanted != sDriverSwapInterval) {
         if (SDL_GL_SetSwapInterval(wanted) == 0) {
             sDriverSwapInterval = wanted;

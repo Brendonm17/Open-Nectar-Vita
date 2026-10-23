@@ -1,6 +1,7 @@
 #include "UfoItem.h"
 #if defined(PIKI_PC_PORT)
 #include "pc_coop.h"
+#include "mods/pc_mission.h"
 #include "pc_vs.h"
 #include "netplay/pc_netplay_policy.h"
 #include "netplay/pc_netplay_present.h"
@@ -569,6 +570,12 @@ void UfoItem::finishSuck(Pellet* pelt)
 	if (pc_vs_active()) {
 		pc_vs_add_score(mPcOwner, pc_vs_piece_points(pelt->mConfig->mPelletId.mId));
 		pc_vs_repair_rocket(mPcOwner, PC_VS_REPAIR_PER_PIECE);
+		mAnimator.setMotionSpeed(0, 30.0f);
+		return;
+	}
+	// Misión: la pieza cuenta para el objetivo; tampoco toca la historia.
+	if (pc_mission_active()) {
+		pc_mission_note_part(pelt->mConfig->mPelletId.mId);
 		mAnimator.setMotionSpeed(0, 30.0f);
 		return;
 	}

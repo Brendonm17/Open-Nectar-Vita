@@ -54,6 +54,7 @@
 #include "Kontroller.h"
 #if defined(PIKI_PC_PORT)
 #include "pc_coop.h"
+#include "mods/pc_mission.h"
 #include "timing/pc_render_phase.h"
 #include "netplay/pc_netplay_camlead.h"
 #include "netplay/pc_netplay_det.h"
@@ -107,8 +108,9 @@ class NewPikiGameSetupSection;
 /// (This is about 8s of real-world time, or 7.5 in-game minutes.)
 #define MAP_MENU_SUNSET_LOCKOUT (0.125f)
 
-#if defined(WIN32)
-/// Size of the "teki" heap to use for gameplay (and some cutscenes) - bigger in the DLL.
+#if defined(WIN32) || defined(PIKI_PC_PORT)
+/// Size of the "teki" heap to use for gameplay (and some cutscenes) - bigger in the DLL
+/// (and in the PC port, so custom maps can mix many enemy and boss types).
 #define TEKI_HEAP_SIZE (0xA00000)
 #else
 /// Size of the "teki" heap to use for gameplay (and some cutscenes).
@@ -1046,6 +1048,24 @@ ModeState* RunningModeState::update(u32& result)
 	if (pc_vs_active() && (pc_vs_countdown_holding() || pc_vs_match_over())) {
 		result &= ~UPDATE_AI;
 	}
+	// Misión: con un cuadro de texto abierto, nadie se mueve.
+	if (pc_mission_active() && (pc_mission_textbox() || pc_mission_camera_hold() > 0.0f)) result &= ~UPDATE_AI;
+	// Misión: acabada (o acabado el día), nadie se mueve; unos segundos
+	// después, al título o al amanecer del día siguiente (el mapa otra vez).
+	if (pc_mission_active() && pc_mission_over()) {
+		result &= ~UPDATE_AI;
+		if (int exit = pc_mission_take_exit()) {
+			// Reintentar: la misma misión desde el principio.
+			if (exit == PC_MISSION_EXIT_RETRY) pc_mission_retry();
+			const bool again = exit == PC_MISSION_EXIT_NEXT_DAY || exit == PC_MISSION_EXIT_RETRY;
+			if (again) gameflow.mWorldClock.setTime(pc_mission_start_hour(gameflow.mParameters->mStartHour()));
+			mParentSection->mPendingOnePlayerSectionID = again                         ? ONEPLAYER_NewPikiGame
+			                                           : exit == PC_MISSION_EXIT_MAP ? ONEPLAYER_MapSelect
+			                                                                         : ONEPLAYER_GameExit;
+			gsys->setFade(0.0f);
+			return new QuittingGameModeState(mParentSection);
+		}
+	}
 #endif
 
 	// if we've entered the end of day cutscene, transit to the day over state to handle the day end phases
@@ -1059,6 +1079,12 @@ ModeState* RunningModeState::update(u32& result)
 	}
 
 	// trigger day end when time expires
+#if defined(PIKI_PC_PORT)
+	// Misión: sin la secuencia del atardecer; el fin del día lo lleva
+	// GameCoreSection (pcMissionUpdate).
+	if (pc_mission_active()) {
+	} else
+#endif
 	if (!gameflow.mIsDayEndActive && !gameflow.mMoviePlayer->mIsActive
 	    && gameflow.mWorldClock.mTimeOfDay >= gameflow.mParameters->mEndHour()) {
 #if defined(VERSION_PIKIDEMO) || defined(VERSION_GPIJ01_01)
@@ -1231,6 +1257,18 @@ ModeState* RunningModeState::update(u32& result)
 		result &= ~UPDATE_AI;
 
 #if defined(PIKI_PC_PORT)
+	} else if (pc_mission_active() && pc_mission_zone_mode() && state == zen::ogScrPauseMgr::PAUSE_ExitToSunset) {
+		// Zona de campaña: «atardecer» acaba el día como al llegar la hora
+		// (GameCoreSection lo cierra y lo guarda).
+		gameflow.mWorldClock.setTime(pc_mission_end_hour(gameflow.mParameters->mEndHour()));
+		showFrame(true, 0.5f);
+		gameflow.mIsUIOverlayActive = mIsOverlayCached;
+	} else if (pc_mission_active() && (state == zen::ogScrPauseMgr::PAUSE_ExitToSunset || state == zen::ogScrPauseMgr::PAUSE_ExitToTitle)) {
+		// Misión: salir es volver al título.
+		gameflow.mIsUIOverlayActive                = mIsOverlayCached;
+		mParentSection->mPendingOnePlayerSectionID = ONEPLAYER_GameExit;
+		gsys->setFade(0.0f);
+		return new QuittingGameModeState(mParentSection);
 	} else if (pc_vs_active() && (state == zen::ogScrPauseMgr::PAUSE_ExitToSunset || state == zen::ogScrPauseMgr::PAUSE_ExitToTitle)) {
 		// VS: no hay atardecer ni selección de nivel. "Atardecer" es revancha
 		// y "salir", volver al título.
@@ -2216,6 +2254,13 @@ public:
 
 		// set up course-specific music and any relevant windows we'll need urgently
 		// our fall-back music is the impact site track
+#if defined(PIKI_PC_PORT)
+		// Misiones y campañas: la música de zona que elija el mapa (o la zona).
+		static const int kMissionMusic[] = { STAGE_Practice, STAGE_Forest, STAGE_Cave, STAGE_Yakushima, STAGE_Last };
+		const int missionMusic           = pc_mission_pending() ? pc_mission_music() : -1;
+		if (missionMusic >= 0 && missionMusic < 5) Jac_SceneSetup(SCENE_Course, kMissionMusic[missionMusic]);
+		else
+#endif
 		Jac_SceneSetup(SCENE_Course, (flowCont.mCurrentStage->mStageID < STAGE_COUNT) ? flowCont.mCurrentStage->mStageID : STAGE_Practice);
 		init2Ddata();
 
@@ -2343,7 +2388,7 @@ public:
 		#endif
 		} else if (flowCont.mCurrentStage->mStageID < STAGE_COUNT
 #if defined(PIKI_PC_PORT)
-		           && !pc_vs_active() // VS: directo al mapa, todo ya colocado
+		           && !pc_vs_active() && !pc_mission_active() // VS y misiones: directo al mapa, todo ya colocado
 #endif
 		) {
 			// landing cutscene if we have a valid stage!

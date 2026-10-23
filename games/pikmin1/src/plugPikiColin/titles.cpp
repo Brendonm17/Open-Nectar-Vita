@@ -22,6 +22,8 @@
 #include "zen/ogTitle.h"
 #if defined(PIKI_PC_PORT)
 #include "pc_coop.h"
+#include "mods/pc_mission.h"
+#include "mods/pc_campaign.h"
 #include "pc_gfx.h"
 #include "pc_speedrun.h"
 #include "pc_vs.h"
@@ -379,7 +381,23 @@ public:
 #if defined(PIKI_PC_PORT)
 				// Editor de mapas (--vs-map): directo al VS, como si se hubiera
 				// elegido en el menú (ogTitle) y sin pasar por él.
+				// Editor de mapas (--mission-map, --campaign): directo a la misión
+				// o a la zona de la campaña.
+				if (pc_mission_direct_take_title() || pc_campaign_direct_take_title()) {
+					pc_mission_set_pending(true);
+					pc_vs_set_pending(false);
+					pc_coop_set_pending(pc_mission_players() == 2);
+					pc_coop_set_chosen_at_title(true);
+					mNextSectionsFlag                = PACK_NEXT_ONEPLAYER(ONEPLAYER_GameSetup);
+					gameflow.mGamePrefs.mHasSaveGame = false;
+					gameflow.mIsChallengeMode        = TRUE;
+					Jac_SceneExit(SCENE_Exit, 0);
+					mState = STATE_ExitPending;
+					gsys->setFade(0.0f);
+					return;
+				}
 				if (pc_vs_direct_take_title()) {
+					pc_mission_set_pending(false);
 					pc_coop_set_pending(true);
 					pc_vs_set_pending(true);
 					pc_coop_set_chosen_at_title(true);

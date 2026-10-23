@@ -42,6 +42,8 @@ DocSpot* spotOf(MapDoc& d, const ItemRef& r)
 	case ItemType::Rocket: return &d.rockets[r.index];
 	case ItemType::Gate: return &d.gates[r.index];
 	case ItemType::BombPile: return &d.bombPiles[r.index];
+	case ItemType::Captain: return &d.story.captains[r.index];
+	case ItemType::Ship: return &d.story.ship;
 	default: return nullptr;
 	}
 }
@@ -135,6 +137,10 @@ ItemCaps itemCaps(ItemType t)
 		c.height    = true;
 		break;
 	case ItemType::BigPiece: break;
+	case ItemType::Captain:
+	case ItemType::Ship: c.rotateY = true; break;
+	case ItemType::StoryOnion:
+	case ItemType::ShipPart: c.removable = true; break;
 	}
 	return c;
 }
@@ -157,8 +163,49 @@ bool itemExists(const MapDoc& d, const ItemRef& r)
 	case ItemType::Enemy: return r.index >= 0 && std::size_t(r.index) < d.enemies.size();
 	case ItemType::Object: return r.index >= 0 && std::size_t(r.index) < d.objects.size();
 	case ItemType::BigPiece: return true;
+	case ItemType::Captain: return d.story.present && r.index >= 0 && r.index < d.story.captainCount;
+	case ItemType::Ship: return d.story.present;
+	case ItemType::StoryOnion: return r.index >= 0 && std::size_t(r.index) < d.story.onions.size();
+	case ItemType::ShipPart: return r.index >= 0 && std::size_t(r.index) < d.story.parts.size();
 	}
 	return false;
+}
+
+bool isStoryItem(ItemType t) { return t == ItemType::Captain || t == ItemType::Ship || t == ItemType::StoryOnion || t == ItemType::ShipPart; }
+
+bool isVsItem(ItemType t)
+{
+	switch (t) {
+	case ItemType::Base:
+	case ItemType::Rocket:
+	case ItemType::Gate:
+	case ItemType::BombPile:
+	case ItemType::Onion:
+	case ItemType::Piece:
+	case ItemType::BigPiece: return true;
+	default: return false;
+	}
+}
+
+void ensureStory(MapDoc& d, bool coop)
+{
+	DocStory& s = d.story;
+	// Donde empieza el Jugador 1 en VS, o en medio.
+	const bool vs   = (d.modes & MAPMODE_VS) != 0;
+	const double cx = vs ? d.bases[0].x : (d.minX + d.maxX) * 0.5, cz = vs ? d.bases[0].z : (d.minZ + d.maxZ) * 0.5;
+	if (!s.present) {
+		s              = DocStory();
+		s.present      = true;
+		s.captainCount = 1;
+		s.captains[0]  = { 0, cx, cz - 60, 90, {} };
+		s.ship         = { 0, cx - 220, cz, 90, {} };
+		s.onions       = { { 1, cx - 60, cz + 260, false } };
+		s.rules        = DocRules();
+	}
+	if (coop && s.captainCount < 2) {
+		s.captainCount = 2;
+		s.captains[1]  = { 1, s.captains[0].x, s.captains[0].z + 120, s.captains[0].face, {} };
+	}
 }
 
 Xform getXform(const MapDoc& d, const ItemRef& r)
@@ -175,6 +222,14 @@ Xform getXform(const MapDoc& d, const ItemRef& r)
 	case ItemType::Onion:
 		x.x = d.onions[r.index][r.sub].x;
 		x.z = d.onions[r.index][r.sub].z;
+		break;
+	case ItemType::StoryOnion:
+		x.x = d.story.onions[std::size_t(r.index)].x;
+		x.z = d.story.onions[std::size_t(r.index)].z;
+		break;
+	case ItemType::ShipPart:
+		x.x = d.story.parts[std::size_t(r.index)].x;
+		x.z = d.story.parts[std::size_t(r.index)].z;
 		break;
 	case ItemType::Pellet:
 		x.x = d.pellets[std::size_t(r.index)].x;
@@ -249,6 +304,14 @@ void setXform(MapDoc& d, const ItemRef& r, const Xform& x)
 	case ItemType::Onion:
 		d.onions[r.index][r.sub].x = x.x;
 		d.onions[r.index][r.sub].z = x.z;
+		break;
+	case ItemType::StoryOnion:
+		d.story.onions[std::size_t(r.index)].x = x.x;
+		d.story.onions[std::size_t(r.index)].z = x.z;
+		break;
+	case ItemType::ShipPart:
+		d.story.parts[std::size_t(r.index)].x = x.x;
+		d.story.parts[std::size_t(r.index)].z = x.z;
 		break;
 	case ItemType::Pellet:
 		d.pellets[std::size_t(r.index)].x = x.x;
@@ -374,6 +437,17 @@ std::string itemName(const MapDoc& d, const ItemRef& r)
 		snprintf(buf, sizeof(buf), "%s", label);
 		break;
 	}
+	case ItemType::Captain:
+		if (d.story.captainCount > 1) snprintf(buf, sizeof(buf), tr("Capitán del %s"), player);
+		else snprintf(buf, sizeof(buf), tr("Capitán"));
+		break;
+	case ItemType::Ship: snprintf(buf, sizeof(buf), tr("Nave")); break;
+	case ItemType::StoryOnion: {
+		const int c = d.story.onions[std::size_t(r.index)].color;
+		snprintf(buf, sizeof(buf), tr("Cebolla %s"), tr(onionNames[c >= 0 && c < 3 ? c : 1]));
+		break;
+	}
+	case ItemType::ShipPart: snprintf(buf, sizeof(buf), tr("Pieza de la nave (%s)"), d.story.parts[std::size_t(r.index)].id.c_str()); break;
 	}
 	return buf;
 }
@@ -381,15 +455,23 @@ std::string itemName(const MapDoc& d, const ItemRef& r)
 std::vector<ItemRef> allItems(const MapDoc& d)
 {
 	std::vector<ItemRef> out;
-	for (int p = 0; p < 2; p++) {
-		out.push_back({ ItemType::Base, p, 0 });
-		out.push_back({ ItemType::Rocket, p, 0 });
-		for (int c = 0; c < 3; c++) out.push_back({ ItemType::Onion, p, c });
-		out.push_back({ ItemType::Gate, p, 0 });
-		out.push_back({ ItemType::BombPile, p, 0 });
+	if (d.story.present) {
+		for (int c = 0; c < d.story.captainCount; c++) out.push_back({ ItemType::Captain, c, 0 });
+		out.push_back({ ItemType::Ship, 0, 0 });
+		for (std::size_t i = 0; i < d.story.onions.size(); i++) out.push_back({ ItemType::StoryOnion, int(i), 0 });
+		for (std::size_t i = 0; i < d.story.parts.size(); i++) out.push_back({ ItemType::ShipPart, int(i), 0 });
 	}
-	out.push_back({ ItemType::BigPiece, 0, 0 });
-	for (std::size_t i = 0; i < d.pieces.size(); i++) out.push_back({ ItemType::Piece, int(i), 0 });
+	if (d.modes & MAPMODE_VS) {
+		for (int p = 0; p < 2; p++) {
+			out.push_back({ ItemType::Base, p, 0 });
+			out.push_back({ ItemType::Rocket, p, 0 });
+			for (int c = 0; c < 3; c++) out.push_back({ ItemType::Onion, p, c });
+			out.push_back({ ItemType::Gate, p, 0 });
+			out.push_back({ ItemType::BombPile, p, 0 });
+		}
+		out.push_back({ ItemType::BigPiece, 0, 0 });
+		for (std::size_t i = 0; i < d.pieces.size(); i++) out.push_back({ ItemType::Piece, int(i), 0 });
+	}
 	for (std::size_t i = 0; i < d.pellets.size(); i++) out.push_back({ ItemType::Pellet, int(i), 0 });
 	for (std::size_t i = 0; i < d.guards.size(); i++) out.push_back({ ItemType::Guard, int(i), 0 });
 	for (std::size_t i = 0; i < d.enemies.size(); i++) out.push_back({ ItemType::Enemy, int(i), 0 });
@@ -472,6 +554,23 @@ ItemRef addItem(MapDoc& d, ItemType t, double x, double z, const std::string& as
 		d.objects.push_back(o);
 		return { t, int(d.objects.size()) - 1, 0 };
 	}
+	case ItemType::StoryOnion: {
+		// `asset`: el color ("0" azul, "1" roja, "2" amarilla).
+		DocStoryOnion o;
+		o.color = asset.empty() ? 1 : std::atoi(asset.c_str());
+		o.x     = x;
+		o.z     = z;
+		d.story.onions.push_back(o);
+		return { t, int(d.story.onions.size()) - 1, 0 };
+	}
+	case ItemType::ShipPart: {
+		DocShipPart p;
+		if (!asset.empty()) p.id = asset;
+		p.x = x;
+		p.z = z;
+		d.story.parts.push_back(p);
+		return { t, int(d.story.parts.size()) - 1, 0 };
+	}
 	default: return { t, 0, 0 };
 	}
 }
@@ -493,6 +592,8 @@ void removeItems(MapDoc& d, std::vector<ItemRef> items)
 		case ItemType::Enemy: d.enemies.erase(d.enemies.begin() + long(i)); break;
 		case ItemType::Object: d.objects.erase(d.objects.begin() + long(i)); break;
 		case ItemType::Gen: d.gens.erase(d.gens.begin() + long(i)); break;
+		case ItemType::StoryOnion: d.story.onions.erase(d.story.onions.begin() + long(i)); break;
+		case ItemType::ShipPart: d.story.parts.erase(d.story.parts.begin() + long(i)); break;
 		default: break;
 		}
 	}

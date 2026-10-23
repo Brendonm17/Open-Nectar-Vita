@@ -17,5 +17,11 @@ struct TemplateInfo {
 	nectar::MapDoc (*build)();
 };
 const std::vector<TemplateInfo>& mapTemplates();
+/// Datos del juego para los objetos del juego (plantas, hierba...) de las
+/// plantillas; sin ellos, las plantillas salen sin esos objetos.
+void setTemplateDataDir(const std::string& dataDir);
+/// La arena VS de serie (maps/vs/impact_arena), hecha con lo mismo que las
+/// plantillas pero sin objetos del juego (va dentro del ejecutable).
+nectar::MapDoc impactArena();
 
 } // namespace nm

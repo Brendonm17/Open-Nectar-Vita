@@ -42,6 +42,24 @@ struct CNode {
 		mNext   = nullptr;
 	}
 
+#ifdef PIKI_PC_PORT
+	// Vacia la lista de hijos dejando a cada hijo suelto. clearRelations() sobre
+	// un padre con hijos los dejaba con mParent/mNext viejos: el siguiente del()
+	// o add() de un hijo recorria nodos ya reutilizados o liberados (#157).
+	inline void detachChildren()
+	{
+		CNode* child = mChild;
+		mChild       = nullptr;
+		for (int guard = 0; child && guard < 0x10000; guard++) {
+			CNode* next    = child->mNext;
+			child->mParent = nullptr;
+			child->mPrev   = nullptr;
+			child->mNext   = nullptr;
+			child          = next;
+		}
+	}
+#endif
+
 	/**
 	 * @fabricated
 	 */

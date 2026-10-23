@@ -170,6 +170,11 @@ char* getEnemyResName(int enemyID, int enemyFlags)
 	}
 
 	EnemyInfo* result = getInfo(enemyID, enemyFlags);
+#ifdef PIKI_PC_PORT
+	if (!result) {
+		return (char*)"";
+	}
+#endif
 	return result->mAnimName == "" ? result->mName : result->mAnimName;
 }
 
@@ -190,6 +195,12 @@ int getEnemyID(char* name, int enemyFlags)
 		}
 	}
 
+#ifdef PIKI_PC_PORT
+	// Nombre desconocido (cueva o mapa de mod con un enemigo mal escrito).
+	if (!result) {
+		return -1;
+	}
+#endif
 	return result->mId;
 }
 } // namespace EnemyInfoFunc

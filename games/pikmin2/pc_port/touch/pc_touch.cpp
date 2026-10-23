@@ -61,6 +61,8 @@ enum ButtonId {
 	BTN_BOMB,         // P1: mod Bomb Control
 	BTN_FIRST_PERSON, // mod First Person
 	BTN_GYRO,         // recentrar giroscopio
+	BTN_DPAD_LEFT,    // P2: color anterior con Pikmin en la mano
+	BTN_DPAD_RIGHT,   // P2: color siguiente con Pikmin en la mano
 	BTN_BACK,
 	BTN_MENU_CONFIRM,
 	BTN_COUNT
@@ -94,6 +96,8 @@ const ButtonSpec kButtons[BTN_COUNT] = {
 	{ "bomb", 0.36f, 0.30f, true, 0.05f, 0 },
 	{ "first_person", 0.61f, 0.09f, false, 0.045f, 0 },
 	{ "gyro_recenter", 0.73f, 0.09f, false, 0.045f, 0 },
+	{ "kind_left", 0.42f, 0.19f, true, 0.045f, PAD_BUTTON_LEFT },
+	{ "kind_right", 0.31f, 0.19f, true, 0.045f, PAD_BUTTON_RIGHT },
 	{ "back", 0.10f, 0.84f, false, 0.055f, PAD_BUTTON_B },
 	{ nullptr, 0.10f, 0.84f, true, 0.055f, PAD_BUTTON_A },
 };
@@ -157,6 +161,14 @@ bool button_modded_off(int i)
 #endif
 #if PIKI_P2_HOST
 		return !(sContext & (i == BTN_DPAD_UP ? PC_TOUCH_CTX_SPRAY_BITTER : PC_TOUCH_CTX_SPRAY_SPICY));
+#else
+		return true;
+#endif
+	}
+	// ←/→: color del Pikmin en la mano (solo P2; en P1 no hacen nada).
+	if (i == BTN_DPAD_LEFT || i == BTN_DPAD_RIGHT) {
+#if PIKI_P2_HOST
+		return !(sContext & PC_TOUCH_CTX_HOLDING);
 #else
 		return true;
 #endif

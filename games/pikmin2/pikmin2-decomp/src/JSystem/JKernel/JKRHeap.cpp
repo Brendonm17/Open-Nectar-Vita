@@ -105,6 +105,14 @@ JKRHeap::JKRHeap(void* startPtr, u32 size, JKRHeap* parentHeap, bool shouldSetEr
 	mInitFlag      = 0;
 }
 
+#ifdef PIKI_PC_PORT
+// Cuenta los freeAll y las destrucciones de montones: pcMovieInterp no
+// interpola un frame si en el último tick se liberó un montón (los viewports
+// pueden apuntar a memoria liberada).
+extern "C" unsigned pc_heap_freeall_serial;
+unsigned pc_heap_freeall_serial = 0;
+#endif
+
 /**
  * @note Address: 0x800233D8
  * @note Size: 0x114
@@ -113,6 +121,10 @@ JKRHeap::~JKRHeap()
 {
 #ifdef PIKI_PC_PORT
 	pc_os_release_sync_range(&mMutex, &mMutex + 1);
+	// Destruir un montón (p. ej. clearHeap al cambiar de subnivel) libera tanto
+	// como un freeAll: quien guarde punteros entre ticks debe enterarse aunque
+	// los objetos nuevos caigan en las mismas direcciones (#160, #162).
+	pc_heap_freeall_serial++;
 #endif
 	mTree.getParent()->removeChild(&mTree);
 	JSUTree<JKRHeap>* nextRootHeap = sRootHeap->mTree.getFirstChild();
@@ -276,13 +288,6 @@ void JKRHeap::callAllDisposer()
  * @note Address: 0x80023730
  * @note Size: 0x2C
  */
-
-#ifdef PIKI_PC_PORT
-// Cuenta los freeAll: pcMovieInterp no interpola un frame si en el último
-// tick se vació un montón (los viewports pueden apuntar a memoria liberada).
-extern "C" unsigned pc_heap_freeall_serial;
-unsigned pc_heap_freeall_serial = 0;
-#endif
 
 void JKRHeap::freeAll()
 {

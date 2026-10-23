@@ -398,6 +398,11 @@ void RandMapMgr::drawFrameBuffer(Graphics& gfx)
 	GXSetCullMode(GX_CULL_BACK);
 	GXSetZMode(GX_FALSE, GX_NEVER, GX_FALSE);
 	GXSetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_CLEAR);
+	// This is an isolated render-to-texture pass. Do not inherit the world's
+	// alpha comparison: several cave-unit radar textures have transparent
+	// texels, and the stale test discarded the complete room quad on the PC
+	// renderer, leaving GXCopyTex with only the black cleared background.
+	GXSetAlphaCompare(GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0);
 	GXSetNumChans(1);
 	GXSetChanMatColor(GX_COLOR0A0, JUtility::TColor(0, 0, 0, 255));
 	GXSetChanCtrl(GX_COLOR0A0, GX_FALSE, GX_SRC_REG, GX_SRC_REG, 0, GX_DF_NONE, GX_AF_NONE);

@@ -1,6 +1,10 @@
 #include "ItemObject.h"
 #include "DebugLog.h"
 #include "Dolphin/os.h"
+#ifdef PIKI_PC_PORT
+#include "system.h"
+#include "settings/pc_settings.h"
+#endif
 
 /**
  * @todo: Documentation
@@ -74,7 +78,32 @@ BombGenItem::BombGenItem(Shape* shape)
 {
 	mCapacity  = -1;
 	mRemaining = 1;
+#ifdef PIKI_PC_PORT
+	mPcRespawnTimer = 0.0f;
+#endif
 }
+
+#ifdef PIKI_PC_PORT
+/**
+ * Mod "Bomb Rock Respawn" (issue #78): en el original una pila gastada solo se
+ * repone al día siguiente. Con el mod vuelve una roca cada cierto tiempo
+ * dentro del mismo día, hasta su capacidad original.
+ */
+void BombGenItem::update()
+{
+	ItemObject::update();
+	const int interval = pc_settings_get_bomb_respawn();
+	if (interval <= 0 || mCapacity <= 0 || mRemaining >= mCapacity) {
+		mPcRespawnTimer = 0.0f;
+		return;
+	}
+	mPcRespawnTimer += gsys->getFrameTime();
+	if (mPcRespawnTimer >= f32(interval)) {
+		mPcRespawnTimer = 0.0f;
+		++mRemaining;
+	}
+}
+#endif
 
 /**
  * @todo: Documentation

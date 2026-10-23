@@ -1,6 +1,7 @@
 #include "course_import.h"
 
 #include "nectar_assets/gen.h"
+#include "nectar_assets/mesh_mod.h"
 #include "nectar_assets/ini.h"
 #include "nectar_assets/mod.h"
 #include "nectar_mapcore/i18n.h"
@@ -13,6 +14,7 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <map>
 
 namespace nm {
 
@@ -236,7 +238,16 @@ bool buildCourseField(const std::string& dataDir, const std::string& course, Cou
 	out = CourseField();
 	nectar::Model m;
 	std::string err;
-	if (!nectar::loadMod(dataDir + "/" + course, m, err) || m.collision.empty()) return false;
+	if (!nectar::loadMod(dataDir + "/" + course, m, err)) return false;
+	if (!buildModelField(m, out)) return false;
+	out.course = course;
+	return true;
+}
+
+bool buildModelField(const nectar::Model& m, CourseField& out)
+{
+	out = CourseField();
+	if (m.collision.empty()) return false;
 	float x0 = 1e30f, z0 = 1e30f, x1 = -1e30f, z1 = -1e30f;
 	for (const nectar::ModCollTri& t : m.collision) {
 		for (int k = 0; k < 3; k++) {
@@ -244,7 +255,6 @@ bool buildCourseField(const std::string& dataDir, const std::string& course, Cou
 			x0 = std::min(x0, p.x), x1 = std::max(x1, p.x), z0 = std::min(z0, p.z), z1 = std::max(z1, p.z);
 		}
 	}
-	out.course = course;
 	out.cell   = std::max(10.0f, std::max(x1 - x0, z1 - z0) / 400.0f);
 	out.minX   = x0;
 	out.minZ   = z0;
@@ -404,6 +414,142 @@ bool importCourse(const std::string& dataDir, const CourseChoice& c, nectar::Map
 	}
 	while (d.pieces.size() > 16) d.pieces.pop_back();
 	return true;
+}
+
+const std::vector<GameGenChoice>& gameGenCatalog(const std::string& dataDir)
+{
+	static std::string sDir;
+	static std::vector<GameGenChoice> sList;
+	static bool sDone = false;
+	if (sDone && sDir == dataDir) return sList;
+	sDone = true;
+	sDir  = dataDir;
+	sList.clear();
+	struct Best {
+		int score = -1;
+		GameGenChoice choice;
+	};
+	std::map<std::string, Best> best;
+	std::vector<std::string> order;
+	std::vector<std::string> dirs;
+	for (const CourseChoice& c : storyCourses()) dirs.push_back(c.genDir);
+	for (const CourseChoice& c : challengeCourses()) dirs.push_back(c.genDir);
+	for (const std::string& dir : dirs) {
+		std::error_code ec;
+		std::vector<fs::path> files;
+		for (const auto& e : fs::directory_iterator(dataDir + "/" + dir, ec)) {
+			if (e.path().extension() == ".gen") files.push_back(e.path());
+		}
+		std::sort(files.begin(), files.end());
+		for (const fs::path& path : files) {
+			nectar::GenFile gf;
+			std::string why;
+			if (!nectar::loadGen(path.string(), gf, why)) continue;
+			for (const nectar::Generator& g : gf.generators) {
+				const std::string kind = idStr(g.object.kind);
+				if (kind == "pelt") continue; // pastillas y piezas: las del editor
+				// La roca que se empuja guarda su sitio en absoluto (no se puede
+				// mover): para eso está el bloque del editor.
+				if (kind == "work" && g.object.name == "move stone") continue;
+				nectar::DocGen dg;
+				if (!describe(g, dg)) continue;
+				const std::string area = idStr(g.area.kind), type = idStr(g.type.kind);
+				std::string key = kind + ":";
+				const char* category = "Otros";
+				if (kind == "teki") {
+					key += std::to_string(g.object.type);
+					category = "Enemigos (como en el juego)";
+				} else if (kind == "boss") {
+					key += std::to_string(g.object.type);
+					category = "Jefes y géiseres";
+				} else if (kind == "plnt") {
+					key += std::to_string(g.object.type);
+					category = "Plantas";
+				} else if (kind == "piki") {
+					category = "Pikmin salvajes";
+				} else if (kind == "work") {
+					key += g.object.name;
+					category = "Puertas y construcciones";
+				} else if (kind == "item") {
+					key += g.object.name;
+					category = g.object.name.rfind("sluice", 0) == 0 ? "Puertas y construcciones" : "Hierbas, piedras y bombas";
+				} else {
+					continue;
+				}
+				// La mejor plantilla de cada clase: sin desplazamientos (sale
+				// donde se pone); grupos en círculo para lo que va a montones;
+				// una sola, con giro, para lo demás.
+				const bool group = kind == "teki" || kind == "plnt" || kind == "piki"
+				                || (kind == "item" && g.object.name.find("sluice") == std::string::npos && g.object.name != "bomb gen");
+				int score = (g.offset.x == 0 && g.offset.y == 0 && g.offset.z == 0) ? 8 : 0;
+				score += (g.area.offset.x == 0 && g.area.offset.y == 0 && g.area.offset.z == 0) ? 4 : 0;
+				if (group) score += (area == "circ" ? 2 : 0) + (type == "aton" || type == "irnd" ? 1 : 0);
+				else score += type == "1one" ? 3 : 0;
+				Best& b = best[key];
+				if (b.score < 0) order.push_back(key);
+				if (score <= b.score) continue;
+				b.score           = score;
+				b.choice.key      = key;
+				b.choice.category = category;
+				dg.file           = path.filename() == "plants.gen" ? "plants" : "default";
+				dg.data           = base64(g.raw);
+				b.choice.gen      = dg;
+			}
+		}
+	}
+	for (const std::string& key : order) sList.push_back(best[key].choice);
+	std::stable_sort(sList.begin(), sList.end(), [](const GameGenChoice& a, const GameGenChoice& b) { return a.category < b.category; });
+	return sList;
+}
+
+const GameGenChoice* findGameGen(const std::string& dataDir, const std::string& key)
+{
+	for (const GameGenChoice& c : gameGenCatalog(dataDir)) {
+		if (c.key == key) return &c;
+	}
+	return nullptr;
+}
+
+std::string OfficialPiece::asset() const { return nectar::cutAsset(mod, { lo[0], lo[1], lo[2] }, { hi[0], hi[1], hi[2] }, true); }
+
+const std::vector<OfficialPiece>& officialPieces()
+{
+	static const char* const kForest = "courses/stage1/forest.mod";
+	static const char* const kCave   = "courses/stage2/cave.mod";
+	static const std::vector<OfficialPiece> list = {
+		{ "lata_tumbada", "Lata tumbada", kForest, { -731, -83, 2956 }, { -622, 33, 3118 }, true },
+		{ "lata_abierta", "Lata abierta", kForest, { -1551, -61, 2372 }, { -1419, 43, 2523 }, true },
+		{ "lata_pequena", "Lata pequeña", kForest, { 793, -64, 1094 }, { 912, 33, 1211 }, true },
+		{ "tocon_grande", "Tocón grande", kForest, { 1004, 27, 2282 }, { 1254, 180, 2534 }, true },
+		{ "tocon_ancho", "Tocón ancho", kForest, { -1978, 35, 2579 }, { -1718, 178, 2817 }, true },
+		{ "tocon_mediano", "Tocón", kForest, { -1133, 28, 101 }, { -947, 188, 274 }, true },
+		{ "tocon_bajo", "Tocón bajo", kForest, { 572, 48, 494 }, { 704, 123, 619 }, true },
+		{ "ramita_alta", "Ramita alta", kForest, { 783, 39, 240 }, { 952, 630, 418 }, false },
+		{ "ramita", "Ramita", kForest, { 327, 11, 1253 }, { 398, 300, 1344 }, false },
+		{ "ramita_hojas", "Ramita con hojas", kForest, { 66, 65, 613 }, { 137, 354, 704 }, false },
+		{ "raiz_arco", "Raíz en arco", kForest, { -1231, 25, 1646 }, { -940, 103, 1752 }, true },
+		{ "tronco_y", "Rama en Y", kForest, { 454, 36, 1564 }, { 688, 144, 1878 }, true },
+		{ "rama_curva", "Rama curva", kForest, { -775, -34, 2146 }, { -146, 45, 2478 }, true },
+		{ "ramas_cruzadas", "Ramas cruzadas", kForest, { -1077, 54, 3141 }, { -991, 112, 3199 }, true },
+		{ "helecho", "Helecho", "courses/practice/practice.mod", { -259, -7, 192 }, { -3, 132, 422 }, false },
+		{ "helecho_2", "Helecho abierto", "courses/practice/practice.mod", { -277, -4, 130 }, { -32, 93, 375 }, false },
+		{ "botella", "Botella", kCave, { -1200, -170, 2113 }, { -1102, -34, 2183 }, true },
+		{ "jarra", "Jarra de cristal", kCave, { -1211, -228, 2110 }, { -1130, -160, 2179 }, true },
+		{ "tapa_oxidada", "Chapa oxidada", kCave, { -741, -179, 2642 }, { -603, -112, 2765 }, true },
+		{ "pila_piedra", "Pila de piedra", kCave, { -2097, -396, -1025 }, { -1450, -27, -556 }, true },
+		{ "calavera", "Roca calavera", "courses/stage3/yakusima.mod", { 1458, -60, 1475 }, { 1551, 22, 1577 }, true },
+		{ "calavera_2", "Roca calavera alargada", "courses/stage3/yakusima.mod", { -738, -55, -2659 }, { -638, 25, -2567 }, true },
+		{ "tuberia", "Tubería", "courses/laststage/garden.mod", { -682, 52, 1258 }, { -622, 135, 1343 }, true },
+	};
+	return list;
+}
+
+const OfficialPiece* findOfficialPiece(const std::string& id)
+{
+	for (const OfficialPiece& p : officialPieces()) {
+		if (id == p.id) return &p;
+	}
+	return nullptr;
 }
 
 } // namespace nm

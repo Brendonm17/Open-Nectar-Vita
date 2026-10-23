@@ -78,6 +78,9 @@ struct BombGenItem : public ItemObject {
 
 	bool pickable();
 	bool pick();
+#ifdef PIKI_PC_PORT
+	virtual void update(); // _E0, mod "Bomb Rock Respawn"
+#endif
 
 	inline bool isValid()
 	{
@@ -96,6 +99,9 @@ struct BombGenItem : public ItemObject {
 	// _00-_3C8 = ItemObject
 	s16 mCapacity;  // _3C8, a capacity of -1 gives infinite bombs.
 	s16 mRemaining; // _3CA
+#ifdef PIKI_PC_PORT
+	f32 mPcRespawnTimer; // segundos hasta reponer la siguiente roca
+#endif
 };
 
 /**

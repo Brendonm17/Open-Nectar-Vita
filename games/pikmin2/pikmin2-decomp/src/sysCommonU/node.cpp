@@ -249,6 +249,13 @@ void CNode::del()
 		oldChild = curChild;
 		curChild = curChild->mNext;
 	}
+#ifdef PIKI_PC_PORT
+	// No estaba en la lista de su padre (el padre se vació sin soltarnos): nos
+	// soltamos igual para que un add() posterior no arrastre enlaces viejos.
+	mPrev   = nullptr;
+	mNext   = nullptr;
+	mParent = nullptr;
+#endif
 }
 
 /**

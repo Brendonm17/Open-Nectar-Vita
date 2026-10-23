@@ -101,6 +101,9 @@ bool TOneEmitter::create(Arg*)
  */
 void TOneEmitter::fade()
 {
+#ifdef PIKI_PC_PORT
+	mContext.detachChildren();
+#endif
 	mContext.clearRelations();
 	if (mEmitter) {
 		particleMgr->fade(mEmitter);
@@ -115,6 +118,9 @@ void TOneEmitter::fade()
  */
 void TOneEmitter::forceKill()
 {
+#ifdef PIKI_PC_PORT
+	mContext.detachChildren();
+#endif
 	mContext.clearRelations();
 	if (mEmitter) {
 		particleMgr->forceKill(mEmitter);
@@ -195,6 +201,9 @@ void TOneEmitterChasePos::executeAfter(JPABaseEmitter* emitter)
  */
 void TOneEmitterChasePos::fade()
 {
+#ifdef PIKI_PC_PORT
+	mContext.detachChildren();
+#endif
 	mContext.clearRelations();
 	if (mEmitter) {
 		particleMgr->fade(mEmitter);
@@ -209,6 +218,9 @@ void TOneEmitterChasePos::fade()
  */
 void TOneEmitterChasePos::forceKill()
 {
+#ifdef PIKI_PC_PORT
+	mContext.detachChildren();
+#endif
 	mContext.clearRelations();
 	if (mEmitter) {
 		particleMgr->forceKill(mEmitter);

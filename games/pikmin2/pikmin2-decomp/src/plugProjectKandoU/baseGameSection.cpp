@@ -2433,6 +2433,10 @@ void BaseGameSection::startHeap()
  * @note Address: 0x8014FDA4
  * @note Size: 0x2A8
  */
+#ifdef PIKI_PC_PORT
+void pc_navi_lock_reset();
+#endif
+
 void BaseGameSection::clearHeap()
 {
 	TexCaster::Mgr::deleteInstance();
@@ -2504,6 +2508,12 @@ void BaseGameSection::clearHeap()
 	mTheExpHeap->destroy();
 	mTheExpHeap = nullptr;
 	theExpHeap  = nullptr;
+#ifdef PIKI_PC_PORT
+	// La tabla de viewports y los Viewport del splitter vivían en ese montón:
+	// sin esto Graphics seguía apuntándoles hasta el siguiente initViewports.
+	sys->mGfx->deleteViewports();
+	pc_navi_lock_reset();
+#endif
 	mBackupHeap->becomeCurrentHeap();
 	JKRGetCurrentHeap()->getFreeSize();
 }

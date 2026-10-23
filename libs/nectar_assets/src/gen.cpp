@@ -27,6 +27,7 @@ void readParams(Reader& r, std::vector<GenParam>& out)
 		p.id                  = std::uint32_t(head) & 0xFFFFFF00u;
 		const std::size_t len = std::uint32_t(head) & 0xFFu;
 		if (!r.need(len)) return;
+		p.offset = r.pos; // absoluto; parseGen lo pasa a relativo al generador
 		p.bytes.assign(r.data + r.pos, r.data + r.pos + len);
 		r.skip(len);
 		out.push_back(p);
@@ -185,6 +186,9 @@ bool parseGen(const std::uint8_t* data, std::size_t size, GenFile& out, std::str
 			return false;
 		}
 		g.raw.assign(data + start, data + r.pos);
+		for (GenPart* part : { static_cast<GenPart*>(&g.object), static_cast<GenPart*>(&g.area), &g.type }) {
+			for (GenParam& p : part->params) p.offset -= start;
+		}
 		out.generators.push_back(g);
 	}
 	return true;

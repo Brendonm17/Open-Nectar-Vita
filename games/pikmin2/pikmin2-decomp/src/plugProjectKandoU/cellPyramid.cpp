@@ -86,7 +86,7 @@ static bool pcPyramidOwnsCell(CellPyramid* pyramid, Cell* cell)
 
 static bool pcCellLegIsLive(CellPyramid* pyramid, CellLeg& leg)
 {
-	if (!pyramid || pcPyramidOwnsCell(pyramid, leg.mCell)) {
+	if (!pyramid || (leg.mPcGen == pyramid->mPcGen && pcPyramidOwnsCell(pyramid, leg.mCell))) {
 		return true;
 	}
 	static bool sWarned = false;
@@ -909,10 +909,17 @@ void CellLayer::drawCell(Graphics&, Vector3f&, int, int, f32) const
  * @note Address: 0x801582BC
  * @note Size: 0x3C
  */
+#ifdef PIKI_PC_PORT
+static u32 sPcCellGen = 0;
+#endif
+
 CellPyramid::CellPyramid()
 {
 	mLayerCount = 0;
 	mFreeMemory = 0;
+#ifdef PIKI_PC_PORT
+	mPcGen = ++sPcCellGen;
+#endif
 }
 
 /**
@@ -931,6 +938,10 @@ void CellPyramid::clear()
 	mXNode.mPrev = 0;
 	mZNode.mNext = 0;
 	mZNode.mPrev = 0;
+#ifdef PIKI_PC_PORT
+	// Las celdas quedan vacías: las patas que aún les apunten ya no valen.
+	mPcGen = ++sPcCellGen;
+#endif
 }
 
 char* CellPyramid::sCellBugName = "none";
@@ -1035,6 +1046,9 @@ void CellPyramid::entry(CellObject* object, Sys::Sphere& sphere, int& layerIndex
 				}
 
 				cell->entry(&object->mCellLegs[legIndex], pikiOrNavi);
+#ifdef PIKI_PC_PORT
+				object->mCellLegs[legIndex].mPcGen = mPcGen;
+#endif
 
 				bool legCheck = cell->mLeg->findLeg(&object->mCellLegs[legIndex]);
 				if (!legCheck) {

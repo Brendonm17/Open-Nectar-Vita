@@ -1,18 +1,17 @@
 #include "pc_vs_map.h"
+#include "pc_map_catalog.h"
 
 #include "pc_vs_default_map.h" // generado por CMake desde maps/vs/impact_arena/map.json
 
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
-#include <filesystem>
 #include <fstream>
 #include <sstream>
 
 namespace {
 
 constexpr const char* kDiskMap  = "maps/vs/impact_arena/map.json";
-constexpr const char* kUserMaps = "user/maps/vs";
 
 std::string sSelected; // "" = la arena de serie
 std::string sFile;     // si no está vacío, un map.json por ruta (--vs-map)
@@ -33,7 +32,6 @@ bool readText(const std::string& path, std::string& out)
 	return true;
 }
 
-std::string userMapFile(const std::string& id) { return std::string(kUserMaps) + "/" + id + "/map.json"; }
 
 // La arena de serie: la de disco si vale, si no la incluida.
 bool loadBuiltIn(PcVsMap& out, std::string& error, std::string* source = nullptr)
@@ -51,15 +49,15 @@ bool loadBuiltIn(PcVsMap& out, std::string& error, std::string* source = nullptr
 	return nectar::parseMap(kPcVsDefaultMap, out, error);
 }
 
+// Un mapa de usuario: tiene que poder jugarse en VS.
 bool loadPath(const std::string& path, PcVsMap& out, std::string& error, std::string* source = nullptr)
 {
-	std::string text;
-	if (!readText(path, text)) {
-		error = "no se encuentra " + path;
+	if (!pc_map_catalog_load(path, out, error, source)) return false;
+	if (!(out.modes & nectar::MAPMODE_VS)) {
+		error = "este mapa no es para VS";
 		return false;
 	}
-	if (source) *source = text;
-	return nectar::parseMap(text, out, error);
+	return true;
 }
 
 } // namespace
@@ -79,27 +77,12 @@ const std::vector<PcVsMapEntry>& pc_vs_map_list(bool rescan)
 	}
 	sList.push_back(builtIn);
 
-	namespace fs = std::filesystem;
-	std::error_code ec;
-	std::vector<PcVsMapEntry> user;
-	for (fs::directory_iterator it(kUserMaps, ec), end; !ec && it != end; it.increment(ec)) {
-		if (!it->is_directory(ec)) continue;
-		PcVsMapEntry e;
-		e.id = it->path().filename().string();
-		if (!fs::exists(userMapFile(e.id), ec)) continue;
-		PcVsMap um;
-		if (loadPath(userMapFile(e.id), um, e.error)) {
-			e.name   = um.name;
-			e.author = um.author;
-		} else {
-			e.name = e.id;
-		}
-		const fs::path thumb = it->path() / "thumb.png";
-		if (fs::exists(thumb, ec)) e.thumb = thumb.string();
-		user.push_back(e);
+	// Los de VS del catálogo y los que no se pueden leer de la carpeta de VS
+	// (para enseñar el motivo).
+	for (const PcMapCatalogEntry& c : pc_map_catalog(rescan)) {
+		if (!(c.modes & nectar::MAPMODE_VS) && !(c.modes == 0 && c.legacy)) continue;
+		sList.push_back({ c.id, c.name, c.author, c.thumb, c.error });
 	}
-	std::sort(user.begin(), user.end(), [](const PcVsMapEntry& a, const PcVsMapEntry& b) { return a.id < b.id; });
-	sList.insert(sList.end(), user.begin(), user.end());
 	return sList;
 }
 
@@ -133,7 +116,7 @@ const PcVsMap* pc_vs_map()
 	bool ok;
 	if (!sFile.empty()) ok = loadPath(sFile, sMap, sError, &sText);
 	else if (sSelected.empty()) ok = loadBuiltIn(sMap, sError, &sText);
-	else ok = loadPath(userMapFile(sSelected), sMap, sError, &sText);
+	else ok = loadPath(pc_map_catalog_file(sSelected), sMap, sError, &sText);
 	if (!ok) sText.clear();
 	if (!ok) {
 		const std::string which = !sFile.empty() ? sFile : (sSelected.empty() ? "arena de serie" : sSelected);

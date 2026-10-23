@@ -216,6 +216,7 @@ enum {
 	JointName        = 0x61,   //
 	CollisionPrism   = 0x100,  //
 	CollisionGrid    = 0x110,  //
+	PcArrayBase      = 0xF00,  // PC port: tramo de índices de cada malla (mapas del editor)
 	EndOfFile        = 0xFFFF, //
 } END_ENUM_TYPE;
 

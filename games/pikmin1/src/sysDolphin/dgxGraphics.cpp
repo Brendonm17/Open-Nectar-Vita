@@ -1375,6 +1375,19 @@ void DGXGraphics::setupVtxDesc(Shape* model, Material* mat, Mesh* mesh)
 		GXSetVtxDesc(GX_VA_CLR0, GX_NONE);
 		sendColIndx = false;
 	}
+
+#if defined(PIKI_PC_PORT)
+	// Mapas grandes del editor: cada malla indexa su propio tramo de los arrays.
+	if (mesh->mPcHasArrayBase && !mCustomScale) {
+		const int* base = mesh->mPcArrayBase;
+		if (model->mVertexList) GXSetArray(GX_VA_POS, model->mVertexList + base[0], sizeof(Vector3f));
+		if (model->mNormalList) GXSetArray(GX_VA_NRM, model->mNormalList + base[1], sizeof(Vector3f));
+		if (model->mVtxColorList) GXSetArray(GX_VA_CLR0, model->mVtxColorList + base[2], sizeof(Colour));
+		for (int i = 0; i < model->mTotalActiveTexCoords && i < 8; i++) {
+			if (model->mTexCoordList[i]) GXSetArray(GXAttr(GX_VA_TEX0 + i), model->mTexCoordList[i] + base[3 + i], sizeof(Vector2f));
+		}
+	}
+#endif
 }
 
 /**

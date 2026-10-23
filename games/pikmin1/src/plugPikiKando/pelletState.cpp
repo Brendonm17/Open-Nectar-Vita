@@ -10,6 +10,7 @@
 #include "Stickers.h"
 #if defined(PIKI_PC_PORT)
 #include "pc_coop.h"
+#include "mods/pc_mission.h"
 #endif
 #include "Suckable.h"
 #include "UfoItem.h"
@@ -251,7 +252,7 @@ void PelletGoalState::init(Pellet* pelt)
 #if defined(PIKI_PC_PORT)
 		// VS: la pieza solo puntúa; nada de escenas de la historia (motor,
 		// "pieza recuperada", despegue).
-		if (pc_vs_active()) {
+		if (pc_vs_active() || pc_mission_active()) {
 		} else
 #endif
 		if (!playerState->mDemoFlags.isFlag(DEMOFLAG_CollectEngine)) {
@@ -273,7 +274,7 @@ void PelletGoalState::init(Pellet* pelt)
 			gameflow.mGameInterface->movie(DEMOID_CollectPart, 0, pelt, &pelt->mSRT.t, &pelt->mSRT.r, CAF_AllVisibleMask, true);
 		}
 #if defined(PIKI_PC_PORT)
-		if (!pc_vs_active())
+		if (!pc_vs_active() && !pc_mission_active())
 #endif
 		playerState->preloadHenkaMovie();
 
@@ -360,6 +361,9 @@ void PelletGoalState::exec(Pellet* pelt)
 			pelt->mTargetGoal->finishSuck(pelt);
 		} else {
 			pelt->mTargetGoal->suckMe(pelt);
+#if defined(PIKI_PC_PORT)
+			pc_mission_note_pellet(pelt->mConfig->mPelletId.mId);
+#endif
 		}
 
 		pelt->mIsAlive = false;

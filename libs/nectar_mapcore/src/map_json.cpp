@@ -10,6 +10,7 @@
 
 #include "nectar_mapcore/i18n.h"
 #include "nectar_assets/gen.h"
+#include "nectar_assets/mesh_mod.h"
 
 namespace nectar {
 
@@ -18,7 +19,7 @@ using json = nlohmann::json;
 namespace {
 
 // Lo que caben en los arrays del juego (gameCoreSection, pc_vs_arena_*_spots).
-constexpr std::size_t kMaxPellets = 16, kMaxPieces = 16, kMaxGuards = 4;
+constexpr std::size_t kMaxPellets = kMapMaxPellets, kMaxPieces = kMapMaxPieces, kMaxGuards = kMapMaxGuards;
 
 const char* const kPieceNames[] = { "small_a", "small_b", "small_c", "guarded", "pond" };
 const char* const kOnionNames[] = { "blue", "red", "yellow" };
@@ -86,6 +87,39 @@ int pieceKind(const std::string& s)
 		if (s == kPieceNames[i]) return i;
 	}
 	throw std::runtime_error(tr("tipo de pieza desconocido: ") + s);
+}
+
+const char* const kModeNames[]      = { "vs", "solo", "coop" };
+const char* const kObjectiveNames[] = { "parts", "pellets", "pikmin", "boss", "survive", "waves" };
+const char* const kCondNames[] = { "parts", "pellets", "bosses", "day", "hour", "time", "after", "area", "object", "pikmin", "enemies" };
+const char* const kActNames[]  = { "message", "textbox", "spawn", "spawn_at", "break", "win", "lose", "endday", "countdown", "camera" };
+const char* const kThenNames[] = { "", "lose", "win", "endday" };
+
+template <size_t N> int nameIndex(const char* const (&names)[N], const std::string& s, const char* what)
+{
+	for (size_t i = 0; i < N; i++) {
+		if (s == names[i]) return int(i);
+	}
+	throw std::runtime_error(std::string(tr(what)) + s);
+}
+int condOf(const std::string& s) { return nameIndex(kCondNames, s, "condición desconocida: "); }
+int actOf(const std::string& s) { return nameIndex(kActNames, s, "acción desconocida: "); }
+int thenOf(const std::string& s) { return nameIndex(kThenNames, s, "fin de cuenta atrás desconocido: "); }
+
+unsigned mapModeOf(const std::string& s)
+{
+	for (int i = 0; i < 3; i++) {
+		if (s == kModeNames[i]) return 1u << i;
+	}
+	throw std::runtime_error(tr("modo desconocido: ") + s);
+}
+
+int objectiveOf(const std::string& s)
+{
+	for (int i = 0; i < 6; i++) {
+		if (s == kObjectiveNames[i]) return i;
+	}
+	throw std::runtime_error(tr("objetivo desconocido: ") + s);
 }
 
 int onionColor(const std::string& s)
@@ -197,8 +231,17 @@ json materialJson(const DocMaterial& m)
 
 void parseDoc(const json& root, MapDoc& m)
 {
-	if (root.at("format").get<int>() != 1) throw std::runtime_error(tr("versión de formato no soportada"));
-	if (root.at("mode").get<std::string>() != "vs") throw std::runtime_error(tr("solo hay mapas \"vs\""));
+	const int format = root.at("format").get<int>();
+	if (format == 1) {
+		if (root.at("mode").get<std::string>() != "vs") throw std::runtime_error(tr("el formato 1 solo admite mapas \"vs\""));
+		m.modes = MAPMODE_VS;
+	} else if (format == 2) {
+		m.modes = 0;
+		for (const json& j : root.at("modes")) m.modes |= mapModeOf(j.get<std::string>());
+		if (!m.modes) throw std::runtime_error(tr("modes: hace falta al menos un modo"));
+	} else {
+		throw std::runtime_error(tr("versión de formato no soportada"));
+	}
 	const std::string sym = root.value("symmetry", "none");
 	if (sym != "none" && sym != "rotate180") throw std::runtime_error(tr("simetría desconocida: ") + sym);
 	m.symmetric = sym == "rotate180";
@@ -217,6 +260,14 @@ void parseDoc(const json& root, MapDoc& m)
 
 	const json& env = root.at("environment");
 	m.baseStage     = env.at("baseStage").get<std::string>();
+	m.music         = env.value("music", std::string());
+	m.startHour     = env.value("startHour", 0.0);
+	m.endHour       = env.value("endHour", 0.0);
+	m.brightness    = env.value("brightness", 1.0);
+	m.fogScale      = env.value("fog", 1.0);
+	if (env.contains("tint")) {
+		for (int i = 0; i < 3; i++) m.tint[i] = env["tint"].at(i).get<int>();
+	}
 	const json& sun = env.at("sun").at("dir");
 	for (int i = 0; i < 3; i++) m.sun[i] = sun.at(i).get<double>();
 
@@ -330,6 +381,7 @@ void parseDoc(const json& root, MapDoc& m)
 		g.z           = o.at(2).get<double>();
 		g.label       = gj.value("label", std::string());
 		g.model       = gj.value("model", std::string());
+		g.mirror      = gj.value("mirror", false);
 		m.gens.push_back(g);
 	}
 	for (const json& p : root.value("props", json::array())) {
@@ -346,6 +398,7 @@ void parseDoc(const json& root, MapDoc& m)
 		}
 		d.scale   = p.value("scale", 1.0);
 		d.collide = p.value("collide", true);
+		d.ground  = p.value("ground", false);
 		m.props.push_back(d);
 	}
 
@@ -355,56 +408,87 @@ void parseDoc(const json& root, MapDoc& m)
 	m.routeMargin = r.at("margin").get<double>();
 	for (const json& x : r.value("barrierX", json::array())) m.barrierX.push_back(x.get<double>());
 	for (const json& p : r.value("passes", json::array())) m.passes.push_back({ p.at(0).get<double>(), p.at(1).get<double>() });
-
-	const json& vs = root.at("vs");
-	perPlayer(vs.at("bases"), m.bases, "bases");
-	perPlayer(vs.at("rockets"), m.rockets, "rockets");
-	perPlayer(vs.at("gates"), m.gates, "gates", true);
-	perPlayer(vs.at("bombPiles"), m.bombPiles, "bombPiles");
-	bool onion[2][3] = {};
-	for (const json& j : vs.at("onions")) {
-		DocOnion o;
-		o.player = playerOf(j);
-		o.color  = onionColor(j.at("color").get<std::string>());
-		pos2(j, o.x, o.z);
-		m.onions[o.player][o.color] = o;
-		onion[o.player][o.color]    = true;
-	}
-	for (int p = 0; p < 2; p++) {
-		for (int c = 0; c < 3; c++) {
-			if (!onion[p][c]) throw std::runtime_error(tr("vs.onions: falta una cebolla"));
+	for (const json& l : r.value("links", json::array())) {
+		MapDoc::RouteLink link;
+		for (int i = 0; i < 3; i++) {
+			link.a[i] = l.at(i).get<double>();
+			link.b[i] = l.at(3 + i).get<double>();
 		}
+		m.routeLinks.push_back(link);
 	}
-	for (const json& j : vs.value("pellets", json::array())) {
+	for (const json& b : r.value("blocks", json::array())) {
+		std::vector<std::pair<double, double>> poly;
+		for (const json& p : b) poly.push_back({ p.at(0).get<double>(), p.at(1).get<double>() });
+		if (poly.size() >= 3) m.routeBlocks.push_back(poly);
+	}
+
+	// Lo propio de VS, en "vs" (obligatorio si se juega en VS). Lo que
+	// comparten todos los modos (pastillas, guardianes, enemigos y
+	// construcciones) también está ahí en el formato 1; en el 2, en "entities".
+	const json none   = json::object();
+	const bool hasVs  = root.contains("vs");
+	const json& vs    = hasVs ? root.at("vs") : none;
+	if ((m.modes & MAPMODE_VS) && !hasVs) throw std::runtime_error(tr("falta la sección \"vs\""));
+	if (hasVs) {
+		perPlayer(vs.at("bases"), m.bases, "bases");
+		perPlayer(vs.at("rockets"), m.rockets, "rockets");
+		perPlayer(vs.at("gates"), m.gates, "gates", true);
+		perPlayer(vs.at("bombPiles"), m.bombPiles, "bombPiles");
+		bool onion[2][3] = {};
+		for (const json& j : vs.at("onions")) {
+			DocOnion o;
+			o.player = playerOf(j);
+			o.color  = onionColor(j.at("color").get<std::string>());
+			pos2(j, o.x, o.z);
+			m.onions[o.player][o.color] = o;
+			onion[o.player][o.color]    = true;
+		}
+		for (int p = 0; p < 2; p++) {
+			for (int c = 0; c < 3; c++) {
+				if (!onion[p][c]) throw std::runtime_error(tr("vs.onions: falta una cebolla"));
+			}
+		}
+		for (const json& j : vs.value("pieces", json::array())) {
+			DocPiece d;
+			d.kind = pieceKind(j.at("kind").get<std::string>());
+			d.part = j.value("part", "");
+			pos2(j, d.x, d.z);
+			m.pieces.push_back(d);
+		}
+		pos2(vs.at("bigPiece"), m.bigX, m.bigZ);
+	}
+	const json& ent = format == 1 ? vs : (root.contains("entities") ? root.at("entities") : none);
+	for (const json& j : ent.value("pellets", json::array())) {
 		DocPellet d;
 		d.id = j.at("id").get<std::string>();
 		pos2(j, d.x, d.z);
 		m.pellets.push_back(d);
 	}
-	for (const json& j : vs.value("pieces", json::array())) {
-		DocPiece d;
-		d.kind = pieceKind(j.at("kind").get<std::string>());
-		d.part = j.value("part", "");
-		pos2(j, d.x, d.z);
-		m.pieces.push_back(d);
-	}
-	pos2(vs.at("bigPiece"), m.bigX, m.bigZ);
-	for (const json& j : vs.value("guards", json::array())) {
+	for (const json& j : ent.value("guards", json::array())) {
 		DocGuard d;
 		d.enemy = j.value("enemy", "chappy");
 		pos2(j, d.x, d.z);
 		d.reaction = parseReaction(j);
 		m.guards.push_back(d);
 	}
-	for (const json& j : vs.value("enemies", json::array())) {
+	for (const json& j : ent.value("enemies", json::array())) {
 		DocEnemy e;
 		e.type = j.at("type").get<std::string>();
 		pos2(j, e.x, e.z);
 		e.face = j.value("face", 0.0);
 		e.reaction = parseReaction(j);
+		e.respawn     = j.value("respawn", std::string("auto"));
+		e.respawnDays = j.value("respawnDays", 1);
+		e.fromDay     = j.value("fromDay", 0);
+		e.untilDay    = j.value("untilDay", 0);
+		if (e.respawn != "auto" && e.respawn != "always" && e.respawn != "never" && e.respawn != "days")
+			throw std::runtime_error(tr("enemigo: respawn desconocido: ") + e.respawn);
+		if (e.respawnDays < 1 || e.respawnDays > 30) throw std::runtime_error(tr("enemigo: respawnDays de 1 a 30"));
+		if (e.fromDay < 0 || e.untilDay < 0 || (e.untilDay && e.untilDay < e.fromDay))
+			throw std::runtime_error(tr("enemigo: fromDay / untilDay no válidos"));
 		m.enemies.push_back(e);
 	}
-	for (const json& j : vs.value("objects", json::array())) {
+	for (const json& j : ent.value("objects", json::array())) {
 		DocObject o;
 		o.kind = j.at("kind").get<std::string>();
 		pos2(j, o.x, o.z);
@@ -417,26 +501,136 @@ void parseDoc(const json& root, MapDoc& m)
 		o.reaction = parseReaction(j);
 		m.objects.push_back(o);
 	}
+
+	if (!root.contains("story")) {
+		if (m.modes & (MAPMODE_SOLO | MAPMODE_COOP)) throw std::runtime_error(tr("falta la sección \"story\""));
+		return;
+	}
+	const json& st = root.at("story");
+	DocStory& s    = m.story;
+	s.present      = true;
+	s.captainCount = 0;
+	for (const json& j : st.at("captains")) {
+		if (s.captainCount >= 2) throw std::runtime_error(tr("story.captains: como mucho 2"));
+		DocSpot& c = s.captains[s.captainCount];
+		c.player   = s.captainCount++;
+		pos2(j, c.x, c.z);
+		c.face = j.value("face", 0.0);
+	}
+	if (!s.captainCount) throw std::runtime_error(tr("story.captains: falta el del jugador 1"));
+	pos2(st.at("ship"), s.ship.x, s.ship.z);
+	s.ship.face = st.at("ship").value("face", 0.0);
+	for (const json& j : st.value("onions", json::array())) {
+		DocStoryOnion o;
+		o.color = onionColor(j.at("color").get<std::string>());
+		pos2(j, o.x, o.z);
+		o.buried = j.value("buried", false);
+		s.onions.push_back(o);
+	}
+	for (const json& j : st.value("parts", json::array())) {
+		DocShipPart d;
+		d.id = j.at("id").get<std::string>();
+		pos2(j, d.x, d.z);
+		s.parts.push_back(d);
+	}
+	const json& rj = st.contains("rules") ? st.at("rules") : none;
+	s.rules.objective = rj.value("objective", std::string("parts"));
+	objectiveOf(s.rules.objective);
+	s.rules.target = rj.value("target", 0);
+	s.rules.days   = rj.value("days", 1);
+	if (rj.contains("startPikmin")) {
+		const json& sp = rj.at("startPikmin");
+		for (int c = 0; c < 3; c++) s.rules.startPikmin[c] = sp.value(kOnionNames[c], 0);
+	}
+	if (rj.contains("medals")) {
+		const json& md = rj.at("medals");
+		s.rules.medals[0] = md.value("bronze", 0);
+		s.rules.medals[1] = md.value("silver", 0);
+		s.rules.medals[2] = md.value("gold", 0);
+	}
+	s.rules.timeLimit    = rj.value("timeLimit", 0);
+	s.rules.timeLimitEnd = rj.value("timeLimitEnd", std::string("lose"));
+	if (s.rules.timeLimitEnd != "lose" && s.rules.timeLimitEnd != "endday") throw std::runtime_error(tr("timeLimitEnd: \"lose\" o \"endday\""));
+	for (const json& j : st.value("triggers", json::array())) {
+		DocTrigger t;
+		if (j.contains("when")) {
+			// Formato de antes: una condición, un mensaje y una reacción.
+			DocCondition c;
+			c.type  = j.at("when").get<std::string>();
+			c.count = j.value("count", 1);
+			t.conditions.push_back(c);
+			if (j.contains("message")) {
+				DocAction a;
+				a.type = "message";
+				a.text = j.at("message").get<std::string>();
+				t.actions.push_back(a);
+			}
+			if (j.contains("reaction")) {
+				DocAction a;
+				a.type = "spawn";
+				if (j.contains("pos")) pos2(j, a.x, a.z);
+				a.reaction = parseReaction(j);
+				t.actions.push_back(a);
+			}
+		} else {
+			for (const json& cj : j.at("conditions")) {
+				DocCondition c;
+				c.type  = cj.at("type").get<std::string>();
+				c.count = cj.value("count", 1);
+				c.index = cj.value("index", 0);
+				c.radius = cj.value("radius", 200.0);
+				if (cj.contains("color")) c.color = onionColor(cj.at("color").get<std::string>());
+				if (cj.contains("pos")) pos2(cj, c.x, c.z);
+				t.conditions.push_back(c);
+			}
+			t.any = j.value("match", std::string("all")) == "any";
+			for (const json& aj : j.at("actions")) {
+				DocAction a;
+				a.type    = aj.at("type").get<std::string>();
+				a.text    = aj.value("text", std::string());
+				a.index   = aj.value("index", 0);
+				a.seconds = aj.value("seconds", 60);
+				a.then    = aj.value("then", std::string());
+				if (aj.contains("pos")) pos2(aj, a.x, a.z);
+				a.reaction = parseReaction(aj);
+				t.actions.push_back(a);
+			}
+			t.repeat   = j.value("repeat", false);
+			t.cooldown = j.value("cooldown", 30);
+			t.times    = j.value("times", 0);
+			t.wave     = j.value("wave", false);
+		}
+		for (const DocCondition& c : t.conditions) condOf(c.type);
+		for (const DocAction& a : t.actions) {
+			actOf(a.type);
+			thenOf(a.then);
+		}
+		s.triggers.push_back(t);
+	}
 }
 
-// Lo que el JSON puede decir bien escrito pero el juego no aguanta.
-void check(const MapData& m)
+void checkInside(const MapData& m, float x, float z, const char* what)
 {
-	auto inside = [&](float x, float z, const char* what) {
-		if (x <= m.minX || x >= m.maxX || z <= m.minZ || z >= m.maxZ) {
-			char buf[128];
-			snprintf(buf, sizeof(buf), tr("%s fuera del mapa (%.0f, %.0f)"), what, x, z);
-			throw std::runtime_error(buf);
-		}
-		if (m.course.empty() && !terrainSolid(m, x, z)) {
-			char buf[128];
-			snprintf(buf, sizeof(buf), tr("%s sin suelo debajo (%.0f, %.0f)"), what, x, z);
-			throw std::runtime_error(buf);
-		}
-	};
-	if (m.minX >= m.maxX || m.minZ >= m.maxZ) throw std::runtime_error(tr("bounds vacíos"));
-	if (m.cell <= 0.0f) throw std::runtime_error(tr("terrain.cell debe ser positivo"));
-	if (m.routeStep <= 0.0f) throw std::runtime_error(tr("routes.step debe ser positivo"));
+	if (x <= m.minX || x >= m.maxX || z <= m.minZ || z >= m.maxZ) {
+		char buf[128];
+		snprintf(buf, sizeof(buf), tr("%s fuera del mapa (%.0f, %.0f)"), what, x, z);
+		throw std::runtime_error(buf);
+	}
+	// Con mallas que se pisan, el suelo puede ser de ellas (lo comprueba el
+	// editor con el mapa compilado).
+	bool meshGround = false;
+	for (const MapProp& p : m.props) meshGround = meshGround || p.ground;
+	if (m.course.empty() && !meshGround && !terrainSolid(m, x, z)) {
+		char buf[128];
+		snprintf(buf, sizeof(buf), tr("%s sin suelo debajo (%.0f, %.0f)"), what, x, z);
+		throw std::runtime_error(buf);
+	}
+}
+
+// Lo que pide VS: bases, cohetes, compuertas, cebollas y piezas de cada jugador.
+void checkVs(const MapData& m)
+{
+	auto inside = [&](float x, float z, const char* what) { checkInside(m, x, z, what); };
 	for (int p = 0; p < 2; p++) {
 		inside(m.bases[p].x, m.bases[p].z, tr("base"));
 		inside(m.rockets[p].x, m.rockets[p].z, tr("cohete"));
@@ -444,12 +638,114 @@ void check(const MapData& m)
 		inside(m.bombPiles[p].x, m.bombPiles[p].z, tr("montón de bombas"));
 		for (const MapSpot& o : m.onions[p]) inside(o.x, o.z, tr("cebolla"));
 	}
-	for (const MapPellet& s : m.pellets) inside(s.x, s.z, tr("pastilla"));
 	for (const MapPiece& s : m.pieces) inside(s.x, s.z, tr("pieza"));
+	inside(m.bigPiece.x, m.bigPiece.z, tr("pieza grande"));
+	if (m.pieces.empty()) throw std::runtime_error(tr("hace falta al menos una pieza"));
+	if (m.pieces.size() > kMaxPieces) throw std::runtime_error(tr("demasiadas piezas (máximo 32, contando las de J2)"));
+}
+
+// Lo que piden solo y coop: capitanes, nave, cebollas, piezas y reglas.
+void checkStory(const MapData& m, bool coop)
+{
+	auto inside = [&](float x, float z, const char* what) { checkInside(m, x, z, what); };
+	const MapStory& s = m.story;
+	if (coop && s.captainCount < 2) throw std::runtime_error(tr("coop: falta el capitán del jugador 2"));
+	for (int c = 0; c < s.captainCount; c++) inside(s.captains[c].x, s.captains[c].z, tr("capitán"));
+	inside(s.ship.x, s.ship.z, tr("nave"));
+	bool color[3] = {};
+	for (const MapStoryOnion& o : s.onions) {
+		inside(o.x, o.z, tr("cebolla"));
+		if (color[o.color]) throw std::runtime_error(tr("story.onions: cebolla repetida"));
+		color[o.color] = true;
+	}
+	for (std::size_t i = 0; i < s.parts.size(); i++) {
+		inside(s.parts[i].x, s.parts[i].z, tr("pieza de la nave"));
+		for (std::size_t k = 0; k < i; k++) {
+			if (s.parts[k].id == s.parts[i].id) throw std::runtime_error(tr("story.parts: pieza repetida"));
+		}
+	}
+	int pikmin = 0;
+	for (int c = 0; c < 3; c++) {
+		if (s.startPikmin[c] < 0) throw std::runtime_error(tr("story.rules.startPikmin: no puede ser negativo"));
+		if (s.startPikmin[c] > 0 && !color[c]) throw std::runtime_error(tr("story.rules.startPikmin: Pikmin de un color sin cebolla"));
+		pikmin += s.startPikmin[c];
+	}
+	if (pikmin > 100) throw std::runtime_error(tr("story.rules.startPikmin: como mucho 100 en total"));
+	if (s.days < 1 || s.days > 30) throw std::runtime_error(tr("story.rules.days: de 1 a 30"));
+	if (s.target < 0) throw std::runtime_error(tr("story.rules.target: no puede ser negativo"));
+	for (int c = 0; c < 3; c++) {
+		if (s.medals[c] < 0 || (c && s.medals[c] && s.medals[c] < s.medals[c - 1]))
+			throw std::runtime_error(tr("story.rules.medals: bronce <= plata <= oro"));
+	}
+	if (s.triggers.size() > 32) throw std::runtime_error(tr("story.triggers: como mucho 32"));
+	if (s.timeLimit < 0 || s.timeLimit > 7200) throw std::runtime_error(tr("story.rules.timeLimit: de 0 a 7200 segundos"));
+	bool anyWave = false;
+	for (size_t ti = 0; ti < s.triggers.size(); ti++) {
+		const MapTrigger& t = s.triggers[ti];
+		anyWave             = anyWave || t.wave;
+		if (t.conditions.empty() || t.conditions.size() > 8) throw std::runtime_error(tr("disparador: de 1 a 8 condiciones"));
+		if (t.actions.empty() || t.actions.size() > 8) throw std::runtime_error(tr("disparador: de 1 a 8 acciones"));
+		if (t.repeat && (t.cooldown < 1.0f || t.cooldown > 3600.0f || t.times < 0))
+			throw std::runtime_error(tr("disparador: espera de 1 a 3600 s y veces >= 0"));
+		for (const MapCondition& c : t.conditions) {
+			if (c.type == MAPCOND_Hour ? (c.count < 5 || c.count > 22) : c.count < (c.type == MAPCOND_Time || c.type == MAPCOND_After ? 0 : 1))
+				throw std::runtime_error(c.type == MAPCOND_Hour ? tr("disparador: la hora va de 5 a 22") : tr("disparador: la cantidad debe ser 1 o más"));
+			if (c.type == MAPCOND_After && (c.index < 0 || c.index >= int(s.triggers.size()) || c.index == int(ti)))
+				throw std::runtime_error(tr("disparador: «después de» con un disparador que no existe"));
+			if (c.type == MAPCOND_Area) {
+				inside(c.x, c.z, tr("zona de un disparador"));
+				if (c.radius <= 0.0f) throw std::runtime_error(tr("disparador: radio no positivo"));
+			}
+		}
+		for (const MapAction& a : t.actions) {
+			if (a.text.size() > 200) throw std::runtime_error(tr("disparador: texto demasiado largo (200 letras)"));
+			if (a.type == MAPACT_Spawn && a.reaction.kind != MAPREACT_None) inside(a.x, a.z, tr("disparador"));
+			if ((a.type == MAPACT_Spawn || a.type == MAPACT_SpawnAt) && a.reaction.kind == MAPREACT_None)
+				throw std::runtime_error(tr("disparador: «aparecer» sin qué"));
+			if (a.type == MAPACT_Countdown && (a.seconds < 1 || a.seconds > 3600)) throw std::runtime_error(tr("disparador: cuenta atrás de 1 a 3600 s"));
+			if (a.type == MAPACT_Camera) {
+				if (a.seconds < 1 || a.seconds > 30) throw std::runtime_error(tr("disparador: cámara de 1 a 30 s"));
+				inside(a.x, a.z, tr("disparador"));
+			}
+		}
+	}
+	if (s.objective == MAPGOAL_Waves && (!anyWave || s.target < 1)) throw std::runtime_error(tr("objetivo \"waves\": hace falta target y algún disparador de oleada"));
+	switch (s.objective) {
+	case MAPGOAL_Parts:
+		if (s.parts.empty()) throw std::runtime_error(tr("objetivo \"parts\" sin piezas de la nave"));
+		if (s.target > int(s.parts.size())) throw std::runtime_error(tr("story.rules.target: más piezas de las que hay"));
+		break;
+	case MAPGOAL_Pellets:
+		if (m.pellets.empty()) throw std::runtime_error(tr("objetivo \"pellets\" sin pastillas"));
+		break;
+	case MAPGOAL_Pikmin:
+		if (s.target <= 0) throw std::runtime_error(tr("objetivo \"pikmin\": falta target"));
+		if (s.onions.empty()) throw std::runtime_error(tr("objetivo \"pikmin\" sin cebollas"));
+		break;
+	case MAPGOAL_Boss: {
+		bool boss = false;
+		for (const MapEnemy& e : m.enemies) boss = boss || e.boss >= 0;
+		if (!boss) throw std::runtime_error(tr("objetivo \"boss\" sin jefes"));
+		break;
+	}
+	default: break;
+	}
+}
+
+// Lo que el JSON puede decir bien escrito pero el juego no aguanta (común a
+// todos los modos; lo de cada uno, en validateMapMode).
+void check(const MapData& m)
+{
+	auto inside = [&](float x, float z, const char* what) { checkInside(m, x, z, what); };
+	if (!m.modes) throw std::runtime_error(tr("modes: hace falta al menos un modo"));
+	if (m.minX >= m.maxX || m.minZ >= m.maxZ) throw std::runtime_error(tr("bounds vacíos"));
+	if (m.cell <= 0.0f) throw std::runtime_error(tr("terrain.cell debe ser positivo"));
+	if (m.routeStep <= 0.0f) throw std::runtime_error(tr("routes.step debe ser positivo"));
+	for (const MapPellet& s : m.pellets) inside(s.x, s.z, tr("pastilla"));
 	for (const MapSpot& s : m.guards) inside(s.x, s.z, tr("guardián"));
 	for (const MapEnemy& s : m.enemies) inside(s.x, s.z, tr("enemigo"));
 	for (const MapObject& s : m.objects) inside(s.x, s.z, tr("construcción"));
-	if (m.enemies.size() + m.guards.size() > 40) throw std::runtime_error(tr("demasiados enemigos (máximo 40, contando los del otro lado)"));
+	if (m.enemies.size() + m.guards.size() > std::size_t(kMapMaxEnemies)) throw std::runtime_error(tr("demasiados enemigos (máximo 120, contando los del otro lado)"));
 	int possibleTekis = int(m.guards.size()), possibleBosses = 0;
 	for (const MapEnemy& enemy : m.enemies) enemy.boss >= 0 ? ++possibleBosses : ++possibleTekis;
 	auto addReactionCapacity = [&](const MapReaction& reaction) {
@@ -461,15 +757,22 @@ void check(const MapData& m)
 	for (const MapSpot& guard : m.guards) addReactionCapacity(guard.reaction);
 	for (const MapEnemy& enemy : m.enemies) addReactionCapacity(enemy.reaction);
 	for (const MapObject& object : m.objects) addReactionCapacity(object.reaction);
-	if (possibleTekis > 80) throw std::runtime_error(tr("demasiados enemigos posibles con las reacciones (máximo 80)"));
-	if (possibleBosses > 40) throw std::runtime_error(tr("demasiados jefes posibles con las reacciones (máximo 40)"));
-	if (m.objects.size() > 24) throw std::runtime_error(tr("demasiadas construcciones (máximo 24, contando las del otro lado)"));
+	for (const MapTrigger& trigger : m.story.triggers) {
+		// Los que se repiten sin fin no se pueden contar: el juego no crea más
+		// de los que caben.
+		const int times = trigger.repeat ? trigger.times : 1;
+		for (const MapAction& a : trigger.actions) {
+			for (int k = 0; k < times; k++) addReactionCapacity(a.reaction);
+		}
+	}
+	possibleTekis += m.genTekis;
+	possibleBosses += m.genBosses;
+	if (possibleTekis > kMapMaxTekis) throw std::runtime_error(tr("demasiados enemigos posibles con las reacciones (máximo 80)"));
+	if (possibleBosses > kMapMaxBosses) throw std::runtime_error(tr("demasiados jefes posibles con las reacciones (máximo 40)"));
+	if (m.objects.size() > std::size_t(kMapMaxObjects)) throw std::runtime_error(tr("demasiadas construcciones (máximo 64, contando las del otro lado)"));
 	for (const MapProp& s : m.props) inside(s.x, s.z, tr("objeto"));
-	inside(m.bigPiece.x, m.bigPiece.z, tr("pieza grande"));
-	if (m.pieces.empty()) throw std::runtime_error(tr("hace falta al menos una pieza"));
-	if (m.pellets.size() > kMaxPellets) throw std::runtime_error(tr("demasiadas pastillas (máximo 16, contando las de J2)"));
-	if (m.pieces.size() > kMaxPieces) throw std::runtime_error(tr("demasiadas piezas (máximo 16, contando las de J2)"));
-	if (m.guards.size() > kMaxGuards) throw std::runtime_error(tr("demasiados guardianes (máximo 4, contando los de J2)"));
+	if (m.pellets.size() > kMaxPellets) throw std::runtime_error(tr("demasiadas pastillas (máximo 48, contando las de J2)"));
+	if (m.guards.size() > kMaxGuards) throw std::runtime_error(tr("demasiados guardianes (máximo 16, contando los de J2)"));
 	for (const MapPond& p : m.ponds) {
 		if (p.rx <= 0.0f || p.rz <= 0.0f || p.depth <= 0.0f) throw std::runtime_error(tr("charca con radio u hondura no positivos"));
 	}
@@ -477,7 +780,11 @@ void check(const MapData& m)
 		if (w.ax == w.bx && w.az == w.bz) throw std::runtime_error(tr("muro de longitud cero"));
 	}
 	for (const MapProp& p : m.props) {
-		if (p.asset.size() < 5 || p.asset.compare(p.asset.size() - 4, 4, ".mod") != 0) throw std::runtime_error(tr("objeto que no es un .mod: ") + p.asset);
+		// Un .mod, o un recorte de escenario ("cut:<.mod>|caja").
+		std::string cutMod;
+		Vec3 cutLo, cutHi;
+		const bool cut = parseCutAsset(p.asset, cutMod, cutLo, cutHi);
+		if (!cut && (p.asset.size() < 5 || p.asset.compare(p.asset.size() - 4, 4, ".mod") != 0)) throw std::runtime_error(tr("objeto que no es un .mod: ") + p.asset);
 		if (p.asset.find("..") != std::string::npos || p.asset[0] == '/') throw std::runtime_error(tr("ruta de objeto no válida: ") + p.asset);
 		if (!(p.scale > 0.0f)) throw std::runtime_error(tr("objeto con escala no positiva: ") + p.asset);
 	}
@@ -493,8 +800,35 @@ json spotJson(const DocSpot& s, bool face, bool allowReaction = false)
 
 } // namespace
 
+const std::vector<const char*>& musicNames()
+{
+	static const std::vector<const char*> names = { "practice", "forest", "cave", "yakushima", "last" };
+	return names;
+}
+
 const char* pieceKindName(int kind) { return kind >= 0 && kind < 5 ? kPieceNames[kind] : "small_a"; }
 const char* onionColorName(int color) { return color >= 0 && color < 3 ? kOnionNames[color] : "red"; }
+
+const char* mapModeName(MapMode mode)
+{
+	for (int i = 0; i < 3; i++) {
+		if (unsigned(mode) == 1u << i) return kModeNames[i];
+	}
+	return "vs";
+}
+
+bool validateMapMode(const MapData& map, MapMode mode, std::string& error)
+{
+	try {
+		if (!(map.modes & mode)) throw std::runtime_error(tr("el mapa no es para este modo"));
+		if (mode == MAPMODE_VS) checkVs(map);
+		else checkStory(map, mode == MAPMODE_COOP);
+		return true;
+	} catch (const std::exception& e) {
+		error = e.what();
+		return false;
+	}
+}
 
 bool parseMapDoc(const std::string& text, MapDoc& out, std::string& error)
 {
@@ -514,15 +848,27 @@ bool expandMap(const MapDoc& d, MapData& m, std::string& error, bool validate)
 {
 	try {
 		m           = MapData();
+		m.modes     = d.modes;
 		m.name      = d.name;
 		m.author    = d.author;
 		m.baseStage = d.baseStage;
+		m.music     = -1;
+		for (size_t k = 0; k < musicNames().size(); k++) {
+			if (d.music == musicNames()[k]) m.music = int(k);
+		}
+		if (!d.music.empty() && m.music < 0) throw std::runtime_error(tr("música desconocida: ") + d.music);
+		m.startHour = float(d.startHour);
+		m.endHour   = float(d.endHour);
+		if ((d.startHour && (d.startHour < 5 || d.startHour > 20)) || (d.endHour && (d.endHour < 6 || d.endHour > 22))
+		    || (d.startHour && d.endHour && d.endHour < d.startHour + 1))
+			throw std::runtime_error(tr("horas del día no válidas (de 5 a 22, y al menos una hora de día)"));
 		m.sourceMod = d.sourceMod;
+		m.dir       = d.dir;
 		m.course    = d.course;
 		{
 			// Generadores del escenario: a su .gen, con la posición del editor.
 			std::vector<std::vector<std::uint8_t>> def, plants;
-			for (const DocGen& g : d.gens) {
+			auto emit = [&](const DocGen& g) {
 				std::vector<std::uint8_t> raw = fromBase64(g.data);
 				if (raw.size() < kGenPosOffset + 12) throw std::runtime_error(tr("generador roto"));
 				const float pos[3] = { float(g.x), float(g.y), float(g.z) };
@@ -532,6 +878,26 @@ bool expandMap(const MapDoc& d, MapData& m, std::string& error, bool validate)
 					for (int b = 0; b < 4; b++) raw[kGenPosOffset + std::size_t(k) * 4 + std::size_t(b)] = std::uint8_t(v >> (24 - 8 * b));
 				}
 				(g.file == "plants" ? plants : def).push_back(std::move(raw));
+				GenSettings s;
+				if (readGenSettings(g, s)) {
+					if (s.object == "teki") m.genTekis += s.maxCount();
+					if (s.object == "boss") m.genBosses += s.maxCount();
+				}
+			};
+			for (const DocGen& g : d.gens) {
+				emit(g);
+				// Mapa espejo: el gemelo del lado de J2, girado media vuelta.
+				if (g.mirror && d.symmetric) {
+					DocGen twin = g;
+					twin.x      = -g.x;
+					twin.z      = -g.z;
+					GenSettings s;
+					if (readGenSettings(twin, s) && s.hasFace) {
+						s.face = (s.face + 180) % 360;
+						writeGenSettings(twin, s);
+					}
+					emit(twin);
+				}
 			}
 			if (!def.empty()) m.genDefault = writeGen(def);
 			if (!plants.empty()) m.genPlants = writeGen(plants);
@@ -597,7 +963,7 @@ bool expandMap(const MapDoc& d, MapData& m, std::string& error, bool validate)
 			}
 		}
 		for (const DocProp& p : d.props) {
-			MapProp prop { p.asset, float(p.x), float(p.y), float(p.z), deg(float(p.rx)), deg(float(p.ry)), deg(float(p.rz)), float(p.scale), p.collide };
+			MapProp prop { p.asset, float(p.x), float(p.y), float(p.z), deg(float(p.rx)), deg(float(p.ry)), deg(float(p.rz)), float(p.scale), p.collide, p.ground };
 			m.props.push_back(prop);
 			if (twin) {
 				prop.x  = -prop.x;
@@ -611,6 +977,31 @@ bool expandMap(const MapDoc& d, MapData& m, std::string& error, bool validate)
 		m.routeMargin = float(d.routeMargin);
 		for (double x : d.barrierX) m.barrierX.push_back(float(x));
 		for (const auto& p : d.passes) m.passes.push_back({ float(p.first), float(p.second), 0.0f, MapReaction {} });
+		for (const MapDoc::RouteLink& l : d.routeLinks) {
+			MapData::RouteLink o;
+			for (int i = 0; i < 3; i++) {
+				o.a[i] = float(l.a[i]);
+				o.b[i] = float(l.b[i]);
+			}
+			m.routeLinks.push_back(o);
+			if (d.symmetric) {
+				o.a[0] = -o.a[0];
+				o.a[2] = -o.a[2];
+				o.b[0] = -o.b[0];
+				o.b[2] = -o.b[2];
+				m.routeLinks.push_back(o);
+			}
+		}
+		for (const auto& poly : d.routeBlocks) {
+			for (int s = 0; s < (d.symmetric ? 2 : 1); s++) {
+				std::vector<std::pair<float, float>> o;
+				for (const auto& p : poly) o.push_back({ float(s ? -p.first : p.first), float(s ? -p.second : p.second) });
+				m.routeBlocks.push_back(o);
+			}
+		}
+		m.brightness = float(std::max(0.2, std::min(2.0, d.brightness)));
+		m.fogScale   = float(std::max(0.1, std::min(10.0, d.fogScale)));
+		for (int i = 0; i < 3; i++) m.tint[i] = std::max(0, std::min(255, d.tint[i]));
 
 		auto spot = [](const DocSpot& s) { return MapSpot { float(s.x), float(s.z), deg(float(s.face)), expandReaction(s.reaction) }; };
 		for (int p = 0; p < 2; p++) {
@@ -644,9 +1035,18 @@ bool expandMap(const MapDoc& d, MapData& m, std::string& error, bool validate)
 				if (e.type == t.id) info = &t;
 			}
 			if (!info) throw std::runtime_error(tr("enemigo desconocido: ") + e.type);
-			const MapEnemy me { float(e.x), float(e.z), deg(float(e.face)), info->teki, info->boss, expandReaction(e.reaction) };
+			MapEnemy me { float(e.x), float(e.z), deg(float(e.face)), info->teki, info->boss, expandReaction(e.reaction) };
+			me.respawn  = e.respawn == "always" ? MAPRESPAWN_Always : e.respawn == "never" ? MAPRESPAWN_Never : e.respawn == "days" ? e.respawnDays : MAPRESPAWN_Auto;
+			me.fromDay  = e.fromDay;
+			me.untilDay = e.untilDay;
 			m.enemies.push_back(me);
-			if (twin) m.enemies.push_back({ -me.x, -me.z, deg(float(e.face) + 180.0f), me.teki, me.boss, me.reaction });
+			if (twin) {
+				MapEnemy t = me;
+				t.x        = -me.x;
+				t.z        = -me.z;
+				t.face     = deg(float(e.face) + 180.0f);
+				m.enemies.push_back(t);
+			}
 		}
 		for (const DocObject& o : d.objects) {
 			int kind = -1;
@@ -664,7 +1064,63 @@ bool expandMap(const MapDoc& d, MapData& m, std::string& error, bool validate)
 			m.guards.push_back(g);
 			if (twin) m.guards.push_back({ -g.x, -g.z, g.face, g.reaction });
 		}
-		if (validate) check(m);
+		if (d.story.present) {
+			MapStory& st    = m.story;
+			st.captainCount = d.story.captainCount;
+			for (int c = 0; c < 2; c++) st.captains[c] = spot(d.story.captains[c]);
+			st.ship = spot(d.story.ship);
+			for (const DocStoryOnion& o : d.story.onions) st.onions.push_back({ float(o.x), float(o.z), o.color, o.buried });
+			for (const DocShipPart& sp : d.story.parts) {
+				bool known = false;
+				for (const ShipPartInfo& info : shipParts()) known = known || sp.id == info.id;
+				if (!known) throw std::runtime_error(tr("pieza de la nave desconocida: ") + sp.id);
+				st.parts.push_back({ float(sp.x), float(sp.z), fourcc(sp.id) });
+			}
+			st.objective = objectiveOf(d.story.rules.objective);
+			st.target    = d.story.rules.target;
+			st.days      = d.story.rules.days;
+			for (int c = 0; c < 3; c++) {
+				st.startPikmin[c] = d.story.rules.startPikmin[c];
+				st.medals[c]      = d.story.rules.medals[c];
+			}
+			st.timeLimit    = d.story.rules.timeLimit;
+			st.timeLimitEnd = d.story.rules.timeLimitEnd == "endday" ? MAPTHEN_EndDay : MAPTHEN_Lose;
+			// Índice de una construcción en la lista desplegada (con su gemelo
+			// detrás si el mapa es espejo).
+			auto objIndex = [&](int i) {
+				if (i < 0 || i >= int(d.objects.size())) throw std::runtime_error(tr("disparador: construcción que no existe"));
+				return twin ? i * 2 : i;
+			};
+			for (const DocTrigger& t : d.story.triggers) {
+				MapTrigger mt;
+				mt.any      = t.any;
+				mt.repeat   = t.repeat;
+				mt.cooldown = float(t.cooldown);
+				mt.times    = t.times;
+				mt.wave     = t.wave;
+				for (const DocCondition& c : t.conditions) {
+					MapCondition mc { condOf(c.type), c.count, c.color, c.index, float(c.x), float(c.z), float(c.radius) };
+					if (mc.type == MAPCOND_Object) mc.index = objIndex(c.index);
+					mt.conditions.push_back(mc);
+				}
+				for (const DocAction& a : t.actions) {
+					MapAction ma { actOf(a.type), a.text, float(a.x), float(a.z), a.index, a.seconds, thenOf(a.then), expandReaction(a.reaction) };
+					if (ma.type == MAPACT_SpawnAt || ma.type == MAPACT_Break) ma.index = objIndex(a.index);
+					mt.actions.push_back(ma);
+				}
+				st.triggers.push_back(mt);
+			}
+		} else if (d.modes & (MAPMODE_SOLO | MAPMODE_COOP)) {
+			throw std::runtime_error(tr("falta la sección \"story\""));
+		}
+		if (validate) {
+			check(m);
+			for (unsigned mode = MAPMODE_VS; mode <= MAPMODE_COOP; mode <<= 1) {
+				std::string why;
+				if ((m.modes & mode) && !validateMapMode(m, MapMode(mode), why))
+					throw std::runtime_error(std::string(mapModeName(MapMode(mode))) + ": " + why);
+			}
+		}
 		return true;
 	} catch (const std::exception& e) {
 		error = e.what();
@@ -696,7 +1152,11 @@ std::string writeMapDoc(const MapDoc& d)
 	}
 	json props = json::array();
 	for (const DocProp& p : d.props) {
-		props.push_back({ { "asset", p.asset }, { "pos", { p.x, p.y, p.z } }, { "rot", { p.rx, p.ry, p.rz } }, { "scale", p.scale }, { "collide", p.collide } });
+	{
+		json pj = { { "asset", p.asset }, { "pos", { p.x, p.y, p.z } }, { "rot", { p.rx, p.ry, p.rz } }, { "scale", p.scale }, { "collide", p.collide } };
+		if (p.ground) pj["ground"] = true;
+		props.push_back(pj);
+	}
 	}
 	json passes = json::array();
 	for (const auto& p : d.passes) passes.push_back({ p.first, p.second });
@@ -726,6 +1186,10 @@ std::string writeMapDoc(const MapDoc& d)
 	for (const DocEnemy& e : d.enemies) {
 		json j = { { "type", e.type }, { "pos", { e.x, e.z } }, { "face", e.face } };
 		if (!e.reaction.action.empty()) j["reaction"] = reactionJson(e.reaction);
+		if (e.respawn != "auto") j["respawn"] = e.respawn;
+		if (e.respawn == "days") j["respawnDays"] = e.respawnDays;
+		if (e.fromDay) j["fromDay"] = e.fromDay;
+		if (e.untilDay) j["untilDay"] = e.untilDay;
 		enemies.push_back(j);
 	}
 	for (const DocObject& o : d.objects) {
@@ -744,6 +1208,12 @@ std::string writeMapDoc(const MapDoc& d)
 	root["bounds"]      = { { "minX", d.minX }, { "maxX", d.maxX }, { "minZ", d.minZ }, { "maxZ", d.maxZ }, { "wallHeight", d.wallHeight } };
 	root["symmetry"]    = d.symmetric ? "rotate180" : "none";
 	root["environment"] = { { "baseStage", d.baseStage }, { "sun", { { "dir", { d.sun[0], d.sun[1], d.sun[2] } } } } };
+	if (!d.music.empty()) root["environment"]["music"] = d.music;
+	if (d.startHour) root["environment"]["startHour"] = d.startHour;
+	if (d.endHour) root["environment"]["endHour"] = d.endHour;
+	if (d.brightness != 1) root["environment"]["brightness"] = d.brightness;
+	if (d.fogScale != 1) root["environment"]["fog"] = d.fogScale;
+	if (d.tint[0] != 255 || d.tint[1] != 255 || d.tint[2] != 255) root["environment"]["tint"] = { d.tint[0], d.tint[1], d.tint[2] };
 	root["terrain"]     = { { "type", "flat" }, { "source", d.sourceMod }, { "cell", d.cell } };
 	if (d.terrain.grid) {
 		const DocTerrain& g = d.terrain;
@@ -763,23 +1233,115 @@ std::string writeMapDoc(const MapDoc& d)
 		root["terrain"]["layers"] = layers;
 		if (std::find_if(g.water.begin(), g.water.end(), [](std::uint8_t w) { return w != 0; }) != g.water.end()) root["terrain"]["water"] = toBase64(g.water);
 	}
-	if (!d.course.empty()) {
-		root["course"] = d.course;
-		json gens      = json::array();
-		for (const DocGen& g : d.gens)
-			gens.push_back({ { "file", g.file }, { "data", g.data }, { "pos", { g.x, g.y, g.z } }, { "label", g.label }, { "model", g.model } });
+	if (!d.course.empty()) root["course"] = d.course;
+	// Generadores del juego: del escenario importado o puestos desde el
+	// catálogo (Objetos del juego), en cualquier mapa.
+	if (!d.course.empty() || !d.gens.empty()) {
+		json gens = json::array();
+		for (const DocGen& g : d.gens) {
+			json gj = { { "file", g.file }, { "data", g.data }, { "pos", { g.x, g.y, g.z } }, { "label", g.label }, { "model", g.model } };
+			if (g.mirror) gj["mirror"] = true;
+			gens.push_back(gj);
+		}
 		root["gens"] = gens;
 	}
 	root["walls"]       = walls;
 	root["ponds"]       = ponds;
 	root["props"]       = props;
 	root["routes"]      = { { "auto", true }, { "step", d.routeStep }, { "margin", d.routeMargin }, { "barrierX", d.barrierX }, { "passes", passes } };
+	if (!d.routeLinks.empty()) {
+		json links = json::array();
+		for (const MapDoc::RouteLink& l : d.routeLinks) links.push_back({ l.a[0], l.a[1], l.a[2], l.b[0], l.b[1], l.b[2] });
+		root["routes"]["links"] = links;
+	}
+	if (!d.routeBlocks.empty()) {
+		json blocks = json::array();
+		for (const auto& poly : d.routeBlocks) {
+			json pj = json::array();
+			for (const auto& p : poly) pj.push_back({ p.first, p.second });
+			blocks.push_back(pj);
+		}
+		root["routes"]["blocks"] = blocks;
+	}
 	root["vs"]          = { { "bases", bases },     { "onions", onions },
 		                    { "rockets", rockets }, { "gates", gates },
 		                    { "bombPiles", bombs }, { "pellets", pellets },
 		                    { "pieces", pieces },   { "bigPiece", { { "pos", { d.bigX, d.bigZ } } } },
 		                    { "guards", guards },   { "enemies", enemies },
 		                    { "objects", objects } };
+	if (d.modes == MAPMODE_VS && !d.story.present) return root.dump(2) + "\n";
+
+	// Formato 2: varios modos; lo compartido sale de "vs" a "entities".
+	root["format"] = 2;
+	root.erase("mode");
+	json modes = json::array();
+	for (int i = 0; i < 3; i++) {
+		if (d.modes & (1u << i)) modes.push_back(kModeNames[i]);
+	}
+	root["modes"] = modes;
+	json entities = json::object();
+	for (const char* key : { "pellets", "guards", "enemies", "objects" }) {
+		entities[key] = root["vs"][key];
+		root["vs"].erase(key);
+	}
+	root["entities"] = entities;
+	if (d.story.present) {
+		const DocStory& st = d.story;
+		json captains      = json::array();
+		for (int c = 0; c < st.captainCount; c++) captains.push_back({ { "pos", { st.captains[c].x, st.captains[c].z } }, { "face", st.captains[c].face } });
+		json onionList = json::array(), parts = json::array();
+		for (const DocStoryOnion& o : st.onions) onionList.push_back({ { "color", kOnionNames[o.color] }, { "pos", { o.x, o.z } }, { "buried", o.buried } });
+		for (const DocShipPart& sp : st.parts) parts.push_back({ { "id", sp.id }, { "pos", { sp.x, sp.z } } });
+		json start = json::object();
+		for (int c = 0; c < 3; c++) start[kOnionNames[c]] = st.rules.startPikmin[c];
+		json triggers = json::array();
+		for (const DocTrigger& t : st.triggers) {
+			json conds = json::array(), acts = json::array();
+			for (const DocCondition& c : t.conditions) {
+				json cj = { { "type", c.type }, { "count", c.count } };
+				if (c.color >= 0 && c.color < 3) cj["color"] = kOnionNames[c.color];
+				if (c.type == "after" || c.type == "object") cj["index"] = c.index;
+				if (c.type == "area") {
+					cj["pos"]    = { c.x, c.z };
+					cj["radius"] = c.radius;
+				}
+				conds.push_back(cj);
+			}
+			for (const DocAction& a : t.actions) {
+				json aj = { { "type", a.type } };
+				if (!a.text.empty()) aj["text"] = a.text;
+				if (a.type == "spawn" || a.type == "camera") aj["pos"] = { a.x, a.z };
+				if (a.type == "camera") aj["seconds"] = a.seconds;
+				if (a.type == "spawn_at" || a.type == "break") aj["index"] = a.index;
+				if (a.type == "countdown") {
+					aj["seconds"] = a.seconds;
+					aj["then"]    = a.then;
+				}
+				if (!a.reaction.action.empty()) aj["reaction"] = reactionJson(a.reaction);
+				acts.push_back(aj);
+			}
+			json j = { { "conditions", conds }, { "match", t.any ? "any" : "all" }, { "actions", acts } };
+			if (t.repeat) {
+				j["repeat"]   = true;
+				j["cooldown"] = t.cooldown;
+				j["times"]    = t.times;
+			}
+			if (t.wave) j["wave"] = true;
+			triggers.push_back(j);
+		}
+		root["story"] = { { "captains", captains },
+			              { "ship", { { "pos", { st.ship.x, st.ship.z } }, { "face", st.ship.face } } },
+			              { "onions", onionList },
+			              { "parts", parts },
+			              { "rules", { { "objective", st.rules.objective }, { "target", st.rules.target }, { "days", st.rules.days }, { "startPikmin", start } } } };
+		if (st.rules.medals[0] || st.rules.medals[1] || st.rules.medals[2])
+			root["story"]["rules"]["medals"] = { { "bronze", st.rules.medals[0] }, { "silver", st.rules.medals[1] }, { "gold", st.rules.medals[2] } };
+		if (!triggers.empty()) root["story"]["triggers"] = triggers;
+		if (st.rules.timeLimit) {
+			root["story"]["rules"]["timeLimit"]    = st.rules.timeLimit;
+			root["story"]["rules"]["timeLimitEnd"] = st.rules.timeLimitEnd;
+		}
+	}
 	return root.dump(2) + "\n";
 }
 
@@ -892,6 +1454,46 @@ void resizeTerrain(MapDoc& d, int left, int right, int top, int bottom)
 	d.maxZ = d.minZ + nz * d.cell;
 }
 
+bool resampleTerrain(MapDoc& d, double cell)
+{
+	makeTerrainGrid(d);
+	if (cell <= 0) return false;
+	const DocTerrain old = d.terrain;
+	const double oldCell = d.cell;
+	const int nx = std::max(2, int(std::lround((d.maxX - d.minX) / cell))), nz = std::max(2, int(std::lround((d.maxZ - d.minZ) / cell)));
+	if (nx > 400 || nz > 400) return false;
+	DocTerrain& g = d.terrain;
+	g.nx          = nx;
+	g.nz          = nz;
+	const std::size_t nv = g.vertexCount();
+	g.heights.assign(nv, 0);
+	g.floor.assign(nv, 0);
+	g.water.assign(nv, 0);
+	for (auto& l : g.layers) l.assign(nv, 0);
+	auto sample = [&](auto field, double fx, double fz) {
+		fx            = std::max(0.0, std::min(double(old.nx), fx));
+		fz            = std::max(0.0, std::min(double(old.nz), fz));
+		const int x0  = std::min(old.nx - 1, int(fx)), z0 = std::min(old.nz - 1, int(fz));
+		const double tx = fx - x0, tz = fz - z0;
+		auto at       = [&](int x, int z) { return double(field[std::size_t(old.vertexIndex(x, z))]); };
+		return (at(x0, z0) * (1 - tx) + at(x0 + 1, z0) * tx) * (1 - tz) + (at(x0, z0 + 1) * (1 - tx) + at(x0 + 1, z0 + 1) * tx) * tz;
+	};
+	for (int iz = 0; iz <= nz; iz++) {
+		for (int ix = 0; ix <= nx; ix++) {
+			const double fx = ix * cell / oldCell, fz = iz * cell / oldCell;
+			const std::size_t v = std::size_t(g.vertexIndex(ix, iz));
+			g.heights[v]        = std::int16_t(std::lround(sample(old.heights, fx, fz)));
+			g.floor[v]          = std::uint8_t(std::lround(sample(old.floor, fx, fz)));
+			g.water[v]          = std::uint8_t(std::lround(sample(old.water, fx, fz)));
+			for (std::size_t k = 0; k < g.layers.size(); k++) g.layers[k][v] = std::uint8_t(std::lround(sample(old.layers[k], fx, fz)));
+		}
+	}
+	d.cell = cell;
+	d.maxX = d.minX + nx * cell;
+	d.maxZ = d.minZ + nz * cell;
+	return true;
+}
+
 namespace {
 // Valor de un campo por punto en (x, z), interpolado como los triángulos del
 // terreno (a, b, c) y (b, d, c).
@@ -958,6 +1560,93 @@ const std::vector<EnemyInfo>& enemyTypes()
 		{ "king", "Emperador Bulblax (jefe)", "bosses/king/king.mod", -1, 3, "Jefe: enorme, rueda y se traga a los Pikmin." },
 	};
 	return list;
+}
+
+// ── Ajustes de un generador del juego ─────────────────────────────────────
+namespace {
+constexpr std::uint32_t paramId(const char (&s)[4])
+{
+	return (std::uint32_t(std::uint8_t(s[0])) << 24) | (std::uint32_t(std::uint8_t(s[1])) << 16) | (std::uint32_t(std::uint8_t(s[2])) << 8);
+}
+bool parseOne(const std::vector<std::uint8_t>& raw, Generator& out)
+{
+	GenFile file;
+	std::string error;
+	const std::vector<std::uint8_t> bytes = writeGen({ raw });
+	if (!parseGen(bytes.data(), bytes.size(), file, error) || file.generators.size() != 1) return false;
+	out = file.generators[0];
+	return true;
+}
+} // namespace
+
+bool readGenSettings(const DocGen& g, GenSettings& out)
+{
+	out = GenSettings();
+	Generator gen;
+	if (!parseOne(fromBase64(g.data), gen)) return false;
+	out.object = genIdString(gen.object.kind);
+	out.area   = genIdString(gen.area.kind);
+	out.type   = genIdString(gen.type.kind);
+	if (out.object == "teki") out.teki = gen.object.type;
+	if (out.object == "boss") out.boss = gen.object.type;
+	if (out.area == "circ") {
+		if (const GenParam* p = gen.area.param(paramId("p00"))) {
+			out.hasRadius = true;
+			out.radius    = p->asFloat();
+		}
+	}
+	if (out.type == "aton") {
+		if (const GenParam* p = gen.type.param(paramId("p00"))) {
+			out.hasCount = true;
+			out.count    = p->asInt();
+		}
+	} else if (out.type == "irnd") {
+		const GenParam* lo = gen.type.param(paramId("p00"));
+		const GenParam* hi = gen.type.param(paramId("p01"));
+		out.hasMinCount    = lo != nullptr;
+		out.hasCount       = hi != nullptr;
+		if (lo) out.minCount = lo->asInt();
+		if (hi) out.count = hi->asInt();
+	} else if (out.type == "1one") {
+		if (const GenParam* p = gen.type.param(paramId("p01"))) {
+			out.hasFace = true;
+			out.face    = p->asInt();
+		}
+	}
+	if (const GenParam* p = gen.type.param(paramId("b00"))) {
+		out.hasRebirth  = true;
+		out.rebirthDays = p->asInt();
+	}
+	return true;
+}
+
+void writeGenSettings(DocGen& g, const GenSettings& s)
+{
+	std::vector<std::uint8_t> raw = fromBase64(g.data);
+	Generator gen;
+	if (!parseOne(raw, gen)) return;
+	auto put = [&](const GenPart& part, const char (&id)[4], std::uint32_t v) {
+		const GenParam* p = part.param(paramId(id));
+		if (!p || p->bytes.size() < 4 || p->offset + 4 > raw.size()) return;
+		for (int b = 0; b < 4; b++) raw[p->offset + std::size_t(b)] = std::uint8_t(v >> (24 - 8 * b));
+	};
+	auto putInt = [&](const GenPart& part, const char (&id)[4], int v) { put(part, id, std::uint32_t(v)); };
+	if (s.hasRadius) {
+		std::uint32_t v;
+		const float r = std::max(0.0f, s.radius);
+		std::memcpy(&v, &r, 4);
+		put(gen.area, "p00", v);
+	}
+	const std::string type = genIdString(gen.type.kind);
+	if (type == "aton" && s.hasCount) putInt(gen.type, "p00", std::max(0, s.count));
+	if (type == "irnd") {
+		const int lo = std::max(0, s.minCount), hi = std::max(lo, s.count);
+		if (s.hasMinCount) putInt(gen.type, "p00", lo);
+		if (s.hasCount) putInt(gen.type, "p01", hi);
+	}
+	if (type == "1one" && s.hasFace) putInt(gen.type, "p01", ((s.face % 360) + 360) % 360);
+	if (s.hasRebirth) putInt(gen.type, "b00", std::max(0, s.rebirthDays));
+	g.data = toBase64(raw);
 }
 
 const std::vector<ObjectInfo>& objectKinds()

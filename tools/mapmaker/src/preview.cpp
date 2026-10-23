@@ -47,7 +47,11 @@ bool compileDoc(const std::string& dataDir, std::map<std::string, std::vector<st
 		out.playable = nectar::expandMap(doc, checked, why);
 		if (!out.playable) out.error = why;
 	}
-	auto read = [&](const std::string& p, std::vector<std::uint8_t>& o) { return readFile(dataDir, cache, p, o); };
+	auto read = [&](const std::string& p, std::vector<std::uint8_t>& o) {
+		// "map:..." : de la carpeta del mapa (mallas importadas), sin caché.
+		if (p.rfind("map:", 0) == 0) return !data.dir.empty() && readFile(data.dir, nullptr, p.substr(4), o);
+		return readFile(dataDir, cache, p, o);
+	};
 
 	nectar::CompiledMap full;
 	if (!nectar::compileMap(data, read, "courses/vsarena/arena.mod", full, out.error)) return false;

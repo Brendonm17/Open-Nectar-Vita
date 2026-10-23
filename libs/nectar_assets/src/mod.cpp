@@ -82,6 +82,7 @@ enum Chunk : std::uint32_t {
 	CHUNK_JOINTNAME  = 0x61,
 	CHUNK_COLLPRISM  = 0x100,
 	CHUNK_COLLGRID   = 0x110,
+	CHUNK_PCBASE     = 0xF00, ///< del port: base de índices de cada malla (mapas grandes)
 	CHUNK_END        = 0xFFFF,
 };
 
@@ -431,6 +432,28 @@ bool parseMod(const std::uint8_t* data, std::size_t size, Model& out, std::strin
 				r.skip(6); // vecinos
 				t.normal = vec3(r);
 				t.offset = r.f32();
+			}
+			break;
+		}
+		case CHUNK_PCBASE: {
+			const int n = count(r, 44);
+			r.align(0x20);
+			for (int i = 0; i < n && r.ok; i++) {
+				int base[11];
+				for (int& b : base) b = r.s32();
+				if (std::size_t(i) >= out.meshes.size()) continue;
+				for (ModMtxGroup& g : out.meshes[std::size_t(i)].groups) {
+					for (ModTriangle& t : g.tris) {
+						for (ModVertex& v : t.v) {
+							if (v.pos >= 0) v.pos += base[0];
+							if (v.nrm >= 0) v.nrm += base[1];
+							if (v.col >= 0) v.col += base[2];
+							for (int k = 0; k < 8; k++) {
+								if (v.uv[k] >= 0) v.uv[k] += base[3 + k];
+							}
+						}
+					}
+				}
 			}
 			break;
 		}

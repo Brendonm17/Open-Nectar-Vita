@@ -1404,35 +1404,11 @@ static u64 sTexVariantClock = 0;
 constexpr size_t kTexVariantsPerObj = 16;
 constexpr u16 kTexVariantMaxSide = 256;
 // GXCopyTex: direccion de destino -> textura GL con la copia del framebuffer.
-struct PcEfbCopy { GLuint tex = 0; int w = 0, h = 0; unsigned hits = 0; u64 fingerprint = 0; size_t bytes = 32; };
-// La copia solo vive en GL: la memoria de destino no se toca. Si su contenido
-// cambia, ese bloque del heap ya es otra textura (p. ej. la nave cargada al
-// salir de una cueva donde se hizo la copia) y la copia es vieja. Se muestrean
-// 8 trozos de 32 bytes repartidos por toda la copia: solo los primeros bytes
-// no bastaban (una textura nueva que empieza con una esquina a ceros coincidía).
-static u64 pc_efb_copy_fingerprint(uintptr_t addr, size_t bytes) {
-    const u8* p = reinterpret_cast<const u8*>(addr);
-    u64 h = 1469598103934665603ull;
-    if (bytes < 32) bytes = 32; // la copia minima (4x4 RGB565) ocupa 32 bytes
-    for (int probe = 0; probe < 8; probe++) {
-        const size_t off = ((bytes - 32) / 7) * size_t(probe) & ~size_t(31);
-        for (int i = 0; i < 32; i++) { h ^= p[off + i]; h *= 1099511628211ull; }
-    }
-    return h;
-}
-// Bytes que ocupa en memoria una copia de GXCopyTex (formatos GX_TF_* y GX_CTF_*).
-static size_t pc_efb_copy_bytes(int w, int h, u32 fmt) {
-    int bpp = 16;
-    switch (fmt) {
-        case GX_TF_RGBA8: case GX_TF_Z24X8: bpp = 32; break;
-        case GX_TF_I4: case 0x20 /* CTF_R4 */: case 0x30 /* CTF_Z4 */: bpp = 4; break;
-        case GX_TF_I8: case GX_TF_IA4: case GX_TF_Z8: case 0x22 /* RA4 */: case 0x27 /* A8 */: case 0x28 /* R8 */:
-        case 0x29 /* G8 */: case 0x2A /* B8 */: case 0x39 /* Z8M */: case 0x3A /* Z8L */: bpp = 8; break;
-        default: bpp = 16; break;
-    }
-    const size_t tw = size_t((w + 7) & ~7), th = size_t((h + 7) & ~7); // tiles completos
-    return tw * th * size_t(bpp) / 8;
-}
+struct PcEfbCopy { GLuint tex = 0; int w = 0, h = 0; unsigned hits = 0; };
+// La imagen de GXCopyTex vive solo en GL: el búfer de destino de la consola no
+// se escribe. Sus bytes no representan la vida de la captura y pueden cambiar
+// mientras el JUTTexture sigue siendo válido (como ocurre con el radar).
+// pc_gfx_note_heap_freed la elimina cuando el rango realmente se libera.
 // Rangos de heap liberados (freeAll, dispose, destroy) desde cualquier hilo:
 // el principal descarta las copias que vivían ahí antes de enlazar texturas.
 static std::mutex sEfbFreedMx;
@@ -1440,14 +1416,37 @@ static std::pair<uintptr_t, uintptr_t> sEfbFreed[64];
 static int sEfbFreedCount = 0;
 static bool sEfbFreedOverflow = false;
 static std::atomic<bool> sEfbFreedPending { false };
+// Direcciones de las copias vivas (espejo de las claves de sEfbCopies, bajo
+// sEfbFreedMx): solo se encolan los rangos que contienen alguna. Antes se
+// encolaba todo y, con más de 64 liberaciones entre dos enlaces (freeGroup /
+// freeTail liberan bloque a bloque), el desbordamiento descartaba TODAS las
+// copias, también la del agua capturada en ese frame: parpadeo (#161).
+static PcGfxHostVector<uintptr_t> sEfbCopyKeys;
+static void efb_copy_key_add(uintptr_t key) {
+    std::lock_guard<std::mutex> lock(sEfbFreedMx);
+    for (uintptr_t k : sEfbCopyKeys) if (k == key) return;
+    sEfbCopyKeys.push_back(key);
+}
+static void efb_copy_key_remove(uintptr_t key) {
+    std::lock_guard<std::mutex> lock(sEfbFreedMx);
+    for (size_t i = 0; i < sEfbCopyKeys.size(); ++i) {
+        if (sEfbCopyKeys[i] == key) { sEfbCopyKeys[i] = sEfbCopyKeys.back(); sEfbCopyKeys.pop_back(); return; }
+    }
+}
 extern "C" void pc_gfx_note_heap_freed(const void* lo, const void* hi) {
     if (!lo || hi <= lo) return;
     std::lock_guard<std::mutex> lock(sEfbFreedMx);
+    bool holdsCopy = false;
+    for (uintptr_t k : sEfbCopyKeys) {
+        if (k >= uintptr_t(lo) && k < uintptr_t(hi)) { holdsCopy = true; break; }
+    }
+    if (!holdsCopy) return;
     if (sEfbFreedCount < 64) sEfbFreed[sEfbFreedCount++] = { uintptr_t(lo), uintptr_t(hi) };
     else sEfbFreedOverflow = true;
     sEfbFreedPending.store(true, std::memory_order_release);
 }
 static PcGfxHostMap<uintptr_t, PcEfbCopy> sEfbCopies;
+static bool sRadarProbeDraw = false;
 static PcGfxHostMap<uintptr_t, PcTlut> sTlutObjects;
 static PcGfxHostMap<u32, PcTlut> sLoadedTluts;
 static PcGfxHostMap<uintptr_t, PcTextureSource> sTextureSources;
@@ -7211,7 +7210,6 @@ void pc_gfx_load_tex_obj(GXTexObj* obj, GXTexMapID id) {
             bool gone = all;
             for (int i = 0; i < count && !gone; i++) gone = c->first >= freed[i].first && c->first < freed[i].second;
             if (gone) {
-                SDL_Log("[EFBDBG] heap freed: drop copy %p %dx%d", (void*)c->first, c->second.w, c->second.h);
                 if (c->second.tex) {
                     pc_gfx_flush_batch();
                     for (int unit = 0; unit < 8; ++unit) {
@@ -7223,6 +7221,7 @@ void pc_gfx_load_tex_obj(GXTexObj* obj, GXTexMapID id) {
                     }
                     glDeleteTextures(1, &c->second.tex);
                 }
+                efb_copy_key_remove(c->first);
                 c = sEfbCopies.erase(c);
             } else {
                 ++c;
@@ -7245,17 +7244,7 @@ void pc_gfx_load_tex_obj(GXTexObj* obj, GXTexMapID id) {
                     if ((c->first & ~uintptr_t(31)) == block) { copy = c; break; }
                 }
             }
-            if (copy != sEfbCopies.end() && copy->second.tex
-                && pc_efb_copy_fingerprint(copy->first, copy->second.bytes) != copy->second.fingerprint) {
-                // Memoria reutilizada por otra textura: la copia ya no le corresponde.
-                SDL_Log("[EFBDBG] stale copy dropped at %p (%dx%d)", (void*)copy->first, copy->second.w, copy->second.h);
-                glDeleteTextures(1, &copy->second.tex);
-                sEfbCopies.erase(copy);
-                copy = sEfbCopies.end();
-            }
             if (copy != sEfbCopies.end() && copy->second.tex) {
-                if (copy->second.hits % 600 == 0)
-                    SDL_Log("[EFBDBG] bind copy %p %dx%d hits=%u", (void*)copy->first, copy->second.w, copy->second.h, copy->second.hits);
                 ++copy->second.hits;
                 sActiveGLTextures[id] = copy->second.tex;
                 sHasActiveTextures[id] = true;
@@ -8888,7 +8877,8 @@ void pc_gfx_flush_batch(void) {
     // PIKMIN_PROBE_DIFF=1: read the viewport back before and after each batch
     // and report how many pixels the draw changed, and where. Diagnostic
     // only. malloc, not new: operator new is routed to the game's heaps.
-    static const bool probeDiff = getenv("PIKMIN_PROBE_DIFF") != nullptr;
+    static const bool probeDiffEnv = getenv("PIKMIN_PROBE_DIFF") != nullptr;
+    const bool probeDiff = probeDiffEnv || sRadarProbeDraw;
     static unsigned char* diffBefore = nullptr;
     static unsigned char* diffAfter = nullptr;
     static size_t diffCap = 0;
@@ -8928,6 +8918,7 @@ void pc_gfx_flush_batch(void) {
             glBindTexture(GL_TEXTURE_2D, (GLuint)prevTex);
             glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w0);
             glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h0);
+#if !PIKI_USE_GLES
             const size_t n = size_t(w0) * h0 * 4;
             unsigned char* px = (unsigned char*)malloc(n);
             glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
@@ -8935,6 +8926,10 @@ void pc_gfx_flush_batch(void) {
             for (size_t i = 0; i < n; i += 4) { if (px[i + 3] > 8) ++opaque; lum += px[i]; }
             fprintf(stderr, "[PC ProbeDiff]   tex0 gl=%u %dx%d opaque=%zu/%zu meanR=%zu uv0=(%.2f,%.2f)\n", sActiveGLTextures[0], w0, h0, opaque, n / 4, n ? lum / (n / 4) : 0, fv.tex[0][0], fv.tex[0][1]);
             free(px);
+#else
+            fprintf(stderr, "[PC ProbeDiff]   tex0 gl=%u %dx%d uv0=(%.2f,%.2f)\n",
+                    sActiveGLTextures[0], w0, h0, fv.tex[0][0], fv.tex[0][1]);
+#endif
             glBindTexture(GL_TEXTURE_2D, prevTex);
         }
     }
@@ -11853,10 +11848,21 @@ void pc_gfx_copy_tex(void* dest, GXBool clear) {
     if (!dest || !sNativeFramebufferReady || !glBlitFramebuffer_ptr || !glGenFramebuffers_ptr) return;
     const int w = sTexCopyDstW, h = sTexCopyDstH;
     if (w <= 0 || h <= 0) return;
+    // GX commands are ordered in the FIFO even when game code omits GXEnd.
+    // RandMapDraw does exactly that for every cave room; with only one room
+    // revealed its final quad was still in the immediate stream when the
+    // radar texture was copied, so the pause map contained only the cleared
+    // background. Finish that complete primitive before flushing/capturing.
+    const bool hadImmediate = sInPrimitive;
+    const size_t immediateVerts = sVertexStream.size();
+    close_complete_immediate();
+    sRadarProbeDraw = sTexCopyFmt == GX_CTF_R4;
     pc_gfx_flush_batch();
+    sRadarProbeDraw = false;
     pc_gfx_note_gl_state_change();
 
     PcEfbCopy& copy = sEfbCopies[reinterpret_cast<uintptr_t>(dest)];
+    if (!copy.tex) efb_copy_key_add(reinterpret_cast<uintptr_t>(dest));
     if (!copy.tex || copy.w != w || copy.h != h) {
         if (!copy.tex) glGenTextures(1, &copy.tex);
         glBindTexture(GL_TEXTURE_2D, copy.tex);
@@ -11881,19 +11887,47 @@ void pc_gfx_copy_tex(void* dest, GXBool clear) {
     glBindTexture(GL_TEXTURE_2D, 0);
     sBoundTextures[0] = 0;
 
+    // GXCopyTex reads the EFB that the preceding GX commands targeted. Most
+    // frames use sNativeFramebuffer, but isolated passes such as the cave
+    // radar can run while a different draw framebuffer is current. Reading
+    // the hard-coded native FBO copied an untouched black rectangle even
+    // though the room quad had just been drawn successfully.
+    GLint sourceDrawFbo = 0, previousReadFbo = 0;
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &sourceDrawFbo);
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previousReadFbo);
     static GLuint copyFbo = 0;
     if (!copyFbo) glGenFramebuffers_ptr(1, &copyFbo);
     glBindFramebuffer_ptr(GL_DRAW_FRAMEBUFFER, copyFbo);
     glFramebufferTexture2D_ptr(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, copy.tex, 0);
-    glBindFramebuffer_ptr(GL_READ_FRAMEBUFFER, sNativeFramebuffer);
+    glBindFramebuffer_ptr(GL_READ_FRAMEBUFFER, GLuint(sourceDrawFbo));
 
     GLint sx, sy; GLsizei sw, sh;
     map_gx_rect(float(sTexCopySrc[0]), float(sTexCopySrc[1]), float(sTexCopySrc[2]), float(sTexCopySrc[3]), sx, sy, sw, sh);
     const GLboolean scissorWasEnabled = glIsEnabled(GL_SCISSOR_TEST);
     glDisable(GL_SCISSOR_TEST);
+    if (sTexCopyFmt == GX_CTF_R4) {
+        PcGfxHostVector<u8> pixels(size_t(sw) * size_t(sh) * 4);
+        glReadPixels(sx, sy, sw, sh, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+        unsigned minRgb = 255, maxRgb = 0;
+        uint64_t sumRgb = 0, nonBlack = 0;
+        for (size_t i = 0; i + 3 < pixels.size(); i += 4) {
+            const unsigned rgb = unsigned(pixels[i]) + unsigned(pixels[i + 1]) + unsigned(pixels[i + 2]);
+            minRgb = std::min(minRgb, rgb / 3);
+            maxRgb = std::max(maxRgb, rgb / 3);
+            sumRgb += rgb;
+            nonBlack += rgb != 0;
+        }
+        const size_t count = size_t(sw) * size_t(sh);
+        SDL_Log("[RADARDBG] copy dest=%p dst=%dx%d src=(%u,%u,%u,%u)->(%d,%d,%d,%d) fbo=%d immediate=%d/%zu rgb=%u..%u avg=%.2f nonblack=%llu/%zu glerr=0x%x",
+                dest, w, h, sTexCopySrc[0], sTexCopySrc[1], sTexCopySrc[2], sTexCopySrc[3], sx, sy, sw, sh,
+                sourceDrawFbo, int(hadImmediate), immediateVerts, minRgb, maxRgb,
+                count ? double(sumRgb) / double(count * 3) : 0.0,
+                (unsigned long long)nonBlack, count, unsigned(glGetError()));
+    }
     // Fila 0 de una textura GX es la de arriba; en GL el framebuffer empieza abajo.
     glBlitFramebuffer_ptr(sx, sy, sx + sw, sy + sh, 0, h, w, 0, GL_COLOR_BUFFER_BIT, GL_LINEAR);
-    glBindFramebuffer_ptr(GL_FRAMEBUFFER, sNativeFramebuffer);
+    glBindFramebuffer_ptr(GL_DRAW_FRAMEBUFFER, GLuint(sourceDrawFbo));
+    glBindFramebuffer_ptr(GL_READ_FRAMEBUFFER, GLuint(previousReadFbo));
 
     if (clear) {
         glEnable(GL_SCISSOR_TEST);
@@ -11909,14 +11943,6 @@ void pc_gfx_copy_tex(void* dest, GXBool clear) {
         pc_gfx_set_scissor(sGxSc[0], sGxSc[1], sGxSc[2], sGxSc[3]);
     }
     if (scissorWasEnabled) glEnable(GL_SCISSOR_TEST); else glDisable(GL_SCISSOR_TEST);
-    copy.bytes       = pc_efb_copy_bytes(w, h, sTexCopyFmt);
-    copy.fingerprint = pc_efb_copy_fingerprint(reinterpret_cast<uintptr_t>(dest), copy.bytes);
-    // [EFBDBG] temporal: mapa de cuevas (copia R4 del radar).
-    if (sTexCopyFmt == GX_CTF_R4) {
-        SDL_Log("[EFBDBG] copy R4 dest=%p %dx%d src=(%u,%u,%u,%u) -> gl(%d,%d,%d,%d) ui43=%d hudWide=%d subrect=%d render=%dx%d",
-                dest, w, h, sTexCopySrc[0], sTexCopySrc[1], sTexCopySrc[2], sTexCopySrc[3], sx, sy, sw, sh, int(sUi43),
-                int(sHudWide), int(sViewSubrectOn), sRenderWidth, sRenderHeight);
-    }
 }
 
 // Diagnóstico (PIKMIN_WRAITH_DEBUG): ¿hay copia de GXCopyTex para esta

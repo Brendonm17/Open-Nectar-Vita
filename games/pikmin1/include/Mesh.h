@@ -33,6 +33,12 @@ public:
 		mJointList    = nullptr;
 		mParentJoint  = -1;
 		mFeatureFlags = FeatureFlags::PosAndNrm;
+#if defined(PIKI_PC_PORT)
+		mPcHasArrayBase = false;
+		for (int i = 0; i < 11; i++) {
+			mPcArrayBase[i] = 0;
+		}
+#endif
 	}
 
 	virtual void read(RandomAccessStream&); // _0C
@@ -46,6 +52,13 @@ public:
 	MtxGroup* mMtxGroupList; // _24
 	Joint* mJointList;       // _28
 	int mFeatureFlags;       // _2C, aka vertex descriptors
+#if defined(PIKI_PC_PORT)
+	// Mapas del editor con más de 65535 vértices: los índices de 16 bits de
+	// esta malla cuentan desde aquí (posición, normal, color, UV 0-7). Bloque
+	// 0xF00 del .mod; sin él, todo a 0 como en el juego.
+	bool mPcHasArrayBase;
+	int mPcArrayBase[11];
+#endif
 };
 
 #endif

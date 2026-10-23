@@ -14,6 +14,7 @@
 #include "renderer.h"
 
 #include "nectar_assets/catalog.h"
+#include "nectar_mapcore/campaign.h"
 
 #include <array>
 #include <atomic>
@@ -40,10 +41,10 @@ public:
 	bool wantsQuit() const { return quit_; }
 
 private:
-	enum class Screen { Setup, Building, Welcome, Editor };
-	enum class Tool { Move, Place, Floor, Height, Plateau, Paint, Water, Walls, Ramp, Scatter };
+	enum class Screen { Setup, Building, Welcome, Editor, Campaign };
+	enum class Tool { Move, Place, Floor, Height, Plateau, Paint, Water, Walls, Ramp, Scatter, Trace };
 	enum class TransformMode { Move, Rotate, Scale };
-	enum class HeightOp { Raise, Lower, Flatten, Smooth };
+	enum class HeightOp { Raise, Lower, Flatten, Smooth, Noise, Hill, Crater, Mesa };
 	enum class BrushShape { Circle, Square };
 	enum class BrushFalloff { Smooth, Hard };
 
@@ -103,6 +104,15 @@ private:
 	void drawWaterOptions();
 	void drawWallOptions();
 	void drawRampOptions();
+	// Trazo: caminos, ríos y calzadas por una línea de puntos, o zonas de
+	// suelo (y huecos) con un contorno dibujado a mano.
+	enum class TraceMode { Path, River, Causeway, Area, Hole, RouteLink, RouteBlock };
+	void drawTraceOptions();
+	void applyTrace();
+	void paintCliffs();
+	std::vector<V3> traceNodes_;
+	TraceMode traceMode_ = TraceMode::Path;
+	float traceWidth_ = 120.0f, traceDepth_ = 40.0f, cliffSlope_ = 1.0f;
 	void drawScatterOptions();
 	void drawBrushSettings();
 	void scatter(const V3& at);
@@ -142,12 +152,52 @@ private:
 
 	// ── Recursos ──
 	std::shared_ptr<GpuModel> model(const std::string& asset);
+	/// Recorte de un escenario ("cut:..."), ya sacado y leído (nullptr si no se puede).
+	std::shared_ptr<nectar::Model> cutModel(const std::string& asset);
+	unsigned cutThumb(const std::string& asset);
+	void drawCutOptions();
+	/// Con mallas que se pisan: la altura del suelo sale del mapa compilado.
+	CourseField meshField_;
+	bool hasGroundProps() const;
+	bool cutBox_ = false;
+	V3 cutLo_ { -200, -100, -200 }, cutHi_ { 200, 400, 200 };
+	char cutName_[64] = "";
+	std::map<std::string, std::shared_ptr<nectar::Model>> cutModels_;
+	/// Carpeta del mapa abierto (vacía si no se ha guardado).
+	std::string mapDir() const;
+	/// Archivo en disco de un modelo: del juego o "map:..." de la carpeta del mapa.
+	std::string assetFile(const std::string& asset) const;
+	/// El documento para compilar (con su carpeta, para las mallas propias).
+	nectar::MapDoc docToCompile() const;
 	std::string markerAsset(const ItemRef& r) const;
 	std::string placeAsset(const PlaceChoice& c) const;
 	Rgba markerTint(const ItemRef& r) const;
 	M4 itemMatrix(const ItemRef& r, bool twin) const;
 	unsigned thumb(const std::string& path);
 	unsigned assetThumb(const std::string& asset);
+
+	// ── Campañas (user/campaigns/<id>/) ──
+	std::string campaignsDir() const;
+	void drawCampaignPickers();
+	void drawCampaign();
+	void drawCampaignCanvas(const ImVec2& origin, const ImVec2& size);
+	void drawCampaignPanel();
+	void drawCampaignZone(int zone);
+	bool drawUnlockList(std::vector<nectar::UnlockRule>& rules, const char* id);
+	void newCampaign(const std::string& name);
+	void openCampaign(const std::string& dir);
+	bool saveCampaign();
+	void addCampaignZone();
+	void removeCampaignZone(int zone);
+	void editCampaignZone(int zone);
+	void testCampaignZone(int zone);
+	void checkCampaign();
+	unsigned campaignMapTexture(int& w, int& h);
+	void writeCampaignThumb();
+	/// Copia una PNG elegida al paquete con ese nombre; true si se copió.
+	bool pickPackImage(const char* title, const std::string& as, std::string& field);
+	/// Exporta una carpeta (campaña o mapa) a un .nectarpack, eligiendo dónde.
+	void exportPackOf(const std::string& dir);
 
 	// ── Archivo ──
 	void newMap(nectar::TerrainShape shape);
@@ -159,7 +209,9 @@ private:
 	void openBuiltIn();
 	bool saveMap(const std::string& path);
 	void saveOrAsk(bool thenTest);
+	/// Prueba el mapa en el juego en testMode_ (o en el primer modo que tenga).
 	void testInGame();
+	unsigned testMode_ = nectar::MAPMODE_VS;
 	void autosave();
 	void notify(int level, const std::string& text);
 	void refreshOpenList();
@@ -282,6 +334,7 @@ private:
 
 	// Vista
 	bool showTwins_ = true, mirrorEdits_ = true;
+	int viewDay_ = 0; ///< misiones: ver solo lo que hay ese día (0 = todo)
 	bool showCollision_ = false, showRoutes_ = false, showSlopesOverlay_ = false, showWaterOverlay_ = true, showLabels_ = true;
 	bool viewportHovered_ = false;
 	int splitterDrag_     = 0; ///< 0 ninguno, 1 herramientas, 2 propiedades
@@ -294,6 +347,29 @@ private:
 	std::vector<std::pair<std::string, std::string>> openList_; // (nombre, ruta)
 	int tutorialStep_ = -1;
 	std::string openAtStart_;
+
+	// Campaña en edición
+	nectar::CampaignDoc camp_;
+	std::string campDir_;        ///< carpeta del paquete; vacía si no hay campaña abierta
+	bool campDirty_    = false;
+	int campZone_      = -1;     ///< zona elegida
+	int campDrag_      = -1;     ///< zona que se arrastra
+	int campLinkFrom_  = -1;     ///< «unir»: la primera zona elegida
+	int campPoi_       = -1;     ///< punto de interés elegido
+	// «Probar con un estado»
+	bool campTestState_ = false;
+	int campTestDay_ = 1, campTestParts_ = 0;
+	int campTestPikmin_[3]   = { 0, 20, 0 };
+	bool campTestOnions_[3]  = { false, true, false };
+	std::string campCheck_;      ///< lo que dice la comprobación (vacío = bien)
+	bool campCheckDirty_ = true;
+	unsigned campTex_   = 0;     ///< la imagen del mapa en la GPU
+	std::string campTexKey_;
+	int campTexW_ = 4, campTexH_ = 3;
+	std::string editingZoneOf_;  ///< editando el nivel de una zona: la campaña a la que volver
+	char campNewName_[96] = {};
+	bool openNewCampaign_ = false;
+	std::vector<std::pair<std::string, std::string>> campaignList_; // (nombre, carpeta)
 };
 
 } // namespace nm

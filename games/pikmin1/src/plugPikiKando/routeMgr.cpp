@@ -10,6 +10,7 @@
 #include "UfoItem.h"
 #if defined(PIKI_PC_PORT)
 #include "pc_coop.h"
+#include "mods/pc_mission.h"
 #include <queue>
 #include <vector>
 #endif
@@ -328,7 +329,8 @@ static int pcShortestPath(PathFinder* finder, WayPoint* (PathFinder::*getWp)(int
 int PathFinder::findSync(PathFinder::Buffer* bufferList, int startWPIdx, int destWPIdx, bool includeBlockedPaths)
 {
 #if defined(PIKI_PC_PORT)
-	if (pc_vs_active()) {
+	// VS y misiones: los caminos del compilador de mapas.
+	if (pc_vs_active() || pc_mission_active()) {
 		const int avoid = checkMode(PathFinderMode::AvoidOwnIndex) ? avoidWayPointIndex : -1;
 		return pcShortestPath(this, &PathFinder::getWayPoint, bufferList, mBufferSize, mGroup->mNumPoints, startWPIdx, destWPIdx,
 		                      includeBlockedPaths, avoid);

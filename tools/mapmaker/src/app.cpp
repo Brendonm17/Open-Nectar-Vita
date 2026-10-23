@@ -1,8 +1,13 @@
 #include "app.h"
 
 #include "launcher_platform.h"
+#include "obj_import.h"
 
 #include "nectar_assets/raster.h"
+#include "nectar_assets/image.h"
+#include "nectar_assets/mesh_mod.h"
+#include "nectar_mapcore/pack.h"
+#include "stb_image.h"
 #include "nectar_mapcore/map.h"
 
 #include "pc_vs_default_map.h" // la arena de serie (maps/vs/impact_arena/map.json)
@@ -16,6 +21,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <queue>
 #include <set>
 #include <sstream>
@@ -424,7 +430,7 @@ M4 segmentMatrix(const Segment& s, float y)
 
 void fallbackBox(ItemType t, V3& lo, V3& hi)
 {
-	if (t == ItemType::Rocket) {
+	if (t == ItemType::Rocket || t == ItemType::Ship) {
 		lo = V3(-45, 0, -45);
 		hi = V3(45, 150, 45);
 	} else {
@@ -466,6 +472,28 @@ void boxLines(std::vector<V3>& out, const M4& m, const V3& lo, const V3& hi)
 		out.push_back(c[k[1]]);
 	}
 }
+
+// Ruido de valor suave en [0, 1] (pincel de ruido del terreno).
+float hashCell(int x, int z)
+{
+	unsigned h = unsigned(x) * 374761393u + unsigned(z) * 668265263u;
+	h          = (h ^ (h >> 13)) * 1274126177u;
+	return float((h ^ (h >> 16)) & 0xFFFF) / 65535.0f;
+}
+
+float valueNoise(float x, float z)
+{
+	const float fx = std::floor(x), fz = std::floor(z);
+	const int ix = int(fx), iz = int(fz);
+	float tx = x - fx, tz = z - fz;
+	tx       = tx * tx * (3 - 2 * tx);
+	tz       = tz * tz * (3 - 2 * tz);
+	const float a = hashCell(ix, iz), b = hashCell(ix + 1, iz), c = hashCell(ix, iz + 1), d = hashCell(ix + 1, iz + 1);
+	return (a + (b - a) * tx) * (1 - tz) + (c + (d - c) * tx) * tz;
+}
+
+/// Ruido de -1 a 1 con detalle (dos octavas), de `scale` unidades.
+float terrainNoise2(float x, float z, float scale) { return (valueNoise(x / scale, z / scale) * 0.65f + valueNoise(x / scale * 2.3f, z / scale * 2.3f) * 0.35f) * 2.0f - 1.0f; }
 
 float pointSegmentDistance(const ImVec2& p, const ImVec2& a, const ImVec2& b)
 {
@@ -586,6 +614,7 @@ void App::frame()
 	case Screen::Building: drawBuilding(); break;
 	case Screen::Welcome: drawWelcome(); break;
 	case Screen::Editor: drawEditor(); break;
+	case Screen::Campaign: drawCampaign(); break;
 	}
 }
 
@@ -671,6 +700,7 @@ void App::drawBuilding()
 void App::enterEditor()
 {
 	preview_.start(cfg_.dataDir());
+	setTemplateDataDir(cfg_.dataDir()); // plantas y hierba del juego en las plantillas
 	lastAutosave_ = now();
 	// Al arrancar, la bienvenida (o el mapa que se pasó al abrir el programa);
 	// si ya había un mapa abierto, a él.
@@ -730,7 +760,7 @@ void App::drawWelcome()
 		ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 62);
 		ImGui::TextColored(ImVec4(0.90f, 0.87f, 0.62f, 1), "NECTAR MAP MAKER");
 		ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 62);
-		hint(tr("Crea un pequeño mundo para el modo VS."));
+		hint(tr("Crea mapas para VS, misiones y campañas."));
 		ImGui::Spacing();
 	}
 	std::error_code ec;
@@ -767,6 +797,8 @@ void App::drawWelcome()
 	ImGui::Spacing();
 	if (coursePickers()) screen_ = Screen::Editor;
 	ImGui::Spacing();
+	drawCampaignPickers();
+	ImGui::Spacing();
 	ImGui::SeparatorText(tr("O bien"));
 	if (ImGui::Button(tr("Abrir uno de mis mapas"), ImVec2(240, 40))) {
 		refreshOpenList();
@@ -793,6 +825,7 @@ void App::notify(int level, const std::string& text)
 
 void App::newMap(nectar::TerrainShape shape)
 {
+	editingZoneOf_.clear();
 	MapDoc d = nectar::defaultMapDoc();
 	if (shape != nectar::TerrainShape::Rectangle) {
 		nectar::applyTerrainShape(d, shape);
@@ -828,7 +861,7 @@ void App::newMap(nectar::TerrainShape shape)
 unsigned App::templateThumb(const TemplateInfo& t)
 {
 	// Se dibujan una vez (una por fotograma) y se guardan en la caché.
-	const std::string path = (fs::path(catalog_.cacheDir) / "templates" / (std::string(t.id) + "_v3.png")).string();
+	const std::string path = (fs::path(catalog_.cacheDir) / "templates" / (std::string(t.id) + "_v4.png")).string();
 	std::error_code ec;
 	if (!fs::exists(path, ec)) {
 		static int lastFrame = -1;
@@ -925,6 +958,7 @@ bool App::coursePickers()
 
 void App::openMap(const std::string& path)
 {
+	editingZoneOf_.clear(); // (editCampaignZone lo vuelve a poner)
 	std::string text, error;
 	MapDoc doc;
 	if (!readText(path, text)) {
@@ -969,7 +1003,7 @@ bool App::saveMap(const std::string& path)
 	}
 	// Miniatura para el menú del juego: el mapa entero visto desde arriba.
 	PreviewResult r;
-	Preview::compileNow(cfg_.dataDir(), ed_.doc, r);
+	Preview::compileNow(cfg_.dataDir(), docToCompile(), r);
 	if (r.ok) {
 		nectar::RenderOptions o;
 		o.size  = 256;
@@ -1009,7 +1043,7 @@ void App::testInGame()
 		}
 	}
 	PreviewResult r;
-	if (!Preview::compileNow(cfg_.dataDir(), ed_.doc, r)) {
+	if (!Preview::compileNow(cfg_.dataDir(), docToCompile(), r)) {
 		notify(2, tr("Todavía no se puede jugar: ") + r.error);
 		return;
 	}
@@ -1021,11 +1055,24 @@ void App::testInGame()
 	}
 	std::string err;
 	const std::string mapPath = fs::absolute(ed_.path, ec).string();
-	if (!launchGame(exe, cfg_.gameDir(), { "--vs-map", mapPath }, err)) {
+	// El último modo elegido si el mapa lo tiene; si no, el primero que tenga.
+	if (!(ed_.doc.modes & testMode_)) {
+		for (unsigned m = nectar::MAPMODE_VS; m <= nectar::MAPMODE_COOP; m <<= 1) {
+			if (ed_.doc.modes & m) {
+				testMode_ = m;
+				break;
+			}
+		}
+	}
+	std::vector<std::string> args = { "--vs-map", mapPath };
+	if (testMode_ == nectar::MAPMODE_SOLO) args = { "--mission-map", mapPath, "--mission-players", "1" };
+	if (testMode_ == nectar::MAPMODE_COOP) args = { "--mission-map", mapPath, "--mission-players", "2" };
+	if (!launchGame(exe, cfg_.gameDir(), args, err)) {
 		notify(2, err);
 		return;
 	}
-	notify(0, tr("Abriendo el juego... Jugador 1: teclado o mando 1. Jugador 2: mando 2."));
+	notify(0, testMode_ == nectar::MAPMODE_SOLO ? tr("Abriendo el juego en solo... Teclado o mando 1.")
+	                                             : tr("Abriendo el juego... Jugador 1: teclado o mando 1. Jugador 2: mando 2."));
 }
 
 void App::autosave()
@@ -1173,7 +1220,16 @@ void App::placeSelectionOnGround()
 	if (changed) ed_.touch();
 }
 
-bool App::itemHidden(const ItemRef& r) const { return std::find(hiddenItems_.begin(), hiddenItems_.end(), r) != hiddenItems_.end(); }
+bool App::itemHidden(const ItemRef& r) const
+{
+	if (std::find(hiddenItems_.begin(), hiddenItems_.end(), r) != hiddenItems_.end()) return true;
+	// «Ver el día N»: los enemigos que ese día no salen.
+	if (viewDay_ > 0 && r.type == ItemType::Enemy && itemExists(ed_.doc, r)) {
+		const nectar::DocEnemy& e = ed_.doc.enemies[size_t(r.index)];
+		if ((e.fromDay && viewDay_ < e.fromDay) || (e.untilDay && viewDay_ > e.untilDay)) return true;
+	}
+	return false;
+}
 bool App::itemLocked(const ItemRef& r) const { return std::find(lockedItems_.begin(), lockedItems_.end(), r) != lockedItems_.end(); }
 
 void App::toggleHidden(const ItemRef& r)
@@ -1207,10 +1263,12 @@ std::string App::placeAsset(const PlaceChoice& c) const
 	switch (c.type) {
 	case ItemType::Prop: return c.asset;
 	case ItemType::Pellet: return "objects/pellets/white1.mod";
-	case ItemType::Piece: {
+	case ItemType::Piece:
+	case ItemType::ShipPart: {
 		const nectar::ShipPartInfo* info = partInfo(c.label);
 		return info ? info->model : "objects/ufoparts/fuzoku1.mod";
 	}
+	case ItemType::StoryOnion: return "objects/goal/goal.mod";
 	case ItemType::Guard: return "tekis/swallow/swallow.mod";
 	case ItemType::Enemy: {
 		const nectar::EnemyInfo* info = enemyInfo(c.label);
@@ -1220,18 +1278,44 @@ std::string App::placeAsset(const PlaceChoice& c) const
 		const nectar::ObjectInfo* info = objectInfo(c.label);
 		return info ? info->model : "";
 	}
+	case ItemType::Gen: {
+		const GameGenChoice* g = findGameGen(cfg_.dataDir(), c.label);
+		return g ? g->gen.model : "";
+	}
 	default: return "";
 	}
 }
 
 void App::placeAt(const V3& at)
 {
+	// Lo de un modo que el mapa no tiene (p. ej. lo elegido antes de cambiarlo).
+	if (isVsItem(place_.type) && !(ed_.doc.modes & nectar::MAPMODE_VS)) return;
+	if (isStoryItem(place_.type) && !ed_.doc.story.present) return;
 	const double x = snap(at.x), z = snap(at.z);
 	ItemRef r;
 	if (place_.type == ItemType::Prop) {
 		r                      = addItem(ed_.doc, ItemType::Prop, x, z, place_.asset);
 		ed_.doc.props.back().y = docHeight(float(x), float(z));
-	} else if (place_.type == ItemType::Enemy || place_.type == ItemType::Object) {
+		// Mallas propias: partes del nivel, se pisan.
+		if (place_.asset.rfind("map:", 0) == 0 || place_.asset.rfind("cut:", 0) == 0) ed_.doc.props.back().collide = ed_.doc.props.back().ground = true;
+		if (const OfficialPiece* piece = findOfficialPiece(place_.label)) {
+			if (place_.asset == piece->asset()) {
+				ed_.doc.props.back().collide = piece->collide;
+				ed_.doc.props.back().ground  = false;
+			}
+		}
+	} else if (place_.type == ItemType::Gen) {
+		const GameGenChoice* c = findGameGen(cfg_.dataDir(), place_.label);
+		if (!c) return;
+		nectar::DocGen g = c->gen;
+		g.x              = x;
+		g.z              = z;
+		g.y              = docHeight(float(x), float(z));
+		g.mirror         = ed_.doc.symmetric && (ed_.doc.modes & nectar::MAPMODE_VS);
+		ed_.doc.gens.push_back(g);
+		r = { ItemType::Gen, int(ed_.doc.gens.size()) - 1, 0 };
+	} else if (place_.type == ItemType::Enemy || place_.type == ItemType::Object || place_.type == ItemType::StoryOnion
+	           || place_.type == ItemType::ShipPart) {
 		r = addItem(ed_.doc, place_.type, x, z, place_.label);
 	} else {
 		r = addItem(ed_.doc, place_.type, x, z);
@@ -1262,10 +1346,29 @@ std::vector<App::Issue> App::checkMap() const
 		}
 	}
 	const int k = d.symmetric ? 2 : 1;
-	if (d.pieces.empty()) out.push_back({ true, tr("Pon al menos una pieza de la nave para que haya algo que recoger."), false, {} });
-	if (int(d.pieces.size()) * k > 16) out.push_back({ true, tr("Hay demasiadas piezas de la nave (el máximo son 16 en total)."), false, {} });
-	if (int(d.pellets.size()) * k > 16) out.push_back({ true, tr("Hay demasiadas pastillas (el máximo son 16 en total)."), false, {} });
-	if (int(d.guards.size()) * k > 4) out.push_back({ true, tr("Hay demasiados Bulborbs (el máximo son 4 en total)."), false, {} });
+	const bool vs = (d.modes & nectar::MAPMODE_VS) != 0;
+	if (vs && d.pieces.empty()) out.push_back({ true, tr("Pon al menos una pieza de la nave para que haya algo que recoger."), false, {} });
+	if (vs && int(d.pieces.size()) * k > nectar::kMapMaxPieces) out.push_back({ true, tr("Hay demasiadas piezas de la nave (el máximo son 32 en total)."), false, {} });
+	// La misión: lo que pide cada modo (el resto lo dice el compilador).
+	if (d.story.present && (d.modes & (nectar::MAPMODE_SOLO | nectar::MAPMODE_COOP))) {
+		if ((d.modes & nectar::MAPMODE_COOP) && d.story.captainCount < 2)
+			out.push_back({ true, tr("Para coop hacen falta dos capitanes."), false, {} });
+		if (d.story.rules.objective == "parts" && d.story.parts.empty())
+			out.push_back({ true, tr("La misión pide piezas de la nave: pon alguna (Poner cosas > Misión)."), false, {} });
+		bool onion[3] = {};
+		for (const nectar::DocStoryOnion& o : d.story.onions) {
+			if (o.color >= 0 && o.color < 3) {
+				if (onion[o.color]) out.push_back({ true, tr("Hay dos cebollas del mismo color en la misión."), false, {} });
+				onion[o.color] = true;
+			}
+		}
+		for (int c = 0; c < 3; c++) {
+			if (d.story.rules.startPikmin[c] > 0 && !onion[c])
+				out.push_back({ true, tr("Hay Pikmin al empezar de un color sin su cebolla en la misión."), false, {} });
+		}
+	}
+	if (int(d.pellets.size()) * k > nectar::kMapMaxPellets) out.push_back({ true, tr("Hay demasiadas pastillas (el máximo son 48 en total)."), false, {} });
+	if (int(d.guards.size()) * k > nectar::kMapMaxGuards) out.push_back({ true, tr("Hay demasiados Bulborbs (el máximo son 16 en total)."), false, {} });
 	for (std::size_t index = 0; index < d.props.size(); index++) {
 		const nectar::DocProp& prop = d.props[index];
 		if (!std::isfinite(prop.scale) || prop.scale <= 0.0 || prop.scale > 20.0)
@@ -1289,9 +1392,12 @@ std::vector<App::Issue> App::checkMap() const
 	}
 	if (compiled_.generation == ed_.liveGeneration && !compiled_.routes.points.empty()) {
 		const std::map<int, int> components = routeComponents(compiled_.routes);
-		const int start = nearestRoutePoint(compiled_.routes, d.bases[0].x, d.bases[0].z);
+		// Desde la salida del Jugador 1 (VS) o el primer capitán (misión).
+		const bool fromBase = (d.modes & nectar::MAPMODE_VS) || !d.story.present;
+		const int start     = fromBase ? nearestRoutePoint(compiled_.routes, d.bases[0].x, d.bases[0].z)
+		                               : nearestRoutePoint(compiled_.routes, d.story.captains[0].x, d.story.captains[0].z);
 		for (const ItemRef& r : allItems(d)) {
-			if (r.type != ItemType::Pellet && r.type != ItemType::Piece && r.type != ItemType::BigPiece) continue;
+			if (r.type != ItemType::Pellet && r.type != ItemType::Piece && r.type != ItemType::BigPiece && r.type != ItemType::ShipPart) continue;
 			const Xform x = getXform(d, r);
 			const int goal = nearestRoutePoint(compiled_.routes, x.x, x.z);
 			bool reachable = start >= 0 && goal >= 0 && components.count(start) && components.count(goal) && components.at(start) == components.at(goal);
@@ -1405,16 +1511,43 @@ void App::createGroundUnder(const ItemRef& item)
 
 // ── Recursos ────────────────────────────────────────────────────────────────
 
+std::string App::mapDir() const { return ed_.path.empty() ? std::string() : fs::path(ed_.path).parent_path().string(); }
+
+std::string App::assetFile(const std::string& asset) const
+{
+	if (asset.rfind("map:", 0) == 0) {
+		const std::string rel = asset.substr(4);
+		if (mapDir().empty() || rel.find("..") != std::string::npos) return std::string();
+		return (fs::path(mapDir()) / rel).string();
+	}
+	return cfg_.dataDir() + "/" + asset;
+}
+
+nectar::MapDoc App::docToCompile() const
+{
+	nectar::MapDoc d = ed_.doc;
+	d.dir            = mapDir();
+	return d;
+}
+
 std::shared_ptr<GpuModel> App::model(const std::string& asset)
 {
-	auto it = models_.find(asset);
+	// Las mallas propias, por su archivo (dos mapas pueden tener la misma ruta).
+	const std::string key = asset.rfind("map:", 0) == 0 ? assetFile(asset) : asset;
+	auto it               = models_.find(key);
 	if (it != models_.end()) return it->second;
 	nectar::Model m;
 	std::string err;
 	std::shared_ptr<GpuModel> gpu;
-	if (nectar::loadMod(cfg_.dataDir() + "/" + asset, m, err)) gpu = renderer_.upload(m);
-	else modelErrors_[asset] = err;
-	models_[asset] = gpu;
+	if (asset.rfind("cut:", 0) == 0) {
+		if (std::shared_ptr<nectar::Model> cut = cutModel(asset)) gpu = renderer_.upload(*cut);
+		else modelErrors_[asset] = tr("no se puede sacar el recorte");
+	} else if (nectar::loadMod(assetFile(asset), m, err)) {
+		gpu = renderer_.upload(m);
+	} else {
+		modelErrors_[asset] = err;
+	}
+	models_[key] = gpu;
 	return gpu;
 }
 
@@ -1430,8 +1563,44 @@ unsigned App::thumb(const std::string& path)
 	return t;
 }
 
+std::shared_ptr<nectar::Model> App::cutModel(const std::string& asset)
+{
+	auto it = cutModels_.find(asset);
+	if (it != cutModels_.end()) return it->second;
+	std::shared_ptr<nectar::Model> out;
+	std::string mod, err;
+	nectar::Vec3 lo, hi;
+	bool object = false;
+	if (nectar::parseCutAsset(asset, mod, lo, hi, &object)) {
+		if (std::shared_ptr<nectar::Model> course = courseModel(mod)) {
+			std::vector<std::uint8_t> bytes;
+			nectar::ModRegionInfo info;
+			auto m = std::make_shared<nectar::Model>();
+			if (nectar::extractModRegion(*course, lo, hi, bytes, info, err, object) && nectar::parseMod(bytes.data(), bytes.size(), *m, err)) out = m;
+		}
+	}
+	cutModels_[asset] = out;
+	return out;
+}
+
+unsigned App::cutThumb(const std::string& asset)
+{
+	const std::string path = (fs::path(catalog_.cacheDir) / "pieces" / (std::to_string(std::hash<std::string>()(asset)) + ".png")).string();
+	std::error_code ec;
+	if (!fs::exists(path, ec)) {
+		std::shared_ptr<nectar::Model> m = cutModel(asset);
+		if (!m) return 0;
+		fs::create_directories(fs::path(path).parent_path(), ec);
+		nectar::RenderOptions o;
+		o.size = 128;
+		nectar::writePng(path, nectar::renderModel(*m, o));
+	}
+	return thumb(path);
+}
+
 unsigned App::assetThumb(const std::string& asset)
 {
+	if (asset.rfind("cut:", 0) == 0) return cutThumb(asset);
 	for (const nectar::CatalogEntry& e : catalog_.entries) {
 		if (e.path == asset) return thumb(e.thumb);
 	}
@@ -1467,6 +1636,13 @@ std::string App::markerAsset(const ItemRef& r) const
 	case ItemType::BigPiece: return "objects/ufoparts/fuzoku1.mod";
 	case ItemType::Guard: return "tekis/chappy/chappy.mod";
 	case ItemType::Prop: return ed_.doc.props[std::size_t(r.index)].asset;
+	case ItemType::Captain: return r.index == 0 ? "pikis/nv1Model.mod" : "pikis/nv2Model.mod";
+	case ItemType::Ship: return ""; // como el cohete: una columna
+	case ItemType::StoryOnion: return "objects/goal/goal.mod";
+	case ItemType::ShipPart: {
+		if (const nectar::ShipPartInfo* info = partInfo(ed_.doc.story.parts[std::size_t(r.index)].id)) return info->model;
+		return "objects/ufoparts/fuzoku1.mod";
+	}
 	default: return "";
 	}
 }
@@ -1477,6 +1653,10 @@ Rgba App::markerTint(const ItemRef& r) const
 		return c == 1 ? Rgba { 0.45f, 0.6f, 1.0f, 1 } : c == 2 ? Rgba { 1.0f, 0.9f, 0.35f, 1 } : Rgba { 1.0f, 0.45f, 0.4f, 1 };
 	};
 	if (r.type == ItemType::Onion) return colourOf(r.sub == 0 ? 1 : r.sub == 1 ? 0 : 2);
+	if (r.type == ItemType::StoryOnion) {
+		const int c = ed_.doc.story.onions[std::size_t(r.index)].color;
+		return colourOf(c == 0 ? 1 : c == 1 ? 0 : 2);
+	}
 	if (r.type == ItemType::Pellet) return colourOf(pelletColour(ed_.doc.pellets[std::size_t(r.index)].id));
 	return Rgba();
 }
@@ -1520,11 +1700,13 @@ void App::drawEditor()
 			}
 		}
 		compiled_ = std::move(r);
+		if (hasGroundProps() && compiled_.ok) buildModelField(compiled_.full, meshField_);
+		else meshField_ = CourseField();
 	}
 	if (requestedLive_ != ed_.liveGeneration && !preview_.busy() && now() - lastRequest_ > 0.16) {
 		requestedLive_ = ed_.liveGeneration;
 		lastRequest_   = now();
-		preview_.request(ed_.doc, ed_.liveGeneration);
+		preview_.request(docToCompile(), ed_.liveGeneration);
 	}
 
 	const ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -1607,6 +1789,15 @@ void App::drawTopBar(const Rect& r)
 
 	ImGui::SetCursorPos(ImVec2(190, 16));
 	const ImVec2 b(88, 38);
+	// Editando el nivel de una zona: volver a su campaña (guardando el nivel).
+	if (!editingZoneOf_.empty()) {
+		if (ImGui::Button(tr("< Campaña"), ImVec2(110, 38))) {
+			if (ed_.dirty && !ed_.path.empty()) saveMap(ed_.path);
+			openCampaign(editingZoneOf_);
+		}
+		ImGui::SetItemTooltip(tr("Guarda este nivel y vuelve al mapa de la campaña"));
+		ImGui::SameLine();
+	}
 	if (ImGui::Button(tr("Nuevo"), b)) openNew_ = true;
 	ImGui::SetItemTooltip(tr("Empezar otro mapa"));
 	ImGui::SameLine();
@@ -1618,6 +1809,12 @@ void App::drawTopBar(const Rect& r)
 	ImGui::SameLine();
 	if (ImGui::Button(tr("Guardar"), b)) saveOrAsk(false);
 	ImGui::SetItemTooltip(tr("Guardar (Ctrl+S)"));
+	ImGui::SameLine();
+	if (ImGui::Button(tr("Exportar"), b)) {
+		if (ed_.path.empty() || ed_.dirty) saveOrAsk(false);
+		if (!ed_.path.empty() && !ed_.dirty) exportPackOf(fs::path(ed_.path).parent_path().string());
+	}
+	ImGui::SetItemTooltip(tr("Guardar un .nectarpack para compartir este mapa"));
 	ImGui::SameLine(0, 14);
 	ImGui::BeginDisabled(!ed_.canUndo());
 	if (ImGui::Button(tr("Deshacer"), ImVec2(92, 38))) ed_.undo();
@@ -1667,10 +1864,29 @@ void App::drawTopBar(const Rect& r)
 	ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.45f, 0.59f, 0.20f, 1));
 	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.58f, 0.70f, 0.27f, 1));
 	ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.07f, 0.11f, 0.04f, 1));
-	if (ImGui::Button(tr("Probar en el juego"), ImVec2(testW, 38))) testInGame();
+	if (ImGui::Button(tr("Probar en el juego"), ImVec2(testW, 38))) {
+		// Con varios modos, se elige en cuál.
+		const unsigned m = ed_.doc.modes;
+		if ((m & (m - 1)) != 0) ImGui::OpenPopup("##test_mode");
+		else testInGame();
+	}
 	const ImVec2 tmin = ImGui::GetItemRectMin(), tmax = ImGui::GetItemRectMax();
 	testButtonRect_   = { tmin.x, tmin.y, tmax.x - tmin.x, tmax.y - tmin.y };
 	ImGui::PopStyleColor(3);
+	if (ImGui::BeginPopup("##test_mode")) {
+		const struct {
+			unsigned mode;
+			const char* label;
+		} modes[] = { { nectar::MAPMODE_VS, tr("VS (2 jugadores)") }, { nectar::MAPMODE_SOLO, tr("Solo (1 jugador)") }, { nectar::MAPMODE_COOP, tr("Coop (2 jugadores)") } };
+		for (const auto& m : modes) {
+			if (!(ed_.doc.modes & m.mode)) continue;
+			if (ImGui::Selectable(m.label, testMode_ == m.mode)) {
+				testMode_ = m.mode;
+				testInGame();
+			}
+		}
+		ImGui::EndPopup();
+	}
 	ImGui::SetItemTooltip(tr("Guarda el mapa y lo abre en el juego para jugarlo (F5)"));
 	ImGui::End();
 }
@@ -1698,7 +1914,8 @@ void App::drawToolbox(const Rect& r)
 		                { Tool::Water, tr("Agua"), tr("Pinta lagos (solo los Pikmin azules entran)"), true, Icon::Water },
 		                { Tool::Walls, tr("Muros"), tr("Dibuja muros arrastrando"), false, Icon::Walls },
 		                { Tool::Ramp, tr("Rampas"), tr("Une dos alturas con una pendiente transitable"), true, Icon::Plateau },
-		                { Tool::Scatter, tr("Decorar"), tr("Esparce hierbas, flores y piedras pintando"), false, Icon::Decor } };
+		                { Tool::Scatter, tr("Decorar"), tr("Esparce hierbas, flores y piedras pintando"), false, Icon::Decor },
+		                { Tool::Trace, tr("Trazos"), tr("Caminos, ríos y calzadas por puntos, o zonas de suelo con contorno a mano"), true, Icon::Floor } };
 	int n = 1;
 	for (const T& t : tools) {
 		char label[64];
@@ -1772,6 +1989,7 @@ void App::drawToolOptions()
 	case Tool::Walls: drawWallOptions(); break;
 	case Tool::Ramp: drawRampOptions(); break;
 	case Tool::Scatter: drawScatterOptions(); break;
+	case Tool::Trace: drawTraceOptions(); break;
 	}
 }
 
@@ -1816,7 +2034,33 @@ void App::drawPlaceOptions()
 		ImGui::PopID();
 	};
 
-	if (iconHeader(tr("Piezas de la nave"), Icon::Parts, ImGuiTreeNodeFlags_DefaultOpen)) {
+	if (ed_.doc.story.present && iconHeader(tr("Misión: piezas para la nave"), Icon::Parts, ImGuiTreeNodeFlags_DefaultOpen)) {
+		hint(tr("En solo y coop: hay que llevarlas a la nave. Cada pieza solo puede estar una vez."));
+		std::vector<std::pair<PlaceChoice, std::string>> parts;
+		for (const nectar::ShipPartInfo& p : nectar::shipParts()) {
+			bool used = false;
+			for (const nectar::DocShipPart& sp : ed_.doc.story.parts) used = used || sp.id == p.id;
+			if (used) continue;
+			char text[96];
+			std::snprintf(text, sizeof(text), tr("La levantan %d Pikmin (más rápido con %d)"), p.carryMin, p.carryMax);
+			parts.push_back({ { ItemType::ShipPart, "", p.id }, text });
+		}
+		grid("storyparts", parts, "%s");
+	}
+	if (ed_.doc.story.present && iconHeader(tr("Misión: cebollas"), Icon::Pellets)) {
+		hint(tr("En solo y coop: una de cada color como mucho. Hace falta la de cada color de Pikmin del principio."));
+		const char* colours[] = { tr("Azul"), tr("Roja"), tr("Amarilla") };
+		for (int c = 0; c < 3; c++) {
+			bool used = false;
+			for (const nectar::DocStoryOnion& o : ed_.doc.story.onions) used = used || o.color == c;
+			if (c) ImGui::SameLine();
+			ImGui::BeginDisabled(used);
+			const std::string id = std::to_string(c);
+			if (choiceButton(colours[c], place_.type == ItemType::StoryOnion && place_.label == id, ImVec2(90, 32))) place_ = { ItemType::StoryOnion, "", id };
+			ImGui::EndDisabled();
+		}
+	}
+	if ((ed_.doc.modes & nectar::MAPMODE_VS) && iconHeader(tr("Piezas de la nave"), Icon::Parts, ImGuiTreeNodeFlags_DefaultOpen)) {
 		hint(tr("Lo que hay que llevar al cohete. Las grandes necesitan muchos Pikmin y dan más puntos."));
 		std::vector<std::pair<PlaceChoice, std::string>> parts;
 		for (const nectar::ShipPartInfo& p : nectar::shipParts()) {
@@ -1869,10 +2113,91 @@ void App::drawPlaceOptions()
 		for (const nectar::ObjectInfo& o : nectar::objectKinds()) list.push_back({ { ItemType::Object, "", o.id }, std::string(tr(o.label)) + "\n" + tr(o.hint) });
 		grid("objects", list, "%s");
 	}
+	{
+		const std::vector<GameGenChoice>& gens = gameGenCatalog(cfg_.dataDir());
+		if (!gens.empty() && iconHeader(tr("Objetos del juego (como en la historia)"), Icon::More)) {
+			hint(tr("Los mismos generadores que los niveles originales: el juego los crea y los recuerda de un día a otro. Al elegir uno, puedes cambiar su radio, cuántos salen o su giro."));
+			std::string category;
+			std::vector<std::pair<PlaceChoice, std::string>> list;
+			auto flush = [&] {
+				if (list.empty()) return;
+				ImGui::TextColored(kDim, "%s", tr(category.c_str()));
+				grid(category.c_str(), list, "%s");
+				list.clear();
+			};
+			for (const GameGenChoice& c : gens) {
+				if (c.category != category) {
+					flush();
+					category = c.category;
+				}
+				list.push_back({ { ItemType::Gen, "", c.key }, c.gen.label });
+			}
+			flush();
+		}
+	}
 
 	if (courseMode()) {
+		drawCutOptions();
 		hint(tr("En los escenarios del juego todavía no se puede añadir decoración: el nivel ya trae la suya."));
 		return;
+	}
+	if (iconHeader(tr("Piezas de los niveles del juego"), Icon::More)) {
+		hint(tr("Latas, tocones, raíces, botellas, rocas... sacadas de los escenarios del juego (de tu copia: el mapa solo guarda de dónde)."));
+		std::vector<std::pair<PlaceChoice, std::string>> list;
+		for (const OfficialPiece& p : officialPieces()) list.push_back({ { ItemType::Prop, p.asset(), p.id }, tr(p.label) });
+		grid("officialpieces", list, "%s");
+	}
+	if (!cfg_.pieces.empty() && iconHeader(tr("Mis piezas (recortes de escenarios)"), Icon::More)) {
+		hint(tr("Trozos de los niveles del juego que has guardado (troncos, raíces, latas, rocas...). Se pisan y se ven igual que en el nivel. Con «Quitar» sale de la biblioteca."));
+		std::vector<std::pair<PlaceChoice, std::string>> list;
+		for (const auto& p : cfg_.pieces) list.push_back({ { ItemType::Prop, p.second, p.first }, p.first });
+		grid("pieces", list, "%s");
+		for (std::size_t i = 0; i < cfg_.pieces.size(); i++) {
+			ImGui::PushID(int(i));
+			if (ImGui::SmallButton(tr("Quitar"))) {
+				cfg_.pieces.erase(cfg_.pieces.begin() + long(i));
+				cfg_.save();
+				ImGui::PopID();
+				break;
+			}
+			ImGui::SameLine();
+			ImGui::TextUnformatted(cfg_.pieces[i].first.c_str());
+			ImGui::PopID();
+		}
+	}
+	if (iconHeader(tr("Mallas propias (OBJ)"), Icon::More)) {
+		hint(tr("Partes del nivel hechas en Blender u otro programa (.obj con su .mtl y texturas PNG o JPG): suelos, troncos, cuevas, puentes... Se guardan en la carpeta del mapa y viajan con él."));
+		if (ed_.path.empty()) {
+			hint(tr("Guarda el mapa primero: las mallas van en su carpeta."));
+		} else {
+			static float importScale = 1.0f;
+			ImGui::SetNextItemWidth(160);
+			ImGui::DragFloat(tr("Escala al importar"), &importScale, 0.1f, 0.01f, 1000.0f, "%.2f");
+			if (ImGui::Button(tr("Importar OBJ..."))) {
+				const fs::path p = pikmin::launcher::platform::askForFile(tr("Elige la malla"), tr("Malla OBJ"), "*.obj");
+				if (!p.empty()) {
+					std::string asset, err;
+					ObjInfo info;
+					if (importObj(p.string(), mapDir(), importScale, asset, info, err)) {
+						models_.erase(assetFile(asset));
+						char buf[256];
+						std::snprintf(buf, sizeof(buf), tr("Malla importada: %zu triángulos, mide %.0f × %.0f × %.0f. Haz clic en el mapa para ponerla."), info.triangles,
+						              info.max.x - info.min.x, info.max.y - info.min.y, info.max.z - info.min.z);
+						notify(info.warnings.empty() ? 0 : 1, std::string(buf) + (info.warnings.empty() ? "" : "\n" + info.warnings));
+						place_ = { ItemType::Prop, asset, asset };
+					} else {
+						notify(2, tr("No se pudo importar: ") + err);
+					}
+				}
+			}
+			std::error_code ec;
+			for (const auto& e : fs::directory_iterator(fs::path(mapDir()) / "meshes", ec)) {
+				if (e.path().extension() != ".mod") continue;
+				const std::string asset = "map:meshes/" + e.path().filename().string();
+				const bool on           = place_.type == ItemType::Prop && place_.asset == asset;
+				if (ImGui::Selectable(e.path().stem().string().c_str(), on)) place_ = { ItemType::Prop, asset, asset };
+			}
+		}
 	}
 	{
 		const ImVec2 at = ImGui::GetCursorScreenPos();
@@ -2102,6 +2427,18 @@ void App::drawFloorOptions()
 	if (ImGui::Button(tr("Menos##l"), ImVec2(80, 0))) growMap(0, -4);
 	const MapDoc& d = ed_.doc;
 	ImGui::TextColored(kDim, tr("Ahora: %.0f x %.0f"), d.maxX - d.minX, d.maxZ - d.minZ);
+	ImGui::Text(tr("Detalle"));
+	ImGui::SameLine(80);
+	const double cells[] = { 50.0, 25.0 };
+	const char* cellNames[] = { tr("Normal"), tr("Fino") };
+	for (int i = 0; i < 2; i++) {
+		if (i) ImGui::SameLine();
+		if (choiceButton(cellNames[i], std::fabs(d.cell - cells[i]) < 0.5, ImVec2(80, 0)) && std::fabs(d.cell - cells[i]) >= 0.5 && ensureTerrain()) {
+			if (nectar::resampleTerrain(ed_.doc, cells[i])) ed_.touch();
+			else notify(1, tr("El mapa es demasiado grande para ese detalle (más de 400 celdas por lado)."));
+		}
+	}
+	hint(tr("Fino: bordes y laderas con el doble de detalle (gasta más vértices)."));
 
 	ImGui::SeparatorText(tr("Formas rápidas"));
 	hint(tr("Cambian dónde hay suelo de golpe (se puede deshacer)."));
@@ -2143,10 +2480,14 @@ void App::drawFloorOptions()
 void App::drawHeightOptions()
 {
 	ImGui::SeparatorText(tr("Montañas y hoyos"));
-	const char* ops[]  = { tr("Subir"), tr("Bajar"), tr("Allanar"), tr("Suavizar") };
+	const char* ops[]  = { tr("Subir"), tr("Bajar"), tr("Allanar"), tr("Suavizar"), tr("Ruido"), tr("Colina"), tr("Cráter"), tr("Meseta") };
 	const char* tips[] = { tr("Pinta para levantar el terreno (montañas, rampas)."), tr("Pinta para hundir el terreno (hoyos, valles)."),
-		                   tr("Deja el terreno a la altura donde empiezas a pintar."), tr("Quita picos y escalones.") };
-	for (int i = 0; i < 4; i++) {
+		                   tr("Deja el terreno a la altura donde empiezas a pintar."), tr("Quita picos y escalones."),
+		                   tr("Pinta para que el terreno salga irregular, como en los niveles del juego."),
+		                   tr("Un clic: una colina redonda del tamaño del pincel (la fuerza es su altura)."),
+		                   tr("Un clic: un cráter con su borde levantado (la fuerza es su hondura)."),
+		                   tr("Un clic: una meseta plana con laderas (la fuerza es su altura).") };
+	for (int i = 0; i < 8; i++) {
 		if (i % 2) ImGui::SameLine();
 		if (choiceButton(ops[i], int(heightOp_) == i, ImVec2(130, 34))) heightOp_ = HeightOp(i);
 	}
@@ -2171,6 +2512,10 @@ void App::drawPaintOptions()
 	drawBrushSettings();
 	hint(tr("Alt + clic toma el material del suelo."));
 	drawSwatches(true);
+	ImGui::SeparatorText(tr("Acantilados"));
+	hint(tr("Pinta del suelo elegido (mejor una roca) todas las pendientes fuertes del mapa, como las paredes de los niveles del juego."));
+	ImGui::SliderFloat(tr("Desde la pendiente"), &cliffSlope_, 0.4f, 3.0f, "%.1f");
+	if (ImGui::Button(tr("Pintar acantilados"), ImVec2(-1, 30))) paintCliffs();
 	if (ImGui::CollapsingHeader(tr("Ajustes del suelo elegido (avanzado)"))) {
 		nectar::DocTerrain& g = ed_.doc.terrain;
 		nectar::DocMaterial& m = g.palette[std::size_t(paintMaterial_)];
@@ -2311,7 +2656,7 @@ void App::scatter(const V3& at)
 	if (scatterSet_.empty()) return;
 	// El juego tiene un tope de vértices por mapa: se para un poco antes.
 	constexpr std::size_t kMaxProps = 1500;
-	if (d.props.size() >= kMaxProps || (compiled_.ok && compiled_.vertices > 58000)) {
+	if (d.props.size() >= kMaxProps || (compiled_.ok && compiled_.vertices > nectar::kMapMaxVertices * 9 / 10)) {
 		if (!scatterFullWarned_) notify(1, tr("Ya hay mucha decoración: el mapa no cabría en el juego."));
 		scatterFullWarned_ = true;
 		return;
@@ -2429,6 +2774,7 @@ const char* App::toolHelp() const
 	case Tool::Paint: return tr("Pinta con el ratón para cambiar el aspecto del suelo.");
 	case Tool::Water: return waterErase_ ? tr("Pinta para quitar agua.") : tr("Pinta sobre el suelo para hacer un lago (Mayús: quitar agua).");
 	case Tool::Walls: return tr("Haz clic y arrastra para dibujar un muro.");
+	case Tool::Trace: return traceNodes_.empty() ? tr("Haz clic en el mapa para poner el primer punto.") : tr("Clic: otro punto. Retroceso: quitar el último. Intro: aplicar.");
 	case Tool::Ramp: return drawingRamp_ ? tr("2/2: mueve el ratón a la zona alta y haz clic para crear.") : tr("1/2: haz clic donde debe empezar la rampa.");
 	}
 	return "";
@@ -2553,8 +2899,10 @@ void App::drawMinimap()
 		if (caps.perPlayer) {
 			const Rgba pc = playerColour(it.index);
 			c             = ImGui::ColorConvertFloat4ToU32(ImVec4(pc.r, pc.g, pc.b, 1));
-		} else if (it.type == ItemType::Piece || it.type == ItemType::BigPiece) {
+		} else if (it.type == ItemType::Piece || it.type == ItemType::BigPiece || it.type == ItemType::ShipPart) {
 			c = IM_COL32(240, 200, 60, 255);
+		} else if (it.type == ItemType::Captain || it.type == ItemType::Ship || it.type == ItemType::StoryOnion) {
+			c = IM_COL32(120, 220, 255, 255);
 		} else if (it.type == ItemType::Enemy || it.type == ItemType::Guard) {
 			c = IM_COL32(230, 90, 200, 255);
 		} else if (it.type == ItemType::Prop) {
@@ -2579,6 +2927,67 @@ void App::drawMinimap()
 		dl->AddCircleFilled(t, 3.5f, IM_COL32(255, 255, 255, 255));
 	}
 	dl->AddRect(o, ImVec2(o.x + w, o.y + h), IM_COL32(112, 139, 59, 255), 8.0f, 0, 2.0f);
+}
+
+// Qué ocurre en una reacción (enemigos, pastillas, bombas o néctar) y cuántos.
+// true si ha cambiado algo.
+static bool editReaction(nectar::DocReaction& r)
+{
+	bool changed = false;
+	const char* actions[] = { tr("No ocurre nada"), tr("Aparecen enemigos"), tr("Aparecen pellets"), tr("Aparecen rocas bomba"), tr("Aparece néctar") };
+	int action = r.action == "enemy" ? 1 : r.action == "pellet" ? 2 : r.action == "bomb" ? 3 : r.action == "nectar" ? 4 : 0;
+	ImGui::SetNextItemWidth(-1);
+	if (ImGui::Combo(tr("Entonces ocurre"), &action, actions, 5)) {
+		if (action == 0) r = nectar::DocReaction {};
+		else r.action = action == 1 ? "enemy" : action == 2 ? "pellet" : action == 3 ? "bomb" : "nectar";
+		if (action == 1 && !enemyInfo(r.value)) r.value = "chappy";
+		if (action == 2 && !validPelletId(r.value)) r.value = "pr01";
+		if (action >= 3) r.value.clear();
+		changed = true;
+	}
+	if (action == 1) {
+		const nectar::EnemyInfo* selected = enemyInfo(r.value);
+		if (ImGui::BeginCombo(tr("Enemigo que aparece"), selected ? tr(selected->label) : r.value.c_str())) {
+			for (const nectar::EnemyInfo& enemy : nectar::enemyTypes()) {
+				if (ImGui::Selectable(tr(enemy.label), r.value == enemy.id)) {
+					r.value = enemy.id;
+					changed = true;
+				}
+			}
+			ImGui::EndCombo();
+		}
+	} else if (action == 2) {
+		int colour = pelletColour(r.value), value = pelletValue(r.value);
+		const char* colours[] = { tr("Roja"), tr("Azul"), tr("Amarilla") };
+		for (int c = 0; c < 3; c++) {
+			if (c) ImGui::SameLine();
+			if (choiceButton(colours[c], colour == c, ImVec2(78, 0))) {
+				r.value = pelletId(c, value);
+				changed = true;
+			}
+		}
+		const int values[] = { 1, 5, 10, 20 };
+		for (int k = 0; k < 4; k++) {
+			if (k) ImGui::SameLine();
+			char label[8];
+			std::snprintf(label, sizeof(label), "%d", values[k]);
+			if (choiceButton(label, value == values[k], ImVec2(55, 0))) {
+				r.value = pelletId(colour, values[k]);
+				changed = true;
+			}
+		}
+	}
+	if (action != 0) {
+		if (ImGui::SliderInt(tr("Cantidad que aparece"), &r.count, 1, 8)) changed = true;
+		if (r.count > 1) {
+			float radius = float(r.radius);
+			if (ImGui::SliderFloat(tr("Separación al aparecer"), &radius, 0.0f, 400.0f, "%.0f")) {
+				r.radius = radius;
+				changed = true;
+			}
+		}
+	}
+	return changed;
 }
 
 void App::drawSelected()
@@ -2810,9 +3219,48 @@ void App::drawSelected()
 	case ItemType::Enemy: {
 		if (const nectar::EnemyInfo* info = enemyInfo(d.enemies[i].type)) hint(tr(info->hint));
 		hint(tr("Se comporta como en el juego."));
+		if (d.story.present) {
+			// Misiones de varios días y campañas.
+			nectar::DocEnemy& e        = d.enemies[i];
+			static const char* kIds[]  = { "auto", "always", "never", "days" };
+			const char* labels[]       = { tr("Como en el juego (los jefes no)"), tr("Siempre"), tr("Nunca"), tr("Al cabo de unos días") };
+			int rule                   = 0;
+			for (int k = 0; k < 4; k++) {
+				if (e.respawn == kIds[k]) rule = k;
+			}
+			ImGui::SetNextItemWidth(-1);
+			if (ImGui::Combo(tr("Si se le derrota, vuelve"), &rule, labels, 4)) {
+				e.respawn = kIds[rule];
+				ch        = true;
+			}
+			if (rule == 3) ch |= ImGui::SliderInt(tr("Días hasta que vuelve"), &e.respawnDays, 1, 30);
+			ch |= ImGui::SliderInt(tr("Sale desde el día"), &e.fromDay, 0, 30, e.fromDay ? "%d" : tr("el primero"));
+			ch |= ImGui::SliderInt(tr("Sale hasta el día"), &e.untilDay, 0, 30, e.untilDay ? "%d" : tr("siempre"));
+			if (e.untilDay && e.untilDay < e.fromDay) e.untilDay = e.fromDay;
+		}
 		break;
 	}
-	case ItemType::Gen: hint(tr("Es del nivel original: el juego lo crea igual que en la historia. Puedes moverlo, subirlo o quitarlo.")); break;
+	case ItemType::Gen: {
+		nectar::DocGen& g = d.gens[i];
+		hint(tr("Lo crea el juego igual que en la historia, y recuerda de un día a otro lo que pase con él."));
+		nectar::GenSettings s;
+		if (!nectar::readGenSettings(g, s)) break;
+		bool gc = false;
+		if (s.hasRadius) gc |= ImGui::SliderFloat(tr("Radio donde salen"), &s.radius, 0.0f, 500.0f, "%.0f");
+		if (s.hasMinCount) gc |= ImGui::SliderInt(tr("Cuántos salen como mínimo"), &s.minCount, 0, 30);
+		if (s.hasCount) gc |= ImGui::SliderInt(s.hasMinCount ? tr("Cuántos salen como máximo") : tr("Cuántos salen"), &s.count, 0, 30);
+		if (s.hasFace) gc |= ImGui::SliderInt(tr("Giro"), &s.face, 0, 359, "%d°");
+		if (s.hasRebirth) gc |= ImGui::SliderInt(tr("Vuelve a salir a los días"), &s.rebirthDays, 0, 30, s.rebirthDays ? "%d" : tr("no vuelve"));
+		if (gc) {
+			nectar::writeGenSettings(g, s);
+			ch = true;
+		}
+		if (d.symmetric && (d.modes & nectar::MAPMODE_VS)) {
+			ch |= ImGui::Checkbox(tr("Repetir en el lado del Jugador 2"), &g.mirror);
+			hint(tr("En VS, el juego pone otro igual en el sitio contrario (girado media vuelta)."));
+		}
+		break;
+	}
 	case ItemType::Object: {
 		nectar::DocObject& o            = d.objects[i];
 		const nectar::ObjectInfo* info = objectInfo(o.kind);
@@ -2848,9 +3296,48 @@ void App::drawSelected()
 	case ItemType::Rocket: hint(tr("Aquí se llevan las piezas. Si el rival lo destruye, pierdes.")); break;
 	case ItemType::Gate: hint(tr("Una puerta de roca que se rompe con rocas bomba: un atajo.")); break;
 	case ItemType::BombPile: hint(tr("Rocas bomba para que los Pikmin amarillos rompan la puerta.")); break;
+	case ItemType::Captain: hint(tr("Donde empieza este capitán en solo y coop. Gíralo con el aro (E).")); break;
+	case ItemType::Ship: hint(tr("Aquí se llevan las piezas de la nave en solo y coop.")); break;
+	case ItemType::StoryOnion: {
+		nectar::DocStoryOnion& o = d.story.onions[i];
+		const char* colours[]    = { tr("Azul"), tr("Roja"), tr("Amarilla") };
+		for (int c = 0; c < 3; c++) {
+			if (c) ImGui::SameLine();
+			if (choiceButton(colours[c], o.color == c, ImVec2(80, 0))) {
+				o.color = c;
+				ch      = true;
+			}
+		}
+		ch |= ImGui::Checkbox(tr("Enterrada (hay que descubrirla)"), &o.buried);
+		if (o.buried) hint(tr("Sale dormida: se despierta (y da su primera semilla) cuando un capitán se acerca."));
+		else if (d.modes & (nectar::MAPMODE_SOLO | nectar::MAPMODE_COOP))
+			hint(tr("En una campaña, las cebollas que aún no se tienen salen siempre enterradas."));
+		hint(tr("Las pastillas de su color dan Pikmin aquí. Solo una cebolla de cada color."));
+		break;
+	}
+	case ItemType::ShipPart: {
+		nectar::DocShipPart& p = d.story.parts[i];
+		if (ImGui::BeginCombo(tr("Pieza"), p.id.c_str())) {
+			for (const nectar::ShipPartInfo& info : nectar::shipParts()) {
+				char text[96];
+				std::snprintf(text, sizeof(text), tr("%s (la levantan %d Pikmin)"), info.id, info.carryMin);
+				if (ImGui::Selectable(text, p.id == info.id)) {
+					p.id = info.id;
+					ch   = true;
+				}
+			}
+			ImGui::EndCombo();
+		}
+		hint(tr("Hay que llevarla a la nave. Cada pieza solo puede estar una vez."));
+		break;
+	}
 	case ItemType::Prop: {
 		nectar::DocProp& p = d.props[i];
 		ch |= ImGui::Checkbox(tr("Los Pikmin no lo atraviesan"), &p.collide);
+		if (p.collide) {
+			ch |= ImGui::Checkbox(tr("Se puede pisar (es suelo)"), &p.ground);
+			hint(tr("Para mallas que son parte del nivel (troncos, puentes, rampas, salas): los Pikmin andan por encima y no cortan los caminos."));
+		}
 		break;
 	}
 	case ItemType::Wall: {
@@ -2939,58 +3426,8 @@ void App::drawSelected()
 		ImGui::PushID("reaction");
 		ImGui::SeparatorText(tr("Reacción al interactuar"));
 		ImGui::TextColored(kDim, "%s", reactionTrigger);
-		const char* actions[] = { tr("No ocurre nada"), tr("Aparecen enemigos"), tr("Aparecen pellets"), tr("Aparecen rocas bomba"), tr("Aparece néctar") };
-		int action = reaction->action == "enemy" ? 1 : reaction->action == "pellet" ? 2 : reaction->action == "bomb" ? 3 : reaction->action == "nectar" ? 4 : 0;
-		ImGui::SetNextItemWidth(-1);
-		if (ImGui::Combo(tr("Entonces ocurre"), &action, actions, 5)) {
-			if (action == 0) *reaction = nectar::DocReaction {};
-			else reaction->action = action == 1 ? "enemy" : action == 2 ? "pellet" : action == 3 ? "bomb" : "nectar";
-			if (action == 1 && !enemyInfo(reaction->value)) reaction->value = "chappy";
-			if (action == 2 && !validPelletId(reaction->value)) reaction->value = "pr01";
-			if (action >= 3) reaction->value.clear();
-			ch = reactionChanged = true;
-		}
-		if (action == 1) {
-			const nectar::EnemyInfo* selected = enemyInfo(reaction->value);
-			if (ImGui::BeginCombo(tr("Enemigo que aparece"), selected ? tr(selected->label) : reaction->value.c_str())) {
-				for (const nectar::EnemyInfo& enemy : nectar::enemyTypes()) {
-					if (ImGui::Selectable(tr(enemy.label), reaction->value == enemy.id)) {
-						reaction->value = enemy.id;
-						ch = reactionChanged = true;
-					}
-				}
-				ImGui::EndCombo();
-			}
-		} else if (action == 2) {
-			int colour = pelletColour(reaction->value), value = pelletValue(reaction->value);
-			const char* colours[] = { tr("Roja"), tr("Azul"), tr("Amarilla") };
-			for (int c = 0; c < 3; c++) {
-				if (c) ImGui::SameLine();
-				if (choiceButton(colours[c], colour == c, ImVec2(78, 0))) {
-					reaction->value = pelletId(c, value);
-					ch = reactionChanged = true;
-				}
-			}
-			const int values[] = { 1, 5, 10, 20 };
-			for (int k = 0; k < 4; k++) {
-				if (k) ImGui::SameLine();
-				char label[8];
-				std::snprintf(label, sizeof(label), "%d", values[k]);
-				if (choiceButton(label, value == values[k], ImVec2(55, 0))) {
-					reaction->value = pelletId(colour, values[k]);
-					ch = reactionChanged = true;
-				}
-			}
-		}
-		if (action != 0) {
-			if (ImGui::SliderInt(tr("Cantidad que aparece"), &reaction->count, 1, 8)) ch = reactionChanged = true;
-			if (reaction->count > 1) {
-				float radius = float(reaction->radius);
-				if (ImGui::SliderFloat(tr("Separación al aparecer"), &radius, 0.0f, 400.0f, "%.0f")) {
-					reaction->radius = radius;
-					ch = reactionChanged = true;
-				}
-			}
+		ch |= reactionChanged = editReaction(*reaction);
+		if (!reaction->action.empty()) {
 			hint(tr("La reacción ocurre una sola vez y aparece alrededor del elemento."));
 			if (d.symmetric && (r.type == ItemType::Enemy || r.type == ItemType::Guard || r.type == ItemType::Object))
 				hint(tr("En un mapa espejo, cada copia activa su propia reacción."));
@@ -3058,11 +3495,357 @@ void App::drawMapPanel()
 	                 : tr("Cada lado es distinto: tú decides dónde va todo."));
 	if (d.symmetric) ImGui::Checkbox(tr("Mover a la vez lo de los dos jugadores"), &mirrorEdits_);
 	ImGui::Checkbox(tr("Ver el lado del otro jugador"), &showTwins_);
+
+	ImGui::SeparatorText(tr("Modos de juego"));
+	{
+		bool vs = (d.modes & nectar::MAPMODE_VS) != 0, solo = (d.modes & nectar::MAPMODE_SOLO) != 0, coop = (d.modes & nectar::MAPMODE_COOP) != 0;
+		bool changed = ImGui::Checkbox("VS", &vs);
+		ImGui::SameLine();
+		changed |= ImGui::Checkbox(tr("Solo"), &solo);
+		ImGui::SameLine();
+		changed |= ImGui::Checkbox(tr("Coop"), &coop);
+		if (changed) {
+			const unsigned m = (vs ? nectar::MAPMODE_VS : 0u) | (solo ? nectar::MAPMODE_SOLO : 0u) | (coop ? nectar::MAPMODE_COOP : 0u);
+			if (!m) {
+				notify(1, tr("El mapa tiene que servir para algún modo."));
+			} else {
+				d.modes = m;
+				if (solo || coop) nm::ensureStory(d, coop);
+				ed_.pruneSelection();
+				ch = true;
+			}
+		}
+		hint(tr("VS: dos jugadores, uno contra otro. Solo y coop: una misión con capitanes, nave, cebollas y un objetivo."));
+	}
+	if (d.story.present && (d.modes & (nectar::MAPMODE_SOLO | nectar::MAPMODE_COOP))) {
+		ImGui::SeparatorText(tr("Misión (solo y coop)"));
+		nectar::DocRules& rules = d.story.rules;
+		static const char* const kGoalIds[] = { "parts", "pellets", "pikmin", "boss", "survive", "waves" };
+		const char* goals[] = { tr("Recuperar piezas de la nave"), tr("Llevar pastillas a las cebollas"), tr("Conseguir Pikmin"), tr("Derrotar a los jefes"),
+			                    tr("Aguantar los días"), tr("Aguantar oleadas") };
+		int goal = 0;
+		for (int k = 0; k < 6; k++) {
+			if (rules.objective == kGoalIds[k]) goal = k;
+		}
+		ImGui::SetNextItemWidth(-90);
+		if (ImGui::Combo(tr("Objetivo"), &goal, goals, 6)) {
+			rules.objective = kGoalIds[goal];
+			if (goal == 5 && rules.target < 1) rules.target = 3;
+			ch              = true;
+		}
+		if (goal == 5) {
+			ImGui::SetNextItemWidth(-90);
+			ch |= ImGui::SliderInt(tr("Oleadas"), &rules.target, 1, 50);
+			hint(tr("Marca como «oleada» los disparadores que sacan enemigos (Disparadores, abajo)."));
+		}
+		{
+			int limit = rules.timeLimit;
+			ImGui::SetNextItemWidth(-90);
+			if (ImGui::SliderInt(tr("Límite de tiempo"), &limit, 0, 1200, limit ? "%d s" : tr("Sin límite"))) {
+				rules.timeLimit = limit;
+				ch              = true;
+			}
+			if (rules.timeLimit) {
+				if (choiceButton(tr("Al acabar, pierdes"), rules.timeLimitEnd != "endday", ImVec2(150, 0))) rules.timeLimitEnd = "lose", ch = true;
+				ImGui::SameLine();
+				if (choiceButton(tr("Al acabar, se acaba el día"), rules.timeLimitEnd == "endday", ImVec2(190, 0))) rules.timeLimitEnd = "endday", ch = true;
+			}
+		}
+		if (goal <= 2) {
+			ImGui::SetNextItemWidth(-90);
+			ch |= ImGui::SliderInt(goal == 2 ? tr("Cuántos") : tr("Cuántas"), &rules.target, goal == 2 ? 1 : 0, goal == 2 ? 100 : 30,
+			                       goal != 2 && rules.target == 0 ? tr("Todas") : "%d");
+		}
+		ImGui::SetNextItemWidth(-90);
+		ch |= ImGui::SliderInt(tr("Días"), &rules.days, 1, 30);
+		ImGui::SetNextItemWidth(-90);
+		ImGui::SliderInt(tr("Ver el día"), &viewDay_, 0, 30, viewDay_ ? "%d" : tr("todos"));
+		ImGui::SetItemTooltip("%s", tr("Enseña solo los enemigos que salen ese día (según «Sale desde/hasta el día»). No cambia el mapa."));
+		ImGui::Text(tr("Pikmin al empezar (en el grupo):"));
+		const char* colours[] = { tr("Azules"), tr("Rojos"), tr("Amarillos") };
+		for (int c = 0; c < 3; c++) {
+			ImGui::SetNextItemWidth(-90);
+			ch |= ImGui::SliderInt(colours[c], &rules.startPikmin[c], 0, 100);
+		}
+		hint(tr("Al anochecer, los Pikmin que no estén en el grupo ni junto a una cebolla o la nave se pierden. Con varios días, la partida se guarda cada noche."));
+
+		if (ImGui::CollapsingHeader(tr("Medallas"))) {
+			const char* names[] = { tr("Bronce"), tr("Plata"), tr("Oro") };
+			for (int k = 0; k < 3; k++) {
+				ImGui::SetNextItemWidth(-90);
+				ch |= ImGui::SliderInt(names[k], &rules.medals[k], 0, 100, rules.medals[k] ? tr("%d Pikmin") : tr("No"));
+			}
+			hint(tr("Pikmin que hay que tener al cumplir la misión para cada medalla (bronce <= plata <= oro)."));
+		}
+
+		if (ImGui::CollapsingHeader(tr("Disparadores"))) {
+			hint(tr("Cuando se cumplen sus condiciones, hacen sus acciones: mensajes, cuadros de texto, que aparezcan cosas, romper construcciones, cuentas atrás, ganar o perder."));
+			std::vector<nectar::DocTrigger>& triggers = d.story.triggers;
+			static const char* const kCondIds[] = { "parts", "pellets", "bosses", "enemies", "day", "hour", "time", "after", "area", "object", "pikmin" };
+			const char* conds[] = { tr("Piezas entregadas"), tr("Pastillas entregadas"), tr("Jefes derrotados"), tr("Enemigos derrotados hoy"),
+				                    tr("Desde el día"), tr("El reloj llega a las"), tr("Segundos desde que empieza el día"), tr("Segundos desde otro disparador"),
+				                    tr("Un capitán entra en una zona"), tr("Una construcción terminada o rota"), tr("Pikmin que tienes") };
+			static const char* const kActIds[] = { "message", "textbox", "spawn", "spawn_at", "break", "win", "lose", "endday", "countdown", "camera" };
+			const char* acts[] = { tr("Mensaje"), tr("Cuadro de texto (pausa)"), tr("Aparecen cosas en un punto"), tr("Aparecen cosas junto a una construcción"),
+				                   tr("Romper o terminar una construcción"), tr("Ganar"), tr("Perder"), tr("Acabar el día"), tr("Cuenta atrás"),
+				                   tr("Mover la cámara a un punto") };
+			auto indexOf = [](const char* const* ids, int n, const std::string& v) {
+				for (int k = 0; k < n; k++) {
+					if (v == ids[k]) return k;
+				}
+				return 0;
+			};
+			// Elegir una construcción del mapa por su nombre.
+			auto objectCombo = [&](int& index) {
+				bool changed = false;
+				const std::string cur =
+				    index >= 0 && index < int(d.objects.size()) ? std::to_string(index + 1) + ". " + itemName(d, { ItemType::Object, index, 0 }) : tr("(ninguna)");
+				ImGui::SetNextItemWidth(-90);
+				if (ImGui::BeginCombo(tr("Construcción"), cur.c_str())) {
+					for (int k = 0; k < int(d.objects.size()); k++) {
+						const std::string name = std::to_string(k + 1) + ". " + itemName(d, { ItemType::Object, k, 0 });
+						if (ImGui::Selectable(name.c_str(), k == index)) {
+							index   = k;
+							changed = true;
+						}
+					}
+					ImGui::EndCombo();
+				}
+				if (d.objects.empty()) hint(tr("Pon antes alguna construcción en el mapa."));
+				return changed;
+			};
+			// Un punto del mapa (con «donde está lo elegido»).
+			auto pointEdit = [&](double& x, double& z) {
+				bool changed = false;
+				float pos[2] = { float(x), float(z) };
+				ImGui::SetNextItemWidth(-90);
+				if (ImGui::DragFloat2(tr("Dónde"), pos, 2.0f, -10000.0f, 10000.0f, "%.0f")) {
+					x       = pos[0];
+					z       = pos[1];
+					changed = true;
+				}
+				ImGui::BeginDisabled(ed_.selection.empty());
+				if (ImGui::SmallButton(tr("Donde está lo elegido"))) {
+					const Xform xf = getXform(d, ed_.selection.back());
+					x              = xf.x;
+					z              = xf.z;
+					changed        = true;
+				}
+				ImGui::EndDisabled();
+				return changed;
+			};
+			auto textEdit = [&](const char* label, std::string& text) {
+				char buf[256];
+				copyStr(buf, sizeof(buf), text);
+				ImGui::SetNextItemWidth(-90);
+				if (!ImGui::InputText(label, buf, sizeof(buf))) return false;
+				text = buf;
+				return true;
+			};
+			int remove = -1;
+			for (size_t t = 0; t < triggers.size(); t++) {
+				nectar::DocTrigger& trig = triggers[t];
+				ImGui::PushID(int(t));
+				char head[48];
+				std::snprintf(head, sizeof(head), tr("Disparador %zu"), t + 1);
+				ImGui::SeparatorText(head);
+
+				// ── Cuándo ──
+				ImGui::TextColored(kDim, "%s", tr("Cuando..."));
+				if (trig.conditions.size() > 1) {
+					if (choiceButton(tr("Se cumplen todas"), !trig.any, ImVec2(140, 0))) trig.any = false, ch = true;
+					ImGui::SameLine();
+					if (choiceButton(tr("Se cumple alguna"), trig.any, ImVec2(140, 0))) trig.any = true, ch = true;
+				}
+				int removeCond = -1;
+				for (size_t c = 0; c < trig.conditions.size(); c++) {
+					nectar::DocCondition& cond = trig.conditions[c];
+					ImGui::PushID(int(c) + 1000);
+					int type = indexOf(kCondIds, 11, cond.type);
+					ImGui::SetNextItemWidth(-30);
+					if (ImGui::Combo("##cond", &type, conds, 11)) {
+						cond      = nectar::DocCondition();
+						cond.type = kCondIds[type];
+						if (cond.type == "hour") cond.count = 12;
+						if (cond.type == "time" || cond.type == "after") cond.count = 60;
+						if (cond.type == "area") {
+							cond.x = (d.minX + d.maxX) * 0.5;
+							cond.z = (d.minZ + d.maxZ) * 0.5;
+						}
+						ch = true;
+					}
+					ImGui::SameLine();
+					if (ImGui::SmallButton("x")) removeCond = int(c);
+					const std::string& ty = cond.type;
+					if (ty == "hour") {
+						ImGui::SetNextItemWidth(-90);
+						ch |= ImGui::SliderInt(tr("Hora"), &cond.count, 5, 22, "%d h");
+					} else if (ty == "time" || ty == "after") {
+						ImGui::SetNextItemWidth(-90);
+						ch |= ImGui::SliderInt(tr("Segundos"), &cond.count, 0, 1200);
+						if (ty == "after") {
+							int other = cond.index + 1;
+							ImGui::SetNextItemWidth(-90);
+							if (ImGui::SliderInt(tr("Disparador"), &other, 1, std::max(1, int(triggers.size())))) {
+								cond.index = other - 1;
+								ch         = true;
+							}
+						}
+					} else if (ty == "area") {
+						ch |= pointEdit(cond.x, cond.z);
+						float r = float(cond.radius);
+						ImGui::SetNextItemWidth(-90);
+						if (ImGui::SliderFloat(tr("Radio"), &r, 20.0f, 1500.0f, "%.0f")) {
+							cond.radius = r;
+							ch          = true;
+						}
+					} else if (ty == "object") {
+						ch |= objectCombo(cond.index);
+					} else {
+						if (ty == "pikmin") {
+							const char* colors[] = { tr("En total"), tr("Azules"), tr("Rojos"), tr("Amarillos") };
+							int col              = cond.color + 1;
+							ImGui::SetNextItemWidth(-90);
+							if (ImGui::Combo(tr("Color"), &col, colors, 4)) {
+								cond.color = col - 1;
+								ch         = true;
+							}
+						}
+						ImGui::SetNextItemWidth(-90);
+						ch |= ImGui::SliderInt(ty == "day" ? tr("Día") : tr("Cuántos"), &cond.count, 1, ty == "pikmin" ? 100 : 30);
+					}
+					ImGui::PopID();
+				}
+				if (removeCond >= 0) {
+					trig.conditions.erase(trig.conditions.begin() + removeCond);
+					ch = true;
+				}
+				if (trig.conditions.size() < 8 && ImGui::SmallButton(tr("+ condición"))) {
+					trig.conditions.push_back(nectar::DocCondition());
+					ch = true;
+				}
+
+				// ── Qué pasa ──
+				ImGui::TextColored(kDim, "%s", tr("Entonces..."));
+				int removeAct = -1;
+				for (size_t a = 0; a < trig.actions.size(); a++) {
+					nectar::DocAction& act = trig.actions[a];
+					ImGui::PushID(int(a) + 2000);
+					int type = indexOf(kActIds, 10, act.type);
+					ImGui::SetNextItemWidth(-30);
+					if (ImGui::Combo("##act", &type, acts, 10)) {
+						act      = nectar::DocAction();
+						act.type = kActIds[type];
+						if (act.type == "camera") {
+							act.seconds = 3;
+							act.x       = (d.minX + d.maxX) * 0.5;
+							act.z       = (d.minZ + d.maxZ) * 0.5;
+						}
+						if (act.type == "spawn" || act.type == "spawn_at") {
+							act.reaction.action = "enemy";
+							act.reaction.value  = "chappy";
+							act.x               = (d.minX + d.maxX) * 0.5;
+							act.z               = (d.minZ + d.maxZ) * 0.5;
+						}
+						ch = true;
+					}
+					ImGui::SameLine();
+					if (ImGui::SmallButton("x")) removeAct = int(a);
+					const std::string& ty = act.type;
+					if (ty == "message" || ty == "textbox" || ty == "countdown") ch |= textEdit(tr("Texto"), act.text);
+					if (ty == "spawn" || ty == "spawn_at") {
+						ch |= editReaction(act.reaction);
+						if (act.reaction.action.empty()) act.reaction.action = "enemy"; // «aparecer» sin qué no vale
+						if (ty == "spawn") ch |= pointEdit(act.x, act.z);
+						else ch |= objectCombo(act.index);
+					}
+					if (ty == "break") ch |= objectCombo(act.index);
+					if (ty == "camera") {
+						ch |= pointEdit(act.x, act.z);
+						ImGui::SetNextItemWidth(-90);
+						ch |= ImGui::SliderInt(tr("Segundos"), &act.seconds, 1, 30);
+						hint(tr("La cámara mira lo que haya más cerca de ese punto (construcción, enemigo, cebolla, nave...) y luego vuelve. Mientras, nadie se mueve."));
+					}
+					if (ty == "countdown") {
+						ImGui::SetNextItemWidth(-90);
+						ch |= ImGui::SliderInt(tr("Segundos"), &act.seconds, 1, 1200);
+						static const char* const kThen[] = { "", "lose", "win", "endday" };
+						const char* thens[]              = { tr("Nada"), tr("Perder"), tr("Ganar"), tr("Acabar el día") };
+						int then                         = indexOf(kThen, 4, act.then);
+						ImGui::SetNextItemWidth(-90);
+						if (ImGui::Combo(tr("Al llegar a cero"), &then, thens, 4)) {
+							act.then = kThen[then];
+							ch       = true;
+						}
+					}
+					ImGui::PopID();
+				}
+				if (removeAct >= 0) {
+					trig.actions.erase(trig.actions.begin() + removeAct);
+					ch = true;
+				}
+				if (trig.actions.size() < 8 && ImGui::SmallButton(tr("+ acción"))) {
+					trig.actions.push_back(nectar::DocAction());
+					ch = true;
+				}
+
+				// ── Repetir ──
+				ch |= ImGui::Checkbox(tr("Se repite"), &trig.repeat);
+				if (trig.repeat) {
+					ImGui::SetNextItemWidth(-90);
+					ch |= ImGui::SliderInt(tr("Espera (s)"), &trig.cooldown, 1, 600);
+					ImGui::SetNextItemWidth(-90);
+					ch |= ImGui::SliderInt(tr("Veces"), &trig.times, 0, 50, trig.times ? "%d" : tr("sin fin"));
+				}
+				ch |= ImGui::Checkbox(tr("Es una oleada"), &trig.wave);
+				if (trig.wave) hint(tr("Cuenta para el objetivo «Aguantar oleadas»: una oleada termina cuando no queda nadie de los que sacó."));
+				if (ImGui::Button(tr("Quitar disparador"))) remove = int(t);
+				ImGui::PopID();
+			}
+			if (remove >= 0) {
+				triggers.erase(triggers.begin() + remove);
+				ch = true;
+			}
+			if (triggers.size() < 32 && ImGui::Button(tr("Añadir disparador"), ImVec2(-1, 0))) {
+				nectar::DocTrigger t;
+				t.conditions.push_back(nectar::DocCondition());
+				t.actions.push_back(nectar::DocAction());
+				t.actions.back().text = tr("¡Algo ha pasado!");
+				triggers.push_back(t);
+				ch = true;
+			}
+		}
+	}
 	ImGui::Spacing();
 	hint(tr("Elige algo del mapa con «Mover y girar» para ver sus opciones aquí."));
 	drawMinimap();
 
 	if (ImGui::CollapsingHeader(tr("Ambiente"))) {
+		if (d.story.present) {
+			// Misiones: música de una zona del juego y horas del día.
+			const char* musics[] = { tr("La de siempre"), "Impact Site", "Forest of Hope", "Forest Navel", "Distant Spring", "Final Trial" };
+			int music            = 0;
+			for (size_t k = 0; k < nectar::musicNames().size(); k++) {
+				if (d.music == nectar::musicNames()[k]) music = int(k) + 1;
+			}
+			ImGui::SetNextItemWidth(-90);
+			if (ImGui::Combo(tr("Música"), &music, musics, 6)) {
+				d.music = music ? nectar::musicNames()[size_t(music - 1)] : "";
+				ch      = true;
+			}
+			float hours[2] = { float(d.startHour), float(d.endHour) };
+			ImGui::SetNextItemWidth(-90);
+			if (ImGui::SliderFloat(tr("Amanece a las"), &hours[0], 0.0f, 20.0f, hours[0] > 0.0f ? "%.1f h" : tr("como en el juego"))) {
+				d.startHour = hours[0] < 5.0f ? 0.0 : double(hours[0]);
+				ch          = true;
+			}
+			ImGui::SetNextItemWidth(-90);
+			if (ImGui::SliderFloat(tr("Anochece a las"), &hours[1], 0.0f, 22.0f, hours[1] > 0.0f ? "%.1f h" : tr("como en el juego"))) {
+				d.endHour = hours[1] < 6.0f ? 0.0 : double(hours[1]);
+				ch        = true;
+			}
+			hint(tr("Días más cortos o más largos en las misiones. Menos de 5 h (o 6 h) = como en el juego."));
+		}
 		hint(tr("La luz, la niebla y los colores del cielo salen de un escenario del juego."));
 		if (ImGui::BeginCombo(tr("Como en"), sceneName(d.baseStage).c_str())) {
 			for (const nectar::CatalogEntry& e : catalog_.entries) {
@@ -3083,6 +3866,21 @@ void App::drawMapPanel()
 			d.sun[2]       = std::sin(a) * len;
 			ch             = true;
 		}
+		float bright = float(d.brightness), fog = float(d.fogScale);
+		if (ImGui::SliderFloat(tr("Brillo"), &bright, 0.4f, 1.6f, "%.2f")) {
+			d.brightness = bright;
+			ch           = true;
+		}
+		float tint[3] = { d.tint[0] / 255.0f, d.tint[1] / 255.0f, d.tint[2] / 255.0f };
+		if (ImGui::ColorEdit3(tr("Color de la luz"), tint)) {
+			for (int i = 0; i < 3; i++) d.tint[i] = int(std::lround(tint[i] * 255.0f));
+			ch = true;
+		}
+		if (ImGui::SliderFloat(tr("Niebla (distancia)"), &fog, 0.2f, 4.0f, "x%.2f")) {
+			d.fogScale = fog;
+			ch         = true;
+		}
+		hint(tr("Retoques sobre la luz del escenario elegido: más oscuro o más claro, luz cálida o fría, niebla más cerca (cuevas, bosques espesos) o más lejos."));
 	}
 	if (ImGui::CollapsingHeader(tr("Opciones avanzadas"))) {
 		hint(tr("Los Pikmin siguen una red de caminos que se hace sola. Aquí puedes ajustarla."));
@@ -3154,9 +3952,10 @@ void App::drawHierarchy()
 		const char* name;
 		int id;
 	};
-	const Group groups[] = { { tr("Jugador 1"), 0 }, { tr("Jugador 2"), 1 }, { tr("Objetivos"), 2 }, { tr("Enemigos"), 3 },
+	const Group groups[] = { { tr("Misión (solo y coop)"), 8 }, { tr("Jugador 1"), 0 }, { tr("Jugador 2"), 1 }, { tr("Objetivos"), 2 }, { tr("Enemigos"), 3 },
 	                         { tr("Construcciones"), 4 }, { tr("Muros y agua"), 5 }, { tr("Decoración"), 6 }, { tr("Elementos del escenario"), 7 } };
 	auto groupOf = [](const ItemRef& r) {
+		if (isStoryItem(r.type)) return 8;
 		if (itemCaps(r.type).perPlayer) return r.index == 0 ? 0 : 1;
 		switch (r.type) {
 		case ItemType::Pellet:
@@ -3200,11 +3999,13 @@ void App::drawHierarchy()
 		for (const ItemRef& r : items) {
 			if (groupOf(r) == group.id && (query.empty() || searchKey(itemName(d, r)).find(query) != std::string::npos)) count++;
 		}
-		if (!count && !query.empty()) continue;
+		// Sin nada de la misión o de los jugadores del VS (mapas de un solo
+		// tipo), ni se enseña el grupo.
+		if (!count && (!query.empty() || group.id == 8 || group.id <= 1)) continue;
 		totalMatches += count;
 		char heading[128];
 		std::snprintf(heading, sizeof(heading), "%s (%d)##hierarchy_group_%d", group.name, count, group.id);
-		const ImGuiTreeNodeFlags flags = (group.id <= 2 || !query.empty()) ? ImGuiTreeNodeFlags_DefaultOpen : ImGuiTreeNodeFlags_None;
+		const ImGuiTreeNodeFlags flags = (group.id <= 2 || group.id == 8 || !query.empty()) ? ImGuiTreeNodeFlags_DefaultOpen : ImGuiTreeNodeFlags_None;
 		if (!ImGui::TreeNodeEx(heading, flags)) continue;
 		int row = 0;
 		for (const ItemRef& r : items) {
@@ -3281,12 +4082,41 @@ void App::drawChecklist()
 		}
 		ImGui::PopID();
 	}
-	if (compiled_.ok) {
-		const float use = float(compiled_.vertices) / 65535.0f;
-		ImGui::Spacing();
-		ImGui::TextColored(kDim, tr("Tamaño para el juego:"));
-		ImGui::ProgressBar(use, ImVec2(-1, 0), use < 0.75f ? tr("Bien") : use < 1.0f ? tr("Casi lleno") : tr("Demasiado"));
+	// Presupuesto: lo que lleva el mapa frente a lo que aguanta el juego.
+	const nectar::MapDoc& doc = ed_.doc;
+	const int twin            = doc.symmetric ? 2 : 1;
+	int tekis = int(doc.guards.size()) * twin, bosses = 0;
+	for (const nectar::DocEnemy& e : doc.enemies) {
+		bool boss = false;
+		for (const nectar::EnemyInfo& info : nectar::enemyTypes()) {
+			if (e.type == info.id) boss = info.boss >= 0;
+		}
+		(boss ? bosses : tekis) += twin;
 	}
+	for (const nectar::DocGen& g : doc.gens) {
+		nectar::GenSettings s;
+		if (!nectar::readGenSettings(g, s)) continue;
+		const int n = s.maxCount() * (g.mirror && doc.symmetric ? 2 : 1);
+		if (s.object == "teki") tekis += n;
+		if (s.object == "boss") bosses += n;
+	}
+	ImGui::Spacing();
+	ImGui::TextColored(kDim, tr("Presupuesto del juego:"));
+	auto bar = [&](const char* label, double used, double max) {
+		const float use = max > 0 ? float(used / max) : 0.0f;
+		char text[96];
+		snprintf(text, sizeof(text), "%s: %.0f / %.0f", label, used, max);
+		ImGui::PushStyleColor(ImGuiCol_PlotHistogram, use < 0.75f ? kGood : use <= 1.0f ? kWarn : kBad);
+		ImGui::ProgressBar(std::min(use, 1.0f), ImVec2(-1, 0), text);
+		ImGui::PopStyleColor();
+	};
+	if (compiled_.ok) bar(tr("Vértices"), double(compiled_.vertices), double(nectar::kMapMaxVertices));
+	bar(tr("Enemigos"), tekis, nectar::kMapMaxTekis);
+	bar(tr("Jefes"), bosses, nectar::kMapMaxBosses);
+	bar(tr("Construcciones"), double(doc.objects.size()) * twin, nectar::kMapMaxObjects);
+	bar(tr("Pastillas"), double(doc.pellets.size()) * twin, nectar::kMapMaxPellets);
+	if (doc.modes & nectar::MAPMODE_VS) bar(tr("Piezas"), double(doc.pieces.size()) * twin, nectar::kMapMaxPieces);
+	bar(tr("Guardianes"), double(doc.guards.size()) * twin, nectar::kMapMaxGuards);
 }
 
 void App::drawTechnicalReport()
@@ -3943,6 +4773,14 @@ void App::viewportMouse(const Ray& ray, const ImVec2& origin, const ImVec2& size
 	placeValid_ = tool_ == Tool::Place && hovered && terrainRay(ray, placePos_);
 	if (placeValid_ && leftClick) placeAt(placePos_);
 
+	// Trazos: clic para cada punto; Retroceso quita el último; Intro aplica.
+	if (tool_ == Tool::Trace) {
+		V3 p;
+		if (hovered && leftClick && terrainRay(ray, p)) traceNodes_.push_back(p);
+		if (!io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Backspace) && !traceNodes_.empty()) traceNodes_.pop_back();
+		if (!io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Enter)) applyTrace();
+	}
+
 	// Muros: arrastrar de un extremo al otro.
 	if (tool_ == Tool::Walls) {
 		V3 hit;
@@ -4365,8 +5203,8 @@ void App::drawItem(const ItemRef& r, bool ghost)
 	const std::string asset = markerAsset(r);
 	std::shared_ptr<GpuModel> gm = asset.empty() ? nullptr : model(asset);
 	if (gm) renderer_.drawModel(*gm, m, tint);
-	else if (r.type == ItemType::Rocket) {
-		Rgba c = playerColour(r.index);
+	else if (r.type == ItemType::Rocket || r.type == ItemType::Ship) {
+		Rgba c = r.type == ItemType::Ship ? Rgba { 0.85f, 0.85f, 0.9f, 1 } : playerColour(r.index);
 		c.a    = tint.a;
 		renderer_.drawCylinder(m * M4::scale(45, 150, 45), c);
 		renderer_.drawCylinder(m * M4::translate(V3(0, 150, 0)) * M4::scale(25, 40, 25), Rgba { 0.9f, 0.9f, 0.95f, tint.a });
@@ -4381,8 +5219,267 @@ void App::drawItem(const ItemRef& r, bool ghost)
 	}
 }
 
+void App::drawCutOptions()
+{
+	if (!iconHeader(tr("Recortar una pieza de este escenario"), Icon::More)) return;
+	hint(tr("Elige una caja del nivel (un tronco, una raíz, una lata...) y guárdala en tu biblioteca: luego la puedes poner en cualquier mapa. El mapa solo guarda dónde está el recorte; las texturas salen de tu copia del juego."));
+	ImGui::Checkbox(tr("Ver la caja"), &cutBox_);
+	if (ImGui::Button(tr("Llevar la caja a donde miro"))) {
+		const V3 half((cutHi_.x - cutLo_.x) * 0.5f, 0, (cutHi_.z - cutLo_.z) * 0.5f);
+		const float h = cutHi_.y - cutLo_.y, y = docHeight(cam_.target.x, cam_.target.z);
+		cutLo_        = V3(cam_.target.x - half.x, y - 50, cam_.target.z - half.z);
+		cutHi_        = V3(cam_.target.x + half.x, y - 50 + h, cam_.target.z + half.z);
+		cutBox_       = true;
+	}
+	float c[2] = { (cutLo_.x + cutHi_.x) * 0.5f, (cutLo_.z + cutHi_.z) * 0.5f };
+	float s[2] = { cutHi_.x - cutLo_.x, cutHi_.z - cutLo_.z };
+	float y[2] = { cutLo_.y, cutHi_.y };
+	bool ch    = ImGui::DragFloat2(tr("Centro (x, z)"), c, 5.0f);
+	ch |= ImGui::DragFloat2(tr("Tamaño (x, z)"), s, 5.0f, 20.0f, 3000.0f, "%.0f");
+	ch |= ImGui::DragFloat2(tr("Altura (desde, hasta)"), y, 5.0f);
+	hint(tr("Sube «desde» para dejar fuera el suelo y quedarte solo con lo que sobresale."));
+	if (ch) {
+		cutLo_  = V3(c[0] - s[0] * 0.5f, std::min(y[0], y[1] - 10), c[1] - s[1] * 0.5f);
+		cutHi_  = V3(c[0] + s[0] * 0.5f, y[1], c[1] + s[1] * 0.5f);
+		cutBox_ = true;
+	}
+	ImGui::InputText(tr("Nombre"), cutName_, sizeof(cutName_));
+	ImGui::BeginDisabled(!cutName_[0]);
+	if (ImGui::Button(tr("Guardar en mi biblioteca"))) {
+		const std::string asset = nectar::cutAsset(ed_.doc.course, { cutLo_.x, cutLo_.y, cutLo_.z }, { cutHi_.x, cutHi_.y, cutHi_.z });
+		cutModels_.erase(asset);
+		if (std::shared_ptr<nectar::Model> m = cutModel(asset)) {
+			cfg_.pieces.push_back({ cutName_, asset });
+			cfg_.save();
+			char buf[160];
+			std::snprintf(buf, sizeof(buf), tr("«%s» guardada: %zu triángulos. Está en Poner cosas > Mis piezas de cualquier mapa."), cutName_, m->triangleCount());
+			notify(0, buf);
+			cutName_[0] = 0;
+		} else {
+			notify(2, tr("No hay nada del escenario dentro de la caja (o es demasiado grande)."));
+		}
+	}
+	ImGui::EndDisabled();
+}
+
+void App::drawTraceOptions()
+{
+	ImGui::SeparatorText(tr("Trazos"));
+	const char* modes[] = { tr("Camino"), tr("Río"), tr("Calzada"), tr("Zona de suelo"), tr("Hueco"), tr("Unir caminos"), tr("Sin caminos") };
+	const char* tips[]  = { tr("Un sendero del suelo elegido que sigue la línea y allana un poco el terreno."),
+		                    tr("Un cauce hundido con agua (solo lo cruzan los azules o un puente)."),
+		                    tr("Un paso elevado sobre el terreno, con laderas a los lados."),
+		                    tr("Contorno cerrado: todo lo de dentro pasa a tener suelo (del material elegido)."),
+		                    tr("Contorno cerrado: todo lo de dentro se queda sin suelo (con paredes alrededor)."),
+		                    tr("Dos puntos: los Pikmin podrán llevar cosas de uno a otro aunque la red de caminos no los una (subir a una malla, cruzar un puente)."),
+		                    tr("Contorno cerrado: ahí no habrá caminos (para que los Pikmin no se metan por sitios raros).") };
+	for (int i = 0; i < 7; i++) {
+		if (i % 2) ImGui::SameLine();
+		if (choiceButton(modes[i], int(traceMode_) == i, ImVec2(130, 30))) traceMode_ = TraceMode(i);
+	}
+	hint(tips[int(traceMode_)]);
+	const bool line = traceMode_ == TraceMode::Path || traceMode_ == TraceMode::River || traceMode_ == TraceMode::Causeway;
+	if (line) ImGui::SliderFloat(tr("Anchura"), &traceWidth_, 30.0f, 600.0f, "%.0f");
+	if (traceMode_ == TraceMode::River) ImGui::SliderFloat(tr("Hondura"), &traceDepth_, 10.0f, 200.0f, "%.0f");
+	if (traceMode_ == TraceMode::Causeway) ImGui::SliderFloat(tr("Altura"), &traceDepth_, 10.0f, 300.0f, "%.0f");
+	const bool routeMode = traceMode_ == TraceMode::RouteLink || traceMode_ == TraceMode::RouteBlock;
+	if (traceMode_ != TraceMode::Hole && !routeMode) drawSwatches(true);
+	if (routeMode) {
+		showRoutes_ = true;
+		nectar::MapDoc& d = ed_.doc;
+		for (std::size_t i = 0; i < d.routeLinks.size(); i++) {
+			ImGui::PushID(int(i));
+			if (ImGui::SmallButton(tr("Quitar"))) {
+				d.routeLinks.erase(d.routeLinks.begin() + long(i));
+				ed_.touch();
+				ImGui::PopID();
+				break;
+			}
+			ImGui::SameLine();
+			ImGui::Text(tr("Unión %d"), int(i + 1));
+			ImGui::PopID();
+		}
+		for (std::size_t i = 0; i < d.routeBlocks.size(); i++) {
+			ImGui::PushID(int(1000 + i));
+			if (ImGui::SmallButton(tr("Quitar"))) {
+				d.routeBlocks.erase(d.routeBlocks.begin() + long(i));
+				ed_.touch();
+				ImGui::PopID();
+				break;
+			}
+			ImGui::SameLine();
+			ImGui::Text(tr("Zona sin caminos %d"), int(i + 1));
+			ImGui::PopID();
+		}
+	}
+	ImGui::Text(tr("Puntos: %d"), int(traceNodes_.size()));
+	const std::size_t need = line || traceMode_ == TraceMode::RouteLink ? 2 : 3;
+	ImGui::BeginDisabled(traceNodes_.size() < need);
+	if (ImGui::Button(tr("Aplicar"), ImVec2(130, 30))) applyTrace();
+	ImGui::EndDisabled();
+	ImGui::SameLine();
+	if (ImGui::Button(tr("Borrar puntos"), ImVec2(130, 30))) traceNodes_.clear();
+	hint(tr("En los mapas espejo se hace también en el lado del otro jugador. Se puede deshacer con Ctrl+Z."));
+}
+
+void App::applyTrace()
+{
+	// Caminos a mano: se guardan en el mapa (el espejo lo pone el compilador).
+	if (traceMode_ == TraceMode::RouteLink) {
+		if (traceNodes_.size() < 2) return;
+		const V3 &a = traceNodes_[traceNodes_.size() - 2], &b = traceNodes_.back();
+		ed_.doc.routeLinks.push_back({ { a.x, a.y, a.z }, { b.x, b.y, b.z } });
+		traceNodes_.clear();
+		ed_.touch();
+		return;
+	}
+	if (traceMode_ == TraceMode::RouteBlock) {
+		if (traceNodes_.size() < 3) return;
+		std::vector<std::pair<double, double>> poly;
+		for (const V3& p : traceNodes_) poly.push_back({ p.x, p.z });
+		ed_.doc.routeBlocks.push_back(poly);
+		traceNodes_.clear();
+		ed_.touch();
+		return;
+	}
+	const bool line = traceMode_ == TraceMode::Path || traceMode_ == TraceMode::River || traceMode_ == TraceMode::Causeway;
+	if (traceNodes_.size() < (line ? 2u : 3u) || !ensureTerrain()) return;
+	MapDoc& d             = ed_.doc;
+	nectar::DocTerrain& g = d.terrain;
+	const float cell      = float(d.cell);
+	paintMaterial_        = std::max(0, std::min(paintMaterial_, int(g.palette.size()) - 1));
+	std::vector<std::vector<V3>> shapes { traceNodes_ };
+	if (d.symmetric) {
+		std::vector<V3> twin;
+		for (const V3& p : traceNodes_) twin.push_back(V3(-p.x, p.y, -p.z));
+		shapes.push_back(twin);
+	}
+	const float half = traceWidth_ * 0.5f, margin = std::max(cell * 1.5f, traceWidth_ * 0.4f);
+	auto paint = [&](std::size_t v, float a) {
+		for (std::size_t k = 0; k < g.layers.size(); k++) {
+			std::uint8_t& x = g.layers[k][v];
+			const float t   = int(k) == paintMaterial_ ? 255.0f : 0.0f;
+			x               = std::uint8_t(std::lround(x + (t - x) * a));
+		}
+	};
+	for (const std::vector<V3>& n : shapes) {
+		for (int iz = 0; iz <= g.nz; iz++) {
+			for (int ix = 0; ix <= g.nx; ix++) {
+				const float x = float(d.minX) + ix * cell, z = float(d.minZ) + iz * cell;
+				const std::size_t v = std::size_t(g.vertexIndex(ix, iz));
+				if (line) {
+					float best = 1e9f, along = 0;
+					for (std::size_t i = 0; i + 1 < n.size(); i++) {
+						const float dx = n[i + 1].x - n[i].x, dz = n[i + 1].z - n[i].z, l2 = dx * dx + dz * dz;
+						const float t  = l2 > 0 ? std::max(0.0f, std::min(1.0f, ((x - n[i].x) * dx + (z - n[i].z) * dz) / l2)) : 0.0f;
+						const float dd = std::hypot(x - (n[i].x + dx * t), z - (n[i].z + dz * t));
+						if (dd < best) {
+							best  = dd;
+							along = n[i].y + (n[i + 1].y - n[i].y) * t;
+						}
+					}
+					if (best > half + margin) continue;
+					float w = best <= half ? 1.0f : 1.0f - (best - half) / margin;
+					w       = w * w * (3 - 2 * w);
+					float h = g.heights[v];
+					if (traceMode_ == TraceMode::Path) {
+						h += (along - h) * w * 0.7f;
+						if (best <= half) g.floor[v] = 255;
+						paint(v, w);
+					} else if (traceMode_ == TraceMode::River) {
+						h += (along - traceDepth_ - h) * w;
+						g.floor[v] = std::max(g.floor[v], std::uint8_t(std::lround(255.0f * w)));
+						if (best <= half * 0.85f) g.water[v] = 255;
+						paint(v, w);
+					} else {
+						h = std::max(h, h + (along + traceDepth_ - h) * w);
+						if (best <= half) g.floor[v] = 255;
+						paint(v, w);
+					}
+					g.heights[v] = std::int16_t(std::max(-3000.0f, std::min(3000.0f, std::round(h))));
+				} else {
+					bool inside = false;
+					for (std::size_t i = 0, j = n.size() - 1; i < n.size(); j = i++) {
+						if (((n[i].z > z) != (n[j].z > z)) && x < (n[j].x - n[i].x) * (z - n[i].z) / (n[j].z - n[i].z) + n[i].x) inside = !inside;
+					}
+					if (!inside) continue;
+					if (traceMode_ == TraceMode::Area) {
+						g.floor[v] = 255;
+						paint(v, 1.0f);
+					} else {
+						g.floor[v] = 0;
+					}
+				}
+			}
+		}
+	}
+	traceNodes_.clear();
+	ed_.touch();
+}
+
+void App::paintCliffs()
+{
+	if (!ensureTerrain()) return;
+	nectar::DocTerrain& g = ed_.doc.terrain;
+	paintMaterial_        = std::max(0, std::min(paintMaterial_, int(g.palette.size()) - 1));
+	const float cell      = float(ed_.doc.cell);
+	const std::vector<std::int16_t> h = g.heights;
+	int painted                       = 0;
+	for (int iz = 0; iz <= g.nz; iz++) {
+		for (int ix = 0; ix <= g.nx; ix++) {
+			auto at        = [&](int x, int z) { return float(h[std::size_t(g.vertexIndex(std::max(0, std::min(g.nx, x)), std::max(0, std::min(g.nz, z))))]); };
+			const float gx = (at(ix + 1, iz) - at(ix - 1, iz)) / (2 * cell), gz = (at(ix, iz + 1) - at(ix, iz - 1)) / (2 * cell);
+			const float s  = std::hypot(gx, gz);
+			if (s < cliffSlope_ * 0.8f) continue;
+			float a = std::min(1.0f, (s - cliffSlope_ * 0.8f) / (cliffSlope_ * 0.2f));
+			a       = a * a * (3 - 2 * a);
+			const std::size_t v = std::size_t(g.vertexIndex(ix, iz));
+			for (std::size_t k = 0; k < g.layers.size(); k++) {
+				std::uint8_t& x = g.layers[k][v];
+				const float t   = int(k) == paintMaterial_ ? 255.0f : 0.0f;
+				x               = std::uint8_t(std::lround(x + (t - x) * a));
+			}
+			painted++;
+		}
+	}
+	if (painted) ed_.touch();
+	notify(0, painted ? tr("Acantilados pintados.") : tr("No hay pendientes tan fuertes: baja «Desde la pendiente»."));
+}
+
 void App::drawSelection()
 {
+	if (tool_ == Tool::Trace && (traceMode_ == TraceMode::RouteLink || traceMode_ == TraceMode::RouteBlock)) {
+		std::vector<V3> links, blocks;
+		for (const nectar::MapDoc::RouteLink& l : ed_.doc.routeLinks) {
+			links.push_back(V3(float(l.a[0]), float(l.a[1]) + 10, float(l.a[2])));
+			links.push_back(V3(float(l.b[0]), float(l.b[1]) + 10, float(l.b[2])));
+		}
+		for (const auto& poly : ed_.doc.routeBlocks) {
+			for (std::size_t i = 0; i < poly.size(); i++) {
+				const auto &a = poly[i], &b = poly[(i + 1) % poly.size()];
+				blocks.push_back(V3(float(a.first), docHeight(float(a.first), float(a.second)) + 10, float(a.second)));
+				blocks.push_back(V3(float(b.first), docHeight(float(b.first), float(b.second)) + 10, float(b.second)));
+			}
+		}
+		if (!links.empty()) renderer_.drawLines(links, Rgba { 1.0f, 0.6f, 0.1f, 1 });
+		if (!blocks.empty()) renderer_.drawLines(blocks, Rgba { 1.0f, 0.2f, 0.2f, 1 });
+	}
+	if (tool_ == Tool::Trace && !traceNodes_.empty()) {
+		std::vector<V3> path;
+		const bool closed = traceMode_ == TraceMode::Area || traceMode_ == TraceMode::Hole || traceMode_ == TraceMode::RouteBlock;
+		for (std::size_t i = 0; i + 1 < traceNodes_.size() + (closed ? 1 : 0); i++) {
+			const V3 &a = traceNodes_[i], &b = traceNodes_[(i + 1) % traceNodes_.size()];
+			path.push_back(V3(a.x, a.y + 8, a.z));
+			path.push_back(V3(b.x, b.y + 8, b.z));
+		}
+		for (const V3& p : traceNodes_) boxLines(path, M4(), V3(p.x - 12, p.y, p.z - 12), V3(p.x + 12, p.y + 24, p.z + 12));
+		renderer_.drawLines(path, Rgba { 0.2f, 0.8f, 1.0f, 1 });
+	}
+	if (cutBox_ && courseMode()) {
+		std::vector<V3> box;
+		boxLines(box, M4(), cutLo_, cutHi_);
+		renderer_.drawLines(box, Rgba { 0.3f, 1.0f, 0.4f, 1 });
+	}
 	std::vector<V3> lines;
 	const MapDoc& d = ed_.doc;
 	for (const ItemRef& r : ed_.selection) {
@@ -4430,16 +5527,18 @@ void App::drawLabels(const ImVec2& origin, const ImVec2& size)
 	dl->PushClipRect(origin, ImVec2(origin.x + size.x, origin.y + size.y), true);
 	for (const ItemRef& r : allItems(ed_.doc)) {
 		if (itemHidden(r)) continue;
-		if (!itemCaps(r.type).perPlayer && r.type != ItemType::BigPiece) continue;
+		const bool storyLabel = r.type == ItemType::Captain || r.type == ItemType::Ship || r.type == ItemType::StoryOnion;
+		if (!itemCaps(r.type).perPlayer && r.type != ItemType::BigPiece && !storyLabel) continue;
 		const Xform x = getXform(ed_.doc, r);
 		ImVec2 s;
 		if (!project(V3(float(x.x), docHeight(float(x.x), float(x.z)) + 90, float(x.z)), origin, size, s)) continue;
 		// Cortas: el color ya dice de qué jugador es.
 		static const char* const onions[] = { "Cebolla azul", "Cebolla roja", "Cebolla amarilla" };
-		const std::string text = r.type == ItemType::Base ? tr("Salida") : r.type == ItemType::Rocket ? tr("Cohete") : r.type == ItemType::Gate ? tr("Puerta de roca")
+		const std::string text = storyLabel ? itemName(ed_.doc, r)
+		                       : r.type == ItemType::Base ? tr("Salida") : r.type == ItemType::Rocket ? tr("Cohete") : r.type == ItemType::Gate ? tr("Puerta de roca")
 		                       : r.type == ItemType::BombPile ? tr("Rocas bomba") : r.type == ItemType::Onion ? tr(onions[r.sub]) : tr("Pieza grande");
 		const ImVec2 ts = ImGui::CalcTextSize(text.c_str());
-		const Rgba c           = r.type == ItemType::BigPiece ? Rgba { 0.9f, 0.75f, 0.2f, 1 } : playerColour(r.index);
+		const Rgba c           = r.type == ItemType::BigPiece ? Rgba { 0.9f, 0.75f, 0.2f, 1 } : storyLabel ? Rgba { 0.25f, 0.6f, 0.75f, 1 } : playerColour(r.index);
 		dl->AddRectFilled(ImVec2(s.x - ts.x / 2 - 5, s.y - ts.y - 6), ImVec2(s.x + ts.x / 2 + 5, s.y), IM_COL32(int(c.r * 200), int(c.g * 200), int(c.b * 200), 200), 4);
 		dl->AddText(ImVec2(s.x - ts.x / 2, s.y - ts.y - 3), IM_COL32(255, 255, 255, 255), text.c_str());
 	}
@@ -4522,6 +5621,14 @@ bool App::ensureTerrain()
 	return true;
 }
 
+bool App::hasGroundProps() const
+{
+	for (const nectar::DocProp& p : ed_.doc.props) {
+		if (p.ground) return true;
+	}
+	return false;
+}
+
 float App::docHeight(float x, float z) const
 {
 	const MapDoc& d             = ed_.doc;
@@ -4529,6 +5636,10 @@ float App::docHeight(float x, float z) const
 	if (!d.course.empty()) {
 		float y = 0.0f;
 		return courseField_.at(x, z, y) ? y : 0.0f;
+	}
+	if (meshField_.nx > 0) {
+		float y = 0.0f;
+		if (meshField_.at(x, z, y)) return y;
 	}
 	if (!g.grid || g.nx < 1 || g.nz < 1) return 0.0f;
 	const float cell = float(d.cell);
@@ -4549,6 +5660,10 @@ bool App::docSolid(float x, float z) const
 	if (!d.course.empty()) {
 		float y;
 		return courseField_.at(x, z, y);
+	}
+	if (meshField_.nx > 0) {
+		float y;
+		if (meshField_.at(x, z, y)) return true;
 	}
 	if (!g.grid) return true;
 	// El suelo, interpolado como los triángulos del terreno.
@@ -4704,6 +5819,10 @@ void App::applyBrush(const V3& at, float dt)
 				}
 			}
 		} else if (tool_ == Tool::Height) {
+			// Sellos: uno por clic, no mientras se arrastra.
+			const bool stamp = heightOp_ == HeightOp::Hill || heightOp_ == HeightOp::Crater || heightOp_ == HeightOp::Mesa;
+			if (stamp && brushWasDown_) continue;
+			const float mirror = &c == &centres[0] ? 1.0f : -1.0f; // el ruido, igual en el lado del otro jugador
 			const std::vector<std::int16_t> before = g.heights;
 			for (int iz = z0; iz <= z1; iz++) {
 				for (int ix = x0; ix <= x1; ix++) {
@@ -4716,6 +5835,20 @@ void App::applyBrush(const V3& at, float dt)
 					case HeightOp::Raise: nh += brushStrength_ * dt * w; break;
 					case HeightOp::Lower: nh -= brushStrength_ * dt * w; break;
 					case HeightOp::Flatten: nh += (flattenTarget_ - nh) * std::min(1.0f, w * dt * 6.0f); break;
+					case HeightOp::Noise: nh += terrainNoise2(mirror * vx, mirror * vz, 140.0f) * brushStrength_ * dt * w * 1.5f; break;
+					case HeightOp::Hill: nh += brushStrength_ * w; break;
+					case HeightOp::Crater: {
+						const float t = std::min(1.0f, brushDistance(vx, vz) / r);
+						const float bowl = 1.0f - std::max(0.0f, std::min(1.0f, (t - 0.1f) / 0.6f));
+						nh += brushStrength_ * (0.35f * std::exp(-std::pow((t - 0.82f) / 0.11f, 2.0f)) - bowl * bowl * (3 - 2 * bowl));
+						break;
+					}
+					case HeightOp::Mesa: {
+						const float t = std::min(1.0f, brushDistance(vx, vz) / r);
+						const float k = 1.0f - std::max(0.0f, std::min(1.0f, (t - 0.65f) / 0.35f));
+						nh += (std::max(nh, flattenTarget_ + brushStrength_) - nh) * k * k * (3 - 2 * k);
+						break;
+					}
 					case HeightOp::Smooth: {
 						float sum = 0;
 						int n     = 0;
@@ -4852,6 +5985,813 @@ void App::drawMaterialBrowser()
 	ImGui::EndChild();
 	if (ImGui::Button(tr("Cancelar"), ImVec2(120, 0))) ImGui::CloseCurrentPopup();
 	ImGui::EndPopup();
+}
+
+
+// ── Campañas ────────────────────────────────────────────────────────────────
+// Un paquete (user/campaigns/<id>/): campaign.json con las zonas sobre una
+// imagen de mapa, sus caminos y reglas, y el nivel de cada zona en
+// zones/<zona>/map.json (se edita con el editor de siempre).
+
+namespace {
+
+// Nombre de carpeta a partir de un nombre: minúsculas, números, _ y -.
+std::string slugify(const std::string& name)
+{
+	std::string out;
+	for (unsigned char c : name) {
+		if (std::isalnum(c)) out += char(std::tolower(c));
+		else if ((c == ' ' || c == '-' || c == '_') && !out.empty() && out.back() != '_') out += '_';
+	}
+	while (!out.empty() && out.back() == '_') out.pop_back();
+	return out.empty() ? std::string("campana") : out.substr(0, 40);
+}
+
+const char* const kRuleTypes[] = { "parts", "part", "pikmin", "onion", "zone", "visited", "day", "medal" };
+
+} // namespace
+
+std::string App::campaignsDir() const { return cfg_.gameDir() + "/user/campaigns"; }
+
+bool App::pickPackImage(const char* title, const std::string& as, std::string& field)
+{
+	const fs::path p = pikmin::launcher::platform::askForFile(title, tr("Imagen PNG"), "*.png");
+	if (p.empty()) return false;
+	std::error_code ec;
+	if (!fs::copy_file(p, campDir_ + "/" + as, fs::copy_options::overwrite_existing, ec)) {
+		notify(2, tr("No se pudo copiar la imagen."));
+		return false;
+	}
+	field = as;
+	return true;
+}
+
+void App::exportPackOf(const std::string& dir)
+{
+	const fs::path where = pikmin::launcher::platform::askForInstallDirectory(tr("Elige dónde guardar el paquete"));
+	if (where.empty()) return;
+	const std::string file = (where / (fs::path(dir).filename().string() + ".nectarpack")).string();
+	std::string err;
+	if (!nectar::exportPack(dir, file, err)) {
+		notify(2, tr("No se pudo exportar: ") + err);
+		return;
+	}
+	notify(0, tr("Exportado: ") + file + tr(". En el juego: Custom Maps > Importar (o déjalo en user/import/)."));
+}
+
+// Miniatura de la campaña (thumb.png): la imagen del mapa, pequeña, con sus
+// zonas y caminos encima.
+void App::writeCampaignThumb()
+{
+	nectar::Image img;
+	if (camp_.worldmap == "game") {
+		nectar::loadBti(cfg_.dataDir() + "/screen/eng_tex/w_map.bti", img);
+	} else {
+		int w = 0, h = 0, comp = 0;
+		if (unsigned char* px = stbi_load((campDir_ + "/" + camp_.worldmap).c_str(), &w, &h, &comp, 4)) {
+			img.resize(w, h);
+			std::memcpy(img.rgba.data(), px, std::size_t(w) * h * 4);
+			stbi_image_free(px);
+		}
+	}
+	if (img.empty()) return;
+	img = nectar::shrinkToFit(img, 320, 240);
+	auto dot = [&](int cx, int cy, int r, const std::uint8_t c[4]) {
+		for (int y = cy - r; y <= cy + r; y++) {
+			for (int x = cx - r; x <= cx + r; x++) {
+				if (x < 0 || y < 0 || x >= img.width || y >= img.height || (x - cx) * (x - cx) + (y - cy) * (y - cy) > r * r) continue;
+				std::memcpy(img.at(x, y), c, 4);
+			}
+		}
+	};
+	const std::uint8_t path[4] = { 255, 240, 200, 255 }, zone[4] = { 255, 255, 255, 255 }, start[4] = { 120, 220, 90, 255 }, edge[4] = { 20, 20, 20, 255 };
+	for (const auto& p : camp_.paths) {
+		const int a = camp_.find(p.first), b = camp_.find(p.second);
+		if (a < 0 || b < 0) continue;
+		const nectar::CampaignZone &za = camp_.zones[size_t(a)], &zb = camp_.zones[size_t(b)];
+		for (int k = 0; k <= 24; k++) {
+			const double t = k / 24.0;
+			dot(int((za.x + (zb.x - za.x) * t) * img.width), int((za.y + (zb.y - za.y) * t) * img.height), 1, path);
+		}
+	}
+	for (size_t i = 0; i < camp_.zones.size(); i++) {
+		const int x = int(camp_.zones[i].x * img.width), y = int(camp_.zones[i].y * img.height);
+		dot(x, y, 6, edge);
+		dot(x, y, 4, int(i) == camp_.startZone() ? start : zone);
+	}
+	nectar::writePng(campDir_ + "/thumb.png", img);
+}
+
+void App::drawCampaignPickers()
+{
+	ImGui::SeparatorText(tr("Campañas"));
+	hint(tr("Varios niveles (zonas) sobre un mapa, con reglas para ir abriéndolos, como la historia del juego."));
+	static double sListAt = -10.0;
+	if (now() - sListAt > 3.0) {
+		sListAt = now();
+		campaignList_.clear();
+		std::error_code ec;
+		for (fs::directory_iterator it(campaignsDir(), ec), end; !ec && it != end; it.increment(ec)) {
+			std::string text, err;
+			nectar::CampaignDoc d;
+			if (!readText((it->path() / "campaign.json").string(), text)) continue;
+			const std::string name = nectar::parseCampaignDoc(text, d, err) ? d.name : it->path().filename().string();
+			campaignList_.push_back({ name, it->path().string() });
+		}
+		std::sort(campaignList_.begin(), campaignList_.end());
+	}
+	if (ImGui::Button(tr("Nueva campaña"), ImVec2(240, 40))) {
+		copyStr(campNewName_, sizeof(campNewName_), tr("Mi campaña"));
+		openNewCampaign_ = true;
+	}
+	for (const auto& c : campaignList_) {
+		ImGui::SameLine();
+		if (ImGui::GetCursorPosX() + 240 > ImGui::GetContentRegionMax().x) ImGui::NewLine();
+		if (ImGui::Button((c.first + "##" + c.second).c_str(), ImVec2(240, 40))) openCampaign(c.second);
+	}
+	if (openNewCampaign_) {
+		ImGui::OpenPopup("##newcampaign");
+		openNewCampaign_ = false;
+	}
+	if (ImGui::BeginPopupModal("##newcampaign", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+		ImGui::Text(tr("¿Cómo se llama la campaña?"));
+		ImGui::SetNextItemWidth(320);
+		ImGui::InputText("##campname", campNewName_, sizeof(campNewName_));
+		if (ImGui::Button(tr("Crear"), ImVec2(120, 0)) && campNewName_[0]) {
+			newCampaign(campNewName_);
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::SameLine();
+		if (ImGui::Button(tr("Cancelar"), ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+		ImGui::EndPopup();
+	}
+}
+
+void App::newCampaign(const std::string& name)
+{
+	std::error_code ec;
+	std::string id = slugify(name), dir = campaignsDir() + "/" + id;
+	for (int n = 2; fs::exists(dir, ec); n++) dir = campaignsDir() + "/" + id + "_" + std::to_string(n);
+	camp_      = nectar::CampaignDoc();
+	camp_.name = name;
+	camp_.zones.clear();
+	campDir_ = dir;
+	addCampaignZone();
+	camp_.start.zone = camp_.zones[0].id;
+	saveCampaign();
+	openCampaign(dir);
+}
+
+void App::openCampaign(const std::string& dir)
+{
+	std::string text, err;
+	nectar::CampaignDoc d;
+	if (!readText(dir + "/campaign.json", text) || !nectar::parseCampaignDoc(text, d, err)) {
+		notify(2, tr("No se puede abrir la campaña: ") + err);
+		return;
+	}
+	camp_           = d;
+	campDir_        = dir;
+	campDirty_      = false;
+	campZone_       = camp_.zones.empty() ? -1 : 0;
+	campLinkFrom_   = -1;
+	campCheckDirty_ = true;
+	editingZoneOf_.clear();
+	screen_ = Screen::Campaign;
+}
+
+bool App::saveCampaign()
+{
+	if (campDir_.empty()) return false;
+	if (!writeText(campDir_ + "/campaign.json", nectar::writeCampaignDoc(camp_))) {
+		notify(2, tr("No se pudo guardar la campaña."));
+		return false;
+	}
+	campDirty_ = false;
+	writeCampaignThumb();
+	notify(0, tr("Campaña guardada. Está en el juego: Custom Maps."));
+	return true;
+}
+
+void App::addCampaignZone()
+{
+	// Un id libre (y su carpeta).
+	int n = int(camp_.zones.size()) + 1;
+	std::string id;
+	std::error_code ec;
+	do {
+		id = "zona_" + std::to_string(n++);
+	} while (camp_.find(id) >= 0 || fs::exists(campDir_ + "/zones/" + id, ec));
+	nectar::CampaignZone z;
+	z.id   = id;
+	z.name = tr("Zona ") + std::to_string(camp_.zones.size() + 1);
+	z.x    = 0.3 + 0.1 * double(camp_.zones.size() % 5);
+	z.y    = 0.5;
+	// Un nivel nuevo, ya preparado para solo y coop (para explorar).
+	MapDoc m = nectar::defaultMapDoc();
+	m.name   = z.name;
+	m.modes  = nectar::MAPMODE_SOLO | nectar::MAPMODE_COOP;
+	nm::ensureStory(m, true);
+	m.story.rules.objective = "survive";
+	writeText(campDir_ + "/" + z.folder() + "/map.json", nectar::writeMapDoc(m));
+	camp_.zones.push_back(z);
+	campZone_       = int(camp_.zones.size()) - 1;
+	campDirty_      = true;
+	campCheckDirty_ = true;
+}
+
+void App::removeCampaignZone(int zone)
+{
+	if (zone < 0 || zone >= int(camp_.zones.size())) return;
+	const std::string id = camp_.zones[size_t(zone)].id;
+	camp_.zones.erase(camp_.zones.begin() + zone);
+	camp_.paths.erase(std::remove_if(camp_.paths.begin(), camp_.paths.end(), [&](const auto& p) { return p.first == id || p.second == id; }),
+	                  camp_.paths.end());
+	auto clean = [&](std::vector<nectar::UnlockRule>& rules) {
+		rules.erase(std::remove_if(rules.begin(), rules.end(), [&](const nectar::UnlockRule& r) { return r.id == id && r.type != "part"; }), rules.end());
+	};
+	for (nectar::CampaignZone& z : camp_.zones) {
+		clean(z.unlock.all);
+		clean(z.unlock.any);
+	}
+	if (camp_.start.zone == id) camp_.start.zone.clear();
+	if (camp_.ending.zone == id) camp_.ending.zone.clear();
+	campZone_       = std::min(zone, int(camp_.zones.size()) - 1);
+	campDirty_      = true;
+	campCheckDirty_ = true;
+	notify(1, tr("Zona quitada de la campaña (su carpeta sigue en el disco)."));
+}
+
+void App::editCampaignZone(int zone)
+{
+	if (zone < 0 || zone >= int(camp_.zones.size())) return;
+	if (campDirty_) saveCampaign();
+	const std::string dir = campDir_;
+	openMap(campDir_ + "/" + camp_.zones[size_t(zone)].folder() + "/map.json");
+	editingZoneOf_ = dir;
+	screen_        = Screen::Editor;
+}
+
+void App::testCampaignZone(int zone)
+{
+	if (zone < 0 || zone >= int(camp_.zones.size())) return;
+	if (campDirty_ && !saveCampaign()) return;
+	checkCampaign();
+	if (!campCheck_.empty()) {
+		notify(2, tr("Antes de probar: ") + campCheck_);
+		return;
+	}
+	std::string exe = cfg_.gameExe.empty() ? guessGameExe() : cfg_.gameExe;
+	std::error_code ec;
+	if (exe.empty() || !fs::is_regular_file(exe, ec)) {
+		notify(2, tr("No encuentro el juego. Indícalo en Ayuda > Cambiar carpetas."));
+		return;
+	}
+	std::string err;
+	std::vector<std::string> args = { "--campaign", fs::absolute(campDir_, ec).string(), "--zone", camp_.zones[size_t(zone)].id };
+	if (campTestState_) {
+		char state[160];
+		std::snprintf(state, sizeof(state), "day=%d;pikmin=%d %d %d;onions=%d %d %d;parts=%d", campTestDay_, campTestPikmin_[0], campTestPikmin_[1],
+		              campTestPikmin_[2], int(campTestOnions_[0]), int(campTestOnions_[1]), int(campTestOnions_[2]), campTestParts_);
+		args.push_back("--campaign-state");
+		args.push_back(state);
+	}
+	if (!launchGame(exe, cfg_.gameDir(), args, err)) {
+		notify(2, err);
+		return;
+	}
+	notify(0, tr("Abriendo el juego en esa zona (partida de prueba: no se guarda)."));
+}
+
+void App::checkCampaign()
+{
+	campCheckDirty_ = false;
+	std::vector<std::unique_ptr<nectar::MapData>> maps;
+	std::vector<const nectar::MapData*> ptrs;
+	for (const nectar::CampaignZone& z : camp_.zones) {
+		std::string text, err;
+		auto m = std::make_unique<nectar::MapData>();
+		if (readText(campDir_ + "/" + z.folder() + "/map.json", text) && nectar::parseMap(text, *m, err)) {
+			ptrs.push_back(m.get());
+			maps.push_back(std::move(m));
+		} else {
+			campCheck_ = z.name + ": " + (err.empty() ? tr("no se encuentra su nivel") : err);
+			return;
+		}
+	}
+	bool coop = false;
+	campCheck_.clear();
+	nectar::validateCampaign(camp_, ptrs, coop, campCheck_);
+}
+
+unsigned App::campaignMapTexture(int& w, int& h)
+{
+	const std::string key = camp_.worldmap == "game" ? "game" : campDir_ + "/" + camp_.worldmap;
+	if (key != campTexKey_) {
+		campTexKey_ = key;
+		campTex_    = 0;
+		campTexW_ = 4, campTexH_ = 3;
+		if (key == "game") {
+			nectar::Image img;
+			if (nectar::loadBti(cfg_.dataDir() + "/screen/eng_tex/w_map.bti", img) && !img.empty()) {
+				campTex_  = uploadTexture(img, false);
+				campTexW_ = img.width;
+				campTexH_ = img.height;
+			}
+		} else {
+			campTex_ = loadPngTexture(key, &campTexW_, &campTexH_);
+		}
+	}
+	w = campTexW_;
+	h = campTexH_;
+	return campTex_;
+}
+
+void App::drawCampaign()
+{
+	const ImGuiViewport* vp = ImGui::GetMainViewport();
+	ImGui::SetNextWindowPos(vp->WorkPos);
+	ImGui::SetNextWindowSize(vp->WorkSize);
+	ImGui::Begin("##campaign", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+	if (ImGui::Button(tr("< Inicio"), ImVec2(110, 34))) {
+		if (campDirty_) saveCampaign();
+		campDir_.clear();
+		screen_ = Screen::Welcome;
+		ImGui::End();
+		return;
+	}
+	ImGui::SameLine();
+	if (ImGui::Button(campDirty_ ? tr("Guardar *") : tr("Guardar"), ImVec2(110, 34))) saveCampaign();
+	ImGui::SameLine();
+	if (ImGui::Button(tr("Exportar paquete..."), ImVec2(170, 34)) && (!campDirty_ || saveCampaign())) exportPackOf(campDir_);
+	ImGui::SetItemTooltip(tr("Un solo archivo .nectarpack con la campaña y sus niveles, para compartirla"));
+	ImGui::SameLine();
+	ImGui::TextColored(ImVec4(0.90f, 0.87f, 0.62f, 1), "%s", camp_.name.c_str());
+	ImGui::SameLine();
+	if (campCheckDirty_) checkCampaign();
+	if (campCheck_.empty()) ImGui::TextColored(kGood, "%s", tr("Lista para jugar"));
+	else ImGui::TextColored(kBad, "%s %s", tr("Falta:"), campCheck_.c_str());
+
+	const float panelW = 380.0f;
+	const ImVec2 avail = ImGui::GetContentRegionAvail();
+	ImGui::BeginChild("##campcanvas", ImVec2(avail.x - panelW - 8, avail.y), ImGuiChildFlags_Borders);
+	drawCampaignCanvas(ImGui::GetCursorScreenPos(), ImGui::GetContentRegionAvail());
+	ImGui::EndChild();
+	ImGui::SameLine();
+	ImGui::BeginChild("##camppanel", ImVec2(panelW, avail.y), ImGuiChildFlags_Borders);
+	drawCampaignPanel();
+	ImGui::EndChild();
+	ImGui::End();
+	// Toasts y demás.
+	for (auto it = toasts_.begin(); it != toasts_.end();) it = it->until < now() ? toasts_.erase(it) : it + 1;
+	if (!toasts_.empty()) {
+		ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f, vp->WorkPos.y + vp->WorkSize.y - 20), ImGuiCond_Always, ImVec2(0.5f, 1.0f));
+		ImGui::Begin("##camptoasts", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings);
+		for (const Toast& t : toasts_) ImGui::TextColored(t.level == 2 ? kBad : t.level == 1 ? kWarn : kGood, "%s", t.text.c_str());
+		ImGui::End();
+	}
+}
+
+void App::drawCampaignCanvas(const ImVec2& origin, const ImVec2& size)
+{
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	int iw = 4, ih = 3;
+	const unsigned tex = campaignMapTexture(iw, ih);
+	// La imagen, entera y centrada.
+	float w = size.x, h = size.x * float(ih) / float(std::max(1, iw));
+	if (h > size.y) {
+		h = size.y;
+		w = size.y * float(iw) / float(std::max(1, ih));
+	}
+	const ImVec2 p0(origin.x + (size.x - w) * 0.5f, origin.y + (size.y - h) * 0.5f), p1(p0.x + w, p0.y + h);
+	if (tex) dl->AddImage(ImTextureID(std::intptr_t(tex)), p0, p1);
+	else dl->AddRectFilled(p0, p1, IM_COL32(40, 60, 40, 255));
+	auto toScreen = [&](const nectar::CampaignZone& z) { return ImVec2(p0.x + float(z.x) * w, p0.y + float(z.y) * h); };
+
+	// Caminos.
+	for (const auto& p : camp_.paths) {
+		const int a = camp_.find(p.first), b = camp_.find(p.second);
+		if (a < 0 || b < 0) continue;
+		dl->AddLine(toScreen(camp_.zones[size_t(a)]), toScreen(camp_.zones[size_t(b)]), IM_COL32(255, 240, 200, 220), 3.0f);
+	}
+	// Zonas.
+	const int start = camp_.startZone();
+	for (size_t i = 0; i < camp_.zones.size(); i++) {
+		const nectar::CampaignZone& z = camp_.zones[i];
+		const ImVec2 c                = toScreen(z);
+		const ImU32 fill              = int(i) == start ? IM_COL32(120, 220, 90, 255) : z.unlock.empty() ? IM_COL32(240, 240, 240, 255) : IM_COL32(200, 160, 90, 255);
+		dl->AddCircleFilled(c, 11.0f, fill);
+		dl->AddCircle(c, 11.0f, IM_COL32(20, 20, 20, 255), 0, 2.0f);
+		if (int(i) == campZone_) dl->AddCircle(c, 17.0f, IM_COL32(255, 215, 40, 255), 0, 3.0f);
+		if (int(i) == campLinkFrom_) dl->AddCircle(c, 22.0f, IM_COL32(120, 200, 255, 255), 0, 2.0f);
+		const ImVec2 ts = ImGui::CalcTextSize(z.name.c_str());
+		dl->AddRectFilled(ImVec2(c.x - ts.x / 2 - 4, c.y + 14), ImVec2(c.x + ts.x / 2 + 4, c.y + 16 + ts.y), IM_COL32(0, 0, 0, 160), 3);
+		dl->AddText(ImVec2(c.x - ts.x / 2, c.y + 15), IM_COL32(255, 255, 255, 255), z.name.c_str());
+	}
+	// Puntos de interés: rombos azules.
+	for (size_t k = 0; k < camp_.pois.size(); k++) {
+		const nectar::CampaignPoi& poi = camp_.pois[k];
+		const ImVec2 c(p0.x + float(poi.x) * w, p0.y + float(poi.y) * h);
+		const ImVec2 q[4] = { ImVec2(c.x, c.y - 9), ImVec2(c.x + 9, c.y), ImVec2(c.x, c.y + 9), ImVec2(c.x - 9, c.y) };
+		dl->AddConvexPolyFilled(q, 4, IM_COL32(120, 200, 255, 255));
+		if (int(k) == campPoi_) dl->AddCircle(c, 14.0f, IM_COL32(255, 215, 40, 255), 0, 2.0f);
+		dl->AddText(ImVec2(c.x + 11, c.y - 7), IM_COL32(200, 235, 255, 255), poi.name.c_str());
+	}
+	// Ratón: clic elige (o une, en «unir»), arrastrar mueve.
+	ImGui::SetCursorScreenPos(origin);
+	ImGui::InvisibleButton("##campcanvasbtn", size);
+	const ImVec2 m = ImGui::GetIO().MousePos;
+	if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+		int hit = -1;
+		for (size_t i = 0; i < camp_.zones.size(); i++) {
+			const ImVec2 c = toScreen(camp_.zones[i]);
+			if ((m.x - c.x) * (m.x - c.x) + (m.y - c.y) * (m.y - c.y) <= 16.0f * 16.0f) hit = int(i);
+		}
+		// Los puntos de interés, después de las zonas (índice zonas + k).
+		for (size_t k = 0; hit < 0 && k < camp_.pois.size(); k++) {
+			const ImVec2 c(p0.x + float(camp_.pois[k].x) * w, p0.y + float(camp_.pois[k].y) * h);
+			if ((m.x - c.x) * (m.x - c.x) + (m.y - c.y) * (m.y - c.y) <= 12.0f * 12.0f) hit = int(camp_.zones.size() + k);
+		}
+		if (hit >= int(camp_.zones.size())) {
+			campPoi_     = hit - int(camp_.zones.size());
+			campDrag_    = hit;
+			campLinkFrom_ = -1;
+		} else if (hit >= 0 && campLinkFrom_ >= 0 && hit != campLinkFrom_) {
+			// Unir (o separar, si ya estaban unidas).
+			const std::string a = camp_.zones[size_t(campLinkFrom_)].id, b = camp_.zones[size_t(hit)].id;
+			auto it = std::find_if(camp_.paths.begin(), camp_.paths.end(), [&](const auto& p) {
+				return (p.first == a && p.second == b) || (p.first == b && p.second == a);
+			});
+			if (it != camp_.paths.end()) camp_.paths.erase(it);
+			else camp_.paths.push_back({ a, b });
+			campLinkFrom_   = -1;
+			campDirty_      = true;
+			campCheckDirty_ = true;
+		} else if (hit >= 0) {
+			campZone_ = hit;
+			campDrag_ = hit;
+		}
+		if (hit < 0) campLinkFrom_ = -1;
+	}
+	if (campDrag_ >= 0 && ImGui::IsMouseDown(ImGuiMouseButton_Left) && ImGui::IsItemActive()) {
+		double& x  = campDrag_ < int(camp_.zones.size()) ? camp_.zones[size_t(campDrag_)].x : camp_.pois[size_t(campDrag_) - camp_.zones.size()].x;
+		double& y  = campDrag_ < int(camp_.zones.size()) ? camp_.zones[size_t(campDrag_)].y : camp_.pois[size_t(campDrag_) - camp_.zones.size()].y;
+		x          = std::clamp(double((m.x - p0.x) / w), 0.0, 1.0);
+		y          = std::clamp(double((m.y - p0.y) / h), 0.0, 1.0);
+		campDirty_ = true;
+	}
+	if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) campDrag_ = -1;
+	if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", campLinkFrom_ >= 0 ? tr("Haz clic en la zona que quieres unir") : tr("Clic: elegir zona. Arrastrar: moverla."));
+}
+
+bool App::drawUnlockList(std::vector<nectar::UnlockRule>& rules, const char* id)
+{
+	bool ch = false;
+	const char* types[] = { tr("Piezas en total"), tr("Una pieza concreta"), tr("Pikmin"), tr("Tener una cebolla"), tr("Zona completada"),
+		                    tr("Zona visitada"), tr("Desde el día"), tr("Medalla en una zona") };
+	const char* colors[] = { tr("Azul"), tr("Roja"), tr("Amarilla") };
+	ImGui::PushID(id);
+	int remove = -1;
+	for (size_t i = 0; i < rules.size(); i++) {
+		nectar::UnlockRule& r = rules[i];
+		ImGui::PushID(int(i));
+		int type = 0;
+		for (int k = 0; k < 8; k++) {
+			if (r.type == kRuleTypes[k]) type = k;
+		}
+		ImGui::SetNextItemWidth(-30);
+		if (ImGui::Combo("##type", &type, types, 8)) {
+			r      = nectar::UnlockRule();
+			r.type = kRuleTypes[type];
+			if (r.type == "onion" || r.type == "pikmin") r.color = r.type == "onion" ? 0 : -1;
+			if (r.type == "part") r.id = "uf01";
+			if ((r.type == "zone" || r.type == "visited" || r.type == "medal") && !camp_.zones.empty()) r.id = camp_.zones[0].id;
+			ch = true;
+		}
+		ImGui::SameLine();
+		if (ImGui::SmallButton("x")) remove = int(i);
+		const std::string& t = r.type;
+		if (t == "parts" || t == "pikmin" || t == "day") {
+			ImGui::SetNextItemWidth(-90);
+			ch |= ImGui::SliderInt(tr("Cuántos"), &r.count, 1, t == "pikmin" ? 100 : 30);
+		}
+		if (t == "pikmin" || t == "onion") {
+			int col = t == "pikmin" ? r.color + 1 : r.color;
+			const char* pcolors[] = { tr("En total"), tr("Azules"), tr("Rojos"), tr("Amarillos") };
+			ImGui::SetNextItemWidth(-90);
+			if (t == "pikmin" ? ImGui::Combo(tr("Color"), &col, pcolors, 4) : ImGui::Combo(tr("Color"), &col, colors, 3)) {
+				r.color = t == "pikmin" ? col - 1 : col;
+				ch      = true;
+			}
+		}
+		if (t == "part") {
+			ImGui::SetNextItemWidth(-90);
+			if (ImGui::BeginCombo(tr("Pieza"), r.id.c_str())) {
+				for (const nectar::ShipPartInfo& sp : nectar::shipParts()) {
+					if (ImGui::Selectable(sp.id, r.id == sp.id)) {
+						r.id = sp.id;
+						ch   = true;
+					}
+				}
+				ImGui::EndCombo();
+			}
+		}
+		if (t == "zone" || t == "visited" || t == "medal") {
+			const int z = camp_.find(r.id);
+			ImGui::SetNextItemWidth(-90);
+			if (ImGui::BeginCombo(tr("Zona"), z >= 0 ? camp_.zones[size_t(z)].name.c_str() : "?")) {
+				for (const nectar::CampaignZone& cz : camp_.zones) {
+					if (ImGui::Selectable((cz.name + "##" + cz.id).c_str(), r.id == cz.id)) {
+						r.id = cz.id;
+						ch   = true;
+					}
+				}
+				ImGui::EndCombo();
+			}
+			if (t == "medal") {
+				const char* medals[] = { tr("Bronce"), tr("Plata"), tr("Oro") };
+				int md               = std::clamp(r.count, 0, 2);
+				ImGui::SetNextItemWidth(-90);
+				if (ImGui::Combo(tr("Medalla"), &md, medals, 3)) {
+					r.count = md;
+					ch      = true;
+				}
+			}
+		}
+		ImGui::PopID();
+	}
+	if (remove >= 0) {
+		rules.erase(rules.begin() + remove);
+		ch = true;
+	}
+	if (ImGui::SmallButton(tr("+ regla"))) {
+		rules.push_back(nectar::UnlockRule());
+		ch = true;
+	}
+	ImGui::PopID();
+	return ch;
+}
+
+void App::drawCampaignZone(int zi)
+{
+	nectar::CampaignZone& z = camp_.zones[size_t(zi)];
+	bool ch                 = false;
+	char buf[128];
+	copyStr(buf, sizeof(buf), z.name);
+	ImGui::SetNextItemWidth(-90);
+	if (ImGui::InputText(tr("Nombre"), buf, sizeof(buf))) {
+		z.name = buf;
+		ch     = true;
+	}
+	copyStr(buf, sizeof(buf), z.nameEn);
+	ImGui::SetNextItemWidth(-90);
+	if (ImGui::InputText(tr("En inglés"), buf, sizeof(buf))) {
+		z.nameEn = buf;
+		ch       = true;
+	}
+	ImGui::TextColored(kDim, tr("Carpeta: zones/%s"), z.id.c_str());
+	// Foto: una del juego o la miniatura del nivel.
+	static const char* const kSnaps[] = { "", "game:pr_snap", "game:fo_snap", "game:ca_snap", "game:ya_snap", "game:ga_snap" };
+	const char* snaps[] = { tr("La miniatura del nivel"), "Impact Site", "Forest of Hope", "Forest Navel", "Distant Spring", "Final Trial" };
+	int snap            = 0;
+	for (int k = 0; k < 6; k++) {
+		if (z.photo == kSnaps[k]) snap = k;
+	}
+	ImGui::SetNextItemWidth(-90);
+	if (ImGui::Combo(tr("Foto"), &snap, snaps, 6)) {
+		z.photo = kSnaps[snap];
+		ch      = true;
+	}
+	const char* musics[] = { tr("La del nivel"), "Impact Site", "Forest of Hope", "Forest Navel", "Distant Spring", "Final Trial" };
+	int music            = 0;
+	for (size_t k = 0; k < nectar::musicNames().size(); k++) {
+		if (z.music == nectar::musicNames()[k]) music = int(k) + 1;
+	}
+	ImGui::SetNextItemWidth(-90);
+	if (ImGui::Combo(tr("Música"), &music, musics, 6)) {
+		z.music = music ? nectar::musicNames()[size_t(music - 1)] : "";
+		ch      = true;
+	}
+	ImGui::SeparatorText(tr("Se abre cuando..."));
+	if (zi == camp_.startZone()) {
+		hint(tr("Es la zona de salida: está abierta desde el principio."));
+	} else {
+		ImGui::TextColored(kDim, "%s", tr("Se cumplen todas estas:"));
+		ch |= drawUnlockList(z.unlock.all, "all");
+		ImGui::TextColored(kDim, "%s", tr("Y además, alguna de estas (opcional):"));
+		ch |= drawUnlockList(z.unlock.any, "any");
+		if (z.unlock.empty()) hint(tr("Sin reglas: abierta desde el principio."));
+	}
+	ImGui::Separator();
+	if (wideButton(tr("Editar el nivel de esta zona"))) editCampaignZone(zi);
+	if (wideButton(tr("Probar desde esta zona"))) testCampaignZone(zi);
+	ImGui::Checkbox(tr("Probar con un estado elegido"), &campTestState_);
+	if (campTestState_) {
+		ImGui::SetNextItemWidth(-90);
+		ImGui::SliderInt(tr("Día"), &campTestDay_, 1, 60);
+		const char* onions[] = { tr("Cebolla azul"), tr("Cebolla roja"), tr("Cebolla amarilla") };
+		const char* pikmin[] = { tr("Azules"), tr("Rojos"), tr("Amarillos") };
+		for (int c = 0; c < 3; c++) {
+			ImGui::Checkbox(onions[c], &campTestOnions_[c]);
+			ImGui::SameLine(170);
+			ImGui::SetNextItemWidth(-90);
+			ImGui::SliderInt(pikmin[c], &campTestPikmin_[c], 0, 100);
+		}
+		ImGui::SetNextItemWidth(-90);
+		ImGui::SliderInt(tr("Piezas ya recogidas"), &campTestParts_, 0, 30);
+		hint(tr("Las piezas son las primeras de las zonas, en orden. Sirve para probar reglas sin jugar todo."));
+	}
+	if (wideButton(campLinkFrom_ == zi ? tr("Unir: haz clic en otra zona...") : tr("Unir con otra zona (camino)"))) campLinkFrom_ = campLinkFrom_ == zi ? -1 : zi;
+	hint(tr("Unir dos zonas que ya lo están quita el camino."));
+	if (ImGui::Button(tr("Quitar de la campaña"), ImVec2(-1, 0))) removeCampaignZone(zi);
+	if (ch) {
+		campDirty_      = true;
+		campCheckDirty_ = true;
+	}
+}
+
+void App::drawCampaignPanel()
+{
+	bool ch = false;
+	char buf[512];
+	if (ImGui::CollapsingHeader(tr("La campaña"), ImGuiTreeNodeFlags_DefaultOpen)) {
+		copyStr(buf, sizeof(buf), camp_.name);
+		ImGui::SetNextItemWidth(-90);
+		if (ImGui::InputText(tr("Nombre"), buf, 128)) camp_.name = buf, ch = true;
+		copyStr(buf, sizeof(buf), camp_.author);
+		ImGui::SetNextItemWidth(-90);
+		if (ImGui::InputText(tr("Autor"), buf, 128)) camp_.author = buf, ch = true;
+		copyStr(buf, sizeof(buf), camp_.nameEn);
+		ImGui::SetNextItemWidth(-90);
+		if (ImGui::InputText(tr("En inglés"), buf, 128)) camp_.nameEn = buf, ch = true;
+		copyStr(buf, sizeof(buf), camp_.intro);
+		ImGui::Text(tr("Introducción (al empezar una partida):"));
+		if (ImGui::InputTextMultiline("##intro", buf, sizeof(buf), ImVec2(-1, 70))) camp_.intro = buf, ch = true;
+		copyStr(buf, sizeof(buf), camp_.introEn);
+		ImGui::Text(tr("En inglés:"));
+		if (ImGui::InputTextMultiline("##introen", buf, sizeof(buf), ImVec2(-1, 50))) camp_.introEn = buf, ch = true;
+		ImGui::Text(tr("Imagen de la introducción: %s"), camp_.introImage.empty() ? tr("ninguna") : camp_.introImage.c_str());
+		if (ImGui::Button(tr("Elegir...##introimg"))) ch |= pickPackImage(tr("Imagen de la introducción"), "intro.png", camp_.introImage);
+		ImGui::SameLine();
+		if (ImGui::Button(tr("Quitar##introimg"))) camp_.introImage.clear(), ch = true;
+		ImGui::Text(tr("Imagen del mapa:"));
+		if (choiceButton(tr("La del juego"), camp_.worldmap == "game", ImVec2(150, 0))) camp_.worldmap = "game", ch = true;
+		ImGui::SameLine();
+		if (ImGui::Button(tr("Elegir una imagen PNG..."), ImVec2(-1, 0))) {
+			const fs::path p = pikmin::launcher::platform::askForFile(tr("Elige la imagen del mapa"), tr("Imagen PNG"), "*.png");
+			std::error_code ec;
+			if (!p.empty() && fs::copy_file(p, campDir_ + "/worldmap.png", fs::copy_options::overwrite_existing, ec)) {
+				camp_.worldmap = "worldmap.png";
+				campTexKey_.clear(); // volver a cargarla
+				ch = true;
+			} else if (!p.empty()) {
+				notify(2, tr("No se pudo copiar la imagen."));
+			}
+		}
+	}
+	if (ImGui::CollapsingHeader(tr("Al empezar"))) {
+		const int start = camp_.startZone();
+		ImGui::SetNextItemWidth(-90);
+		if (ImGui::BeginCombo(tr("Zona"), start >= 0 ? camp_.zones[size_t(start)].name.c_str() : "?")) {
+			for (const nectar::CampaignZone& z : camp_.zones) {
+				if (ImGui::Selectable((z.name + "##s" + z.id).c_str(), camp_.start.zone == z.id)) camp_.start.zone = z.id, ch = true;
+			}
+			ImGui::EndCombo();
+		}
+		const char* onions[] = { tr("Cebolla azul"), tr("Cebolla roja"), tr("Cebolla amarilla") };
+		const char* pikmin[] = { tr("Azules"), tr("Rojos"), tr("Amarillos") };
+		for (int c = 0; c < 3; c++) ch |= ImGui::Checkbox(onions[c], &camp_.start.onions[c]);
+		ImGui::Text(tr("Pikmin en el grupo el primer día:"));
+		for (int c = 0; c < 3; c++) {
+			ImGui::SetNextItemWidth(-90);
+			ch |= ImGui::SliderInt(pikmin[c], &camp_.start.pikmin[c], 0, 100);
+		}
+	}
+	if (ImGui::CollapsingHeader(tr("El final"))) {
+		const char* types[] = { tr("Recoger piezas"), tr("Completar una zona") };
+		int type            = camp_.ending.type == "zone" ? 1 : 0;
+		ImGui::SetNextItemWidth(-90);
+		if (ImGui::Combo(tr("Se gana al"), &type, types, 2)) camp_.ending.type = type ? "zone" : "parts", ch = true;
+		if (type == 0) {
+			ImGui::SetNextItemWidth(-90);
+			ch |= ImGui::SliderInt(tr("Piezas"), &camp_.ending.count, 0, 30, camp_.ending.count ? "%d" : tr("Todas"));
+		} else {
+			const int z = camp_.find(camp_.ending.zone);
+			ImGui::SetNextItemWidth(-90);
+			if (ImGui::BeginCombo(tr("Zona"), z >= 0 ? camp_.zones[size_t(z)].name.c_str() : "?")) {
+				for (const nectar::CampaignZone& cz : camp_.zones) {
+					if (ImGui::Selectable((cz.name + "##e" + cz.id).c_str(), camp_.ending.zone == cz.id)) camp_.ending.zone = cz.id, ch = true;
+				}
+				ImGui::EndCombo();
+			}
+		}
+		ImGui::SetNextItemWidth(-90);
+		ch |= ImGui::SliderInt(tr("Límite de días"), &camp_.ending.dayLimit, 0, 60, camp_.ending.dayLimit ? "%d" : tr("Sin límite"));
+		copyStr(buf, sizeof(buf), camp_.ending.goodText);
+		ImGui::SetNextItemWidth(-90);
+		if (ImGui::InputText(tr("Final bueno"), buf, 200)) camp_.ending.goodText = buf, ch = true;
+		copyStr(buf, sizeof(buf), camp_.ending.badText);
+		ImGui::SetNextItemWidth(-90);
+		if (ImGui::InputText(tr("Final malo"), buf, 200)) camp_.ending.badText = buf, ch = true;
+		copyStr(buf, sizeof(buf), camp_.ending.goodTextEn);
+		ImGui::SetNextItemWidth(-90);
+		if (ImGui::InputText(tr("Bueno (inglés)"), buf, 200)) camp_.ending.goodTextEn = buf, ch = true;
+		copyStr(buf, sizeof(buf), camp_.ending.badTextEn);
+		ImGui::SetNextItemWidth(-90);
+		if (ImGui::InputText(tr("Malo (inglés)"), buf, 200)) camp_.ending.badTextEn = buf, ch = true;
+		ImGui::Text(tr("Imagen del final: %s"), camp_.ending.image.empty() ? tr("ninguna") : camp_.ending.image.c_str());
+		if (ImGui::Button(tr("Elegir...##endimg"))) ch |= pickPackImage(tr("Imagen del final"), "ending.png", camp_.ending.image);
+		ImGui::SameLine();
+		if (ImGui::Button(tr("Quitar##endimg"))) camp_.ending.image.clear(), ch = true;
+	}
+	// Diario: textos que se leen al anochecer.
+	if (ImGui::CollapsingHeader(tr("Diario"))) {
+		hint(tr("Al acabar el día se enseña la primera entrada sin leer de ese día (o de cualquiera) y de esa zona (o de cualquiera)."));
+		int remove = -1;
+		for (size_t k = 0; k < camp_.diary.size(); k++) {
+			nectar::CampaignDiary& e = camp_.diary[k];
+			ImGui::PushID(int(k) + 5000);
+			ImGui::Separator();
+			ImGui::SetNextItemWidth(-90);
+			ch |= ImGui::SliderInt(tr("Día"), &e.day, 0, 60, e.day ? "%d" : tr("cualquiera"));
+			const int z = camp_.find(e.zone);
+			ImGui::SetNextItemWidth(-90);
+			if (ImGui::BeginCombo(tr("Zona"), z >= 0 ? camp_.zones[size_t(z)].name.c_str() : tr("cualquiera"))) {
+				if (ImGui::Selectable(tr("cualquiera"), e.zone.empty())) e.zone.clear(), ch = true;
+				for (const nectar::CampaignZone& cz : camp_.zones) {
+					if (ImGui::Selectable((cz.name + "##d" + cz.id).c_str(), e.zone == cz.id)) e.zone = cz.id, ch = true;
+				}
+				ImGui::EndCombo();
+			}
+			copyStr(buf, sizeof(buf), e.text);
+			if (ImGui::InputTextMultiline("##dtext", buf, sizeof(buf), ImVec2(-1, 50))) e.text = buf, ch = true;
+			copyStr(buf, sizeof(buf), e.textEn);
+			ImGui::SetNextItemWidth(-90);
+			if (ImGui::InputText(tr("En inglés"), buf, sizeof(buf))) e.textEn = buf, ch = true;
+			if (ImGui::SmallButton(tr("Quitar entrada"))) remove = int(k);
+			ImGui::PopID();
+		}
+		if (remove >= 0) camp_.diary.erase(camp_.diary.begin() + remove), ch = true;
+		if (camp_.diary.size() < 200 && ImGui::Button(tr("Añadir entrada"), ImVec2(-1, 0))) {
+			nectar::CampaignDiary e;
+			e.day  = int(camp_.diary.size()) + 1;
+			e.text = tr("Hoy...");
+			camp_.diary.push_back(e);
+			ch = true;
+		}
+	}
+	// Puntos de interés del mapa.
+	if (ImGui::CollapsingHeader(tr("Puntos de interés"))) {
+		hint(tr("Marcas en el mapa de zonas que solo enseñan un texto (pistas, historia). Se mueven arrastrándolas."));
+		int remove = -1;
+		for (size_t k = 0; k < camp_.pois.size(); k++) {
+			nectar::CampaignPoi& poi = camp_.pois[k];
+			ImGui::PushID(int(k) + 7000);
+			ImGui::Separator();
+			if (ImGui::Selectable(poi.name.empty() ? "?" : poi.name.c_str(), int(k) == campPoi_)) campPoi_ = int(k);
+			if (int(k) == campPoi_) {
+				copyStr(buf, sizeof(buf), poi.name);
+				ImGui::SetNextItemWidth(-90);
+				if (ImGui::InputText(tr("Nombre"), buf, 128)) poi.name = buf, ch = true;
+				copyStr(buf, sizeof(buf), poi.nameEn);
+				ImGui::SetNextItemWidth(-90);
+				if (ImGui::InputText(tr("En inglés"), buf, 128)) poi.nameEn = buf, ch = true;
+				copyStr(buf, sizeof(buf), poi.text);
+				if (ImGui::InputTextMultiline("##ptext", buf, sizeof(buf), ImVec2(-1, 50))) poi.text = buf, ch = true;
+				copyStr(buf, sizeof(buf), poi.textEn);
+				ImGui::SetNextItemWidth(-90);
+				if (ImGui::InputText(tr("Texto en inglés"), buf, sizeof(buf))) poi.textEn = buf, ch = true;
+				if (ImGui::SmallButton(tr("Quitar punto"))) remove = int(k);
+			}
+			ImGui::PopID();
+		}
+		if (remove >= 0) {
+			camp_.pois.erase(camp_.pois.begin() + remove);
+			campPoi_ = -1;
+			ch       = true;
+		}
+		if (camp_.pois.size() < 32 && ImGui::Button(tr("Añadir punto de interés"), ImVec2(-1, 0))) {
+			nectar::CampaignPoi poi;
+			poi.name = tr("Punto");
+			poi.x    = 0.5 + 0.05 * double(camp_.pois.size() % 6);
+			camp_.pois.push_back(poi);
+			campPoi_ = int(camp_.pois.size()) - 1;
+			ch       = true;
+		}
+	}
+	ImGui::SeparatorText(tr("Zonas"));
+	for (size_t i = 0; i < camp_.zones.size(); i++) {
+		if (ImGui::Selectable((camp_.zones[i].name + "##z" + camp_.zones[i].id).c_str(), int(i) == campZone_)) campZone_ = int(i);
+	}
+	if (camp_.zones.size() < 30 && wideButton(tr("Añadir zona"))) addCampaignZone();
+	if (campZone_ >= 0 && campZone_ < int(camp_.zones.size())) {
+		ImGui::SeparatorText(camp_.zones[size_t(campZone_)].name.c_str());
+		drawCampaignZone(campZone_);
+	}
+	if (ch) {
+		campDirty_      = true;
+		campCheckDirty_ = true;
+	}
 }
 
 } // namespace nm

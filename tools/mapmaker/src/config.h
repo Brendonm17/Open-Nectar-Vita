@@ -12,6 +12,8 @@ struct Config {
 	std::string assetsDir; ///< la carpeta "assets" del juego (contiene dataDir)
 	std::string gameExe;   ///< ejecutable del juego para "Probar"
 	std::vector<std::string> favorites, recents; ///< assets del catálogo
+	/// Mi biblioteca de piezas recortadas de escenarios: (nombre, "cut:...").
+	std::vector<std::pair<std::string, std::string>> pieces;
 	std::string lastMap;   ///< último map.json abierto o guardado
 	bool snap = true;
 	bool tutorialDone = false;

@@ -177,10 +177,21 @@ bool Navi::demoCheck()
 						JUT_ASSERT(targetPiki, "No yellow pikmin found for yellow onion cutscene\n");
 #endif
 
+#ifdef PIKI_PC_PORT
+						// Sin pikmin amarillos (#158, #159) la escena se centra en la cebolla.
+						if (!targetPiki) {
+							arg.mOrigin                = onionPosition;
+							arg.mAngle                 = yellowOnion->getFaceDir();
+							moviePlayer->mTargetObject = yellowOnion;
+							moviePlayer->play(arg);
+						} else
+#endif
+						{
 						arg.mOrigin                = targetPiki->getPosition();
 						arg.mAngle                 = targetPiki->getFaceDir();
 						moviePlayer->mTargetObject = targetPiki;
 						moviePlayer->play(arg);
+						}
 					}
 				}
 			}
@@ -225,12 +236,23 @@ bool Navi::demoCheck()
 						JUT_ASSERT(targetPiki, "No blue pikmin found for blue onion cutscene\n");
 #endif
 
+#ifdef PIKI_PC_PORT
+						// Sin pikmin azules la escena se centra en la cebolla.
+						if (!targetPiki) {
+							arg.mOrigin                = onionPosition;
+							arg.mAngle                 = blueOnion->getFaceDir();
+							moviePlayer->mTargetObject = blueOnion;
+							moviePlayer->play(arg);
+						} else
+#endif
+						{
 						arg.mOrigin        = targetPiki->getPosition();
 						arg.mAngle         = targetPiki->getFaceDir();
 						arg.mSoundPosition = targetPiki->getSound_PosPtr();
 
 						moviePlayer->mTargetObject = targetPiki;
 						moviePlayer->play(arg);
+						}
 					}
 				}
 			}

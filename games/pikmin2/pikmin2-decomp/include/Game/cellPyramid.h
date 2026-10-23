@@ -56,6 +56,9 @@ struct CellLeg {
 		mNext   = nullptr;
 		mObject = nullptr;
 		mCell   = nullptr;
+#ifdef PIKI_PC_PORT
+		mPcGen = 0;
+#endif
 	}
 
 	inline bool findLeg(CellLeg* leg)
@@ -74,6 +77,10 @@ struct CellLeg {
 	Cell* mCell;         // _08
 	CellObject* mObject; // _0C
 	u8 mFlags;           // _10
+#ifdef PIKI_PC_PORT
+	// Generación de la pirámide en la que se inscribió (ver CellPyramid::mPcGen).
+	u32 mPcGen;
+#endif
 };
 
 struct Cell {
@@ -202,6 +209,11 @@ struct CellPyramid : public SweepPrune::World {
 	inline CellLayer* getLayer(int i) { return &mLayers[i]; }
 
 	int mFreeMemory;    // _28
+#ifdef PIKI_PC_PORT
+	// Identifica esta pirámide aunque la del subnivel siguiente caiga en la
+	// misma dirección: una pata con otra generación apunta a celdas muertas.
+	u32 mPcGen;
+#endif
 	int mLayerCount;    // _2C
 	CellLayer* mLayers; // _30
 	f32 mScale;         // _34

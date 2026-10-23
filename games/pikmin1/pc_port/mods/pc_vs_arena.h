@@ -31,6 +31,14 @@ struct PcVsReaction {
  * materiales se copian tal cual; geometría, colisión y caminos se generan.
  * Sin esos archivos en assets/ la arena no existe.
  */
+/// Cuántas cosas de cada tipo puede tener un mapa (los mismos números que
+/// nectar::kMapMax* de nectar_mapcore/map.h).
+#define PC_VS_MAX_PELLETS 48
+#define PC_VS_MAX_PIECES  32
+#define PC_VS_MAX_GUARDS  16
+#define PC_VS_MAX_ENEMIES 120
+#define PC_VS_MAX_OBJECTS 64
+
 #define PC_VS_ARENA_STAGE "stages/vsarena.ini"
 #define PC_VS_ARENA_MOD   "courses/vsarena/arena.mod"
 // Generadores (solo con un escenario del juego como base): el juego los busca

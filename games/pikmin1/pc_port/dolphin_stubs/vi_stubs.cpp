@@ -52,6 +52,7 @@ void VIWaitForRetrace(void)    {
     if (!pc_record_hud_hidden()) {
         pc_settings_draw_idle_counter();
         pc_settings_draw_vs_hud();
+        pc_settings_draw_mission_hud();
     }
     pc_speedrun_draw();
     if (pc_netplay_hud_draw != nullptr) pc_netplay_hud_draw();

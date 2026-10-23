@@ -35,6 +35,7 @@
 #include <cstdarg>
 #include <string>
 #include <fstream>
+#include <sstream>
 #include <algorithm>
 #include <vector>
 #include <atomic>
@@ -47,6 +48,10 @@
 #include "pc_coop.h"
 #include "pc_vs.h"
 #include "mods/pc_vs_map.h"
+#include "mods/pc_map_catalog.h"
+#include "mods/pc_mission.h"
+#include "mods/pc_campaign.h"
+#include "nectar_mapcore/pack.h"
 #include "netplay/pc_netplay_det.h"
 #include "pc_achievements.h"
 #include "pc_speedrun.h"
@@ -156,6 +161,7 @@ struct PcConfig {
     // Whistling over sprouts plucks them one at a time (0=off/faithful, 1=on).
     int whistlePluck = 0;
     int bombControl = 0;
+    int bombRespawnSec = 0;     // mod Bomb Rock Respawn: segundos por roca (0 = original, al día siguiente)
     int hideOlimarText = 0;     // sin los textos de Olimar (primer Pikmin, piezas, avisos)
     int speedrunIntroHidden = 0; // explicación del modo Speedrun ya vista (se abre sola solo la primera vez)        // botón Bomb: el amarillo con bomba la lanza al cursor o la suelta
     int speedrunCategory = 0;    // categoría del modo Speedrun (PC_SR_CAT_*)
@@ -190,6 +196,7 @@ struct PcConfig {
     int vsPikiLimit = 2; // 25 / 40 / 50 por jugador
     int vsPellets = 1;   // cada 30 / 45 / 60 s / sin pastillas
     std::string vsMap;   // carpeta en user/maps/vs/; vacío = la arena de serie
+    std::string missionMap; // Custom Maps: la última misión elegida (carpeta en user/maps/)
     // Mods de Pikmin 3: fijar objetivo, y mandar el escuadrón contra él.
     int lockOn = 0;
     int charge = 0;
@@ -282,6 +289,7 @@ struct PcConfig {
         noTrip = 0;
         whistlePluck = 0;
         bombControl = 0;
+        bombRespawnSec = 0;
         hideOlimarText = 0;
         onionStep10 = 0;
         instantWhistle = 0;
@@ -1079,7 +1087,7 @@ namespace {
     X(fpsMode) X(chainActions) X(holdToPluck) X(betterPathfinding) X(bluesOnlyWater)         \
     X(idleCounter) X(naviHealthPct) X(tekiHealthPct) X(infiniteDay) X(freeCamera)            \
     X(whistleRadiusPct) X(throwSpeedPct) X(throwCancelB) X(quickGrab) X(noTrip)              \
-    X(whistlePluck) X(bombControl) X(hideOlimarText) X(onionStep10) X(instantWhistle)        \
+    X(whistlePluck) X(bombControl) X(bombRespawnSec) X(hideOlimarText) X(onionStep10) X(instantWhistle)        \
     X(pikiInvincible) X(allFlowers) X(carrySpeedPct) X(naviSpeedPct) X(unlockZones)          \
     X(noDayAdvance) X(allOnions) X(breakableGates) X(eternalNight) X(fireflies)              \
     X(p2Selection) X(vsDuration) X(vsRocketWin) X(vsRocketHp) X(vsBigPiece) X(vsPikiLimit)   \
@@ -1193,6 +1201,7 @@ void saveConfig() {
     out << "noTrip = " << sConfig.noTrip << "\n";
     out << "whistlePluck = " << sConfig.whistlePluck << "\n";
     out << "bombControl = " << sConfig.bombControl << "\n";
+    out << "bombRespawnSec = " << sConfig.bombRespawnSec << "\n";
     out << "breakableGates = " << sConfig.breakableGates << "\n";
     out << "freeCamPadPct = " << sConfig.freeCamPadPct << "\n";
     out << "p2Selection = " << sConfig.p2Selection << "\n";
@@ -1223,6 +1232,7 @@ void saveConfig() {
     out << "vsPikiLimit = " << sConfig.vsPikiLimit << "\n";
     out << "vsPellets = " << sConfig.vsPellets << "\n";
     out << "vsMap = " << sConfig.vsMap << "\n";
+    out << "missionMap = " << sConfig.missionMap << "\n";
     out << "lockOn = " << sConfig.lockOn << "\n";
     out << "charge = " << sConfig.charge << "\n";
     out << "throwWhileMoving = " << sConfig.throwWhileMoving << "\n";
@@ -1436,6 +1446,10 @@ void loadConfig() {
         else if (key == "bombControl") {
             sConfig.bombControl = atoi(val.c_str()) ? 1 : 0;
         }
+        else if (key == "bombRespawnSec") {
+            const int v = atoi(val.c_str());
+            sConfig.bombRespawnSec = (v == 30 || v == 60 || v == 120) ? v : 0;
+        }
         else if (key == "whistlePluck") {
             sConfig.whistlePluck = atoi(val.c_str()) ? 1 : 0;
         }
@@ -1549,6 +1563,11 @@ void loadConfig() {
             const bool safe = val.size() < 64 && val.find('/') == std::string::npos
                 && val.find('\\') == std::string::npos && val.find("..") == std::string::npos;
             sConfig.vsMap = safe ? val : std::string();
+        }
+        else if (key == "missionMap") {
+            const bool safe = val.size() < 64 && val.find('/') == std::string::npos
+                && val.find('\\') == std::string::npos && val.find("..") == std::string::npos;
+            sConfig.missionMap = safe ? val : std::string();
         }
         else if (key == "texturePack") {
             const bool safe = !val.empty() && val.size() < 64
@@ -1889,6 +1908,9 @@ void f1SwitchTab(int dir) {
 
 // VS (definidos más abajo, junto a su dibujo).
 void pcVsRulesInput();
+void pcMissionPromptInput();
+void pcCampaignMapInput();
+void pcMissionEndInput();
 void pcVsEndScreenInput();
 bool vsEndScreenShown();
 
@@ -1975,6 +1997,42 @@ void pollMenuInput() {
         pc_touch_claim_game_menu();
 #endif
         pcVsRulesInput();
+        return;
+    }
+    if (pc_mission_prompt_active()) {
+#if PIKI_PC_TOUCH
+        pc_touch_claim_game_menu();
+#endif
+        pcMissionPromptInput();
+        return;
+    }
+    if (pc_campaign_map_active()) {
+#if PIKI_PC_TOUCH
+        pc_touch_claim_game_menu();
+#endif
+        pcCampaignMapInput();
+        return;
+    }
+    if (pc_mission_end_screen()) {
+#if PIKI_PC_TOUCH
+        pc_touch_claim_game_menu();
+#endif
+        pcMissionEndInput();
+        return;
+    }
+    if (pc_mission_textbox()) {
+#if PIKI_PC_TOUCH
+        pc_touch_claim_game_menu();
+#endif
+        // Cuadro de texto de un disparador: A (o B) lo cierra.
+        bool close = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE) || menuCancelKey()
+                  || (sTouchFrameButtons & (PAD_BUTTON_A | PAD_BUTTON_B)) != 0;
+        sTouchTapPending = false;
+        if (SDL_GameController* ctl = pc_window_get_controller()) close |= promptPadA(ctl) || promptPadB(ctl);
+        if (close) {
+            SeSystem::playSysSe(SYSSE_DECIDE1);
+            pc_mission_close_textbox();
+        }
         return;
     }
     if (vsEndScreenShown()) {
@@ -2830,6 +2888,14 @@ void modsRowChange(int row, bool left, bool right) {
     }
     else if (row == 40) {
         if (left || right) sPending.eternalNight = sPending.eternalNight ? 0 : 1;
+    }
+    else if (row == 42) {
+        static const int kSteps[] = { 0, 30, 60, 120 };
+        int i = 0;
+        while (i < 3 && kSteps[i] != sPending.bombRespawnSec) i++;
+        if (right) i = (i + 1) % 4;
+        if (left) i = (i + 3) % 4;
+        sPending.bombRespawnSec = kSteps[i];
     }
     else if (row == 41) {
         if (left || right) sPending.fireflies = sPending.fireflies ? 0 : 1;
@@ -6310,6 +6376,1175 @@ void pc_vsrules_prompt_draw(void) {
     drawHelpLine(panelX + panelW / 2, panelY + panelH - 38, help, dim);
 }
 
+
+// ── Custom Maps: campañas y misiones sueltas ────────────────────────────────
+// Pantallas: la lista (campañas arriba, misiones sueltas debajo) y las tres
+// ranuras de una campaña. Sus zonas se eligen en el mapa de zonas (MapSelect).
+namespace {
+enum MissionScreen { MS_List, MS_Slots, MS_Mods };
+bool sMissionOpen    = false;
+int sMissionResult   = PC_DEVASSIGN_PENDING;
+int sMissionScreen   = MS_List;
+int sMissionIndex    = 0;
+int sMissionPlayers  = 1; // misiones sueltas: 1 solo, 2 coop (izquierda/derecha)
+int sMissionSavedDay = 0; // > 0: preguntando si se sigue esa partida guardada
+int sMissionAskRow   = 0; // 0 continuar, 1 empezar de nuevo
+std::string sMissionError; // al pulsar A, si no se pudo montar
+std::string sMissionInfo;  // lo instalado (paquetes importados)
+std::vector<PcMapCatalogEntry> sMissionList;
+std::vector<PcMissionRecord> sMissionRecords; // leídos con la lista
+// Campañas: la elegida, su ranura y la zona.
+int sPackIndex     = 0;
+int sSlotRow       = 0;
+int sSlotPlayers   = 1;  // partida nueva en una ranura vacía
+int sSlotConfirm   = -1; // ranura pendiente de confirmar al borrar
+PcCampaignSlotInfo sSlotInfo[PC_CAMPAIGN_SLOTS];
+bool sPrevX = false, sPrevY = false;
+// Modificadores: para una misión suelta (0) o una partida nueva de campaña (1).
+int sModsFor = 0, sModsRow = 0;
+PcMissionMods sModsPick;
+constexpr int kModTeki[]  = { 50, 75, 100, 150, 200 };
+constexpr int kModCarry[] = { 100, 150, 200 };
+
+void missionDone();
+const std::vector<PcCampaignPack>& packs();
+
+int modsRows() { return sModsFor == 0 ? 4 : 3; } // «sin bajas» solo en misiones sueltas
+
+void openMods(int forWhat)
+{
+    sModsFor       = forWhat;
+    sModsRow       = 0;
+    sModsPick      = PcMissionMods();
+    sMissionScreen = MS_Mods;
+    sMissionError.clear();
+}
+
+template <size_t N> int cycle(const int (&values)[N], int current, bool left)
+{
+    int i = 0;
+    for (size_t k = 0; k < N; k++) {
+        if (values[k] == current) i = int(k);
+    }
+    i = (i + (left ? int(N) - 1 : 1)) % int(N);
+    return values[i];
+}
+
+void modsInput(bool up, bool down, bool left, bool right, bool accept, bool cancel)
+{
+    const int n = modsRows();
+    if (up || down) sModsRow = (sModsRow + (up ? n - 1 : 1)) % n;
+    if (left || right) {
+        switch (sModsRow) {
+        case 0: sModsPick.tekiHealth = cycle(kModTeki, sModsPick.tekiHealth, left); break;
+        case 1: sModsPick.extraDays = (sModsPick.extraDays + (left ? 5 : 1)) % 6; break;
+        case 2: sModsPick.carry = cycle(kModCarry, sModsPick.carry, left); break;
+        default: sModsPick.noLosses = !sModsPick.noLosses; break;
+        }
+    }
+    if (accept) {
+        if (sModsFor == 0) {
+            pc_mission_start(false);
+            pc_mission_set_mods(sModsPick);
+            missionDone();
+        } else {
+            const PcCampaignPack& pack = packs()[size_t(sPackIndex)];
+            if (!pc_campaign_open(pack, sSlotRow, sSlotPlayers, sModsPick)) {
+                sMissionError = pack.error.empty() ? "no se puede abrir la ranura" : pack.error;
+                return;
+            }
+            missionDone();
+        }
+    } else if (cancel) {
+        sMissionScreen = sModsFor == 0 ? MS_List : MS_Slots;
+    }
+}
+
+const std::vector<PcCampaignPack>& packs() { return pc_campaign_packs(false); }
+int missionRows() { return int(packs().size() + sMissionList.size()); }
+bool missionRowIsPack(int row) { return row < int(packs().size()); }
+const PcMapCatalogEntry& missionRowMap(int row) { return sMissionList[size_t(row - int(packs().size()))]; }
+
+void missionRescan(bool rescan)
+{
+    pc_campaign_packs(rescan);
+    sMissionList.clear();
+    // Los del modo elegido y los que no se pueden leer fuera de la carpeta de
+    // VS (para enseñar el motivo).
+    const unsigned mode = sMissionPlayers == 2 ? nectar::MAPMODE_COOP : nectar::MAPMODE_SOLO;
+    for (const PcMapCatalogEntry& e : pc_map_catalog(rescan)) {
+        if ((e.modes & mode) || (e.modes == 0 && !e.legacy)) sMissionList.push_back(e);
+    }
+    sMissionRecords.clear();
+    for (const PcMapCatalogEntry& e : sMissionList) sMissionRecords.push_back(pc_mission_record(e.id, sMissionPlayers));
+}
+
+// Instala un .nectarpack (o .zip) en user/: campaña o mapa suelto.
+bool importPack(const std::string& file, std::string& msg)
+{
+    std::string installed, err;
+    if (!nectar::installPack(file, "user", installed, err)) {
+        msg = std::filesystem::path(file).filename().string() + ": " + err;
+        return false;
+    }
+    msg = std::filesystem::path(installed).filename().string();
+    fprintf(stderr, "[packs] %s -> %s\n", file.c_str(), installed.c_str());
+    return true;
+}
+
+// Los paquetes dejados en user/import/ se instalan solos (así también en
+// Android): el archivo queda como .imported (o .failed, con el motivo).
+void autoImport()
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    std::string done, failed;
+    for (fs::directory_iterator it("user/import", ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string ext = it->path().extension().string();
+        if (!it->is_regular_file(ec) || (ext != ".nectarpack" && ext != ".zip")) continue;
+        std::string msg;
+        const bool ok = importPack(it->path().string(), msg);
+        (ok ? done : failed) += (ok ? done : failed).empty() ? msg : ", " + msg;
+        fs::rename(it->path(), it->path().string() + (ok ? ".imported" : ".failed"), ec);
+    }
+    const bool es = pc_settings_get_language() == 3;
+    if (!done.empty()) sMissionInfo = (es ? "Instalado: " : "Installed: ") + done;
+    if (!failed.empty()) sMissionError = (es ? "No se pudo instalar: " : "Couldn't install: ") + failed;
+}
+
+void readSlots()
+{
+    for (int s = 0; s < PC_CAMPAIGN_SLOTS; s++) sSlotInfo[s] = pc_campaign_slot_info(packs()[size_t(sPackIndex)], s);
+}
+
+const char* missionGoalText(const nectar::MapData& m, bool es)
+{
+    switch (m.story.objective) {
+    case nectar::MAPGOAL_Parts: return es ? "Recupera piezas de la nave" : "Recover ship parts";
+    case nectar::MAPGOAL_Pellets: return es ? "Lleva pastillas a las cebollas" : "Carry pellets to the Onions";
+    case nectar::MAPGOAL_Pikmin: return es ? "Consigue Pikmin" : "Grow your Pikmin";
+    case nectar::MAPGOAL_Boss: return es ? "Derrota a los jefes" : "Defeat the bosses";
+    default: return es ? "Aguanta hasta el anochecer" : "Survive until sunset";
+    }
+}
+
+void missionDone()
+{
+    sMissionResult = PC_DEVASSIGN_OK;
+    sMissionOpen   = false;
+}
+
+// Ranuras: A continúa o empieza (izquierda/derecha: jugadores de la nueva),
+// X copia en la primera vacía, Y borra (pulsando dos veces).
+void slotsInput(bool up, bool down, bool side, bool accept, bool cancel, bool copy, bool erase)
+{
+    const PcCampaignPack& pack = packs()[size_t(sPackIndex)];
+    if (up || down) {
+        sSlotRow     = (sSlotRow + (up ? PC_CAMPAIGN_SLOTS - 1 : 1)) % PC_CAMPAIGN_SLOTS;
+        sSlotConfirm = -1;
+        sMissionError.clear();
+    }
+    const PcCampaignSlotInfo& info = sSlotInfo[sSlotRow];
+    if (side && !info.used && pack.coop) sSlotPlayers = sSlotPlayers == 2 ? 1 : 2;
+    if (copy && info.used) {
+        for (int s = 0; s < PC_CAMPAIGN_SLOTS; s++) {
+            if (!sSlotInfo[s].used) {
+                pc_campaign_slot_copy(pack, sSlotRow, s);
+                SeSystem::playSysSe(SYSSE_DECIDE1);
+                break;
+            }
+        }
+        readSlots();
+    }
+    if (erase && info.used) {
+        if (sSlotConfirm == sSlotRow) {
+            pc_campaign_slot_delete(pack, sSlotRow);
+            sSlotConfirm = -1;
+            readSlots();
+        } else {
+            sSlotConfirm = sSlotRow;
+        }
+        return;
+    }
+    if (accept && !info.used) {
+        openMods(1);
+        return;
+    }
+    if (accept) {
+        if (!pc_campaign_open(pack, sSlotRow, 0)) {
+            sMissionError = pack.error.empty() ? "no se puede abrir la ranura" : pack.error;
+            return;
+        }
+        // Luego, mandos y capitanes; después, el mapa de zonas (MapSelect).
+        sMissionError.clear();
+        missionDone();
+    } else if (cancel) {
+        sMissionScreen = MS_List;
+        sSlotConfirm   = -1;
+        sMissionError.clear();
+    }
+}
+
+void pcMissionPromptInput()
+{
+    if (!sMissionOpen) return;
+    bool up     = keyWentDown(SDL_SCANCODE_UP) || keyWentDown(SDL_SCANCODE_W);
+    bool down   = keyWentDown(SDL_SCANCODE_DOWN) || keyWentDown(SDL_SCANCODE_S);
+    bool left   = keyWentDown(SDL_SCANCODE_LEFT) || keyWentDown(SDL_SCANCODE_A);
+    bool right  = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D);
+    bool accept = menuOkKey();
+    bool cancel = menuCancelKey();
+    bool copy   = keyWentDown(SDL_SCANCODE_C);
+    bool erase  = keyWentDown(SDL_SCANCODE_DELETE);
+    up |= (sTouchFrameButtons & PAD_BUTTON_UP) != 0;
+    down |= (sTouchFrameButtons & PAD_BUTTON_DOWN) != 0;
+    left |= (sTouchFrameButtons & PAD_BUTTON_LEFT) != 0;
+    right |= (sTouchFrameButtons & PAD_BUTTON_RIGHT) != 0;
+    accept |= (sTouchFrameButtons & PAD_BUTTON_A) != 0;
+    cancel |= (sTouchFrameButtons & PAD_BUTTON_B) != 0;
+    sTouchTapPending = false;
+    SDL_GameController* ctl = pc_window_get_controller();
+    if (ctl) {
+        if (padNavUp(ctl)) up = true;
+        if (padNavDown(ctl)) down = true;
+        if (padNavLeft(ctl)) left = true;
+        if (padNavRight(ctl)) right = true;
+        if (promptPadA(ctl)) accept = true;
+        if (promptPadB(ctl)) cancel = true;
+        const bool x = SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_X) != 0;
+        const bool y = SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_Y) != 0;
+        copy |= x && !sPrevX;
+        erase |= y && !sPrevY;
+        sPrevX = x;
+        sPrevY = y;
+    }
+    const bool side = left || right;
+    if (sMissionScreen == MS_Slots) {
+        slotsInput(up, down, side, accept, cancel, copy, erase);
+        return;
+    }
+    if (sMissionScreen == MS_List && sMissionSavedDay == 0 && (erase || keyWentDown(SDL_SCANCODE_I))) {
+        // Importar un paquete (.nectarpack) con el diálogo del sistema.
+        char chosen[1024] = {};
+        if (pc_file_dialog_open("Import a .nectarpack", "Nectar pack", "*.nectarpack *.zip", chosen, sizeof(chosen))) {
+            std::string msg;
+            sMissionInfo.clear();
+            sMissionError.clear();
+            if (importPack(chosen, msg)) sMissionInfo = (pc_settings_get_language() == 3 ? "Instalado: " : "Installed: ") + msg;
+            else sMissionError = msg;
+            missionRescan(true);
+        } else if (chosen[0]) {
+            sMissionError = chosen; // sin diálogo disponible: el motivo
+        }
+        return;
+    }
+    if (sMissionScreen == MS_Mods) {
+        modsInput(up, down, left, right, accept, cancel);
+        return;
+    }
+    // Partida guardada de una misión suelta: continuar o empezar de nuevo.
+    if (sMissionSavedDay > 0) {
+        if (up || down) sMissionAskRow ^= 1;
+        if (accept) {
+            sMissionSavedDay = 0;
+            if (sMissionAskRow == 0) {
+                pc_mission_start(true); // con los modificadores con los que se empezó
+                missionDone();
+            } else {
+                openMods(0);
+            }
+        } else if (cancel) {
+            sMissionSavedDay = 0;
+        }
+        return;
+    }
+    if (side) {
+        // 1 jugador <-> 2 jugadores (misiones sueltas): otra lista; se queda en
+        // la misma fila si sigue estando.
+        const bool wasPack   = missionRows() > 0 && missionRowIsPack(sMissionIndex);
+        const std::string id = missionRows() == 0 || wasPack ? std::string() : missionRowMap(sMissionIndex).id;
+        sMissionPlayers = sMissionPlayers == 2 ? 1 : 2;
+        missionRescan(false);
+        if (!wasPack) {
+            sMissionIndex = 0;
+            for (size_t i = 0; i < sMissionList.size(); i++) {
+                if (sMissionList[i].id == id) sMissionIndex = int(packs().size() + i);
+            }
+        }
+        sMissionError.clear();
+    }
+    const int n = missionRows();
+    if (n > 0 && (up || down)) {
+        sMissionIndex = (sMissionIndex + (up ? n - 1 : 1)) % n;
+        sMissionError.clear();
+    }
+    if (accept && n > 0 && missionRowIsPack(sMissionIndex)) {
+        // Campaña: sus ranuras.
+        const PcCampaignPack& pack = packs()[size_t(sMissionIndex)];
+        if (!pack.error.empty()) {
+            sMissionError = pack.error;
+            return;
+        }
+        sPackIndex     = sMissionIndex;
+        sSlotRow       = 0;
+        sSlotPlayers   = 1;
+        sSlotConfirm   = -1;
+        sMissionScreen = MS_Slots;
+        readSlots();
+        sMissionError.clear();
+    } else if (accept && n > 0) {
+        // Se monta ya: si el mapa no vale, se dice aquí y no se empieza.
+        const PcMapCatalogEntry& e = missionRowMap(sMissionIndex);
+        pc_mission_select(e.id, sMissionPlayers);
+        const char* why = pc_mission_map() ? pc_vs_arena_prepare() : pc_mission_error().c_str();
+        if (why) {
+            sMissionError = why;
+            return;
+        }
+        sConfig.missionMap = e.id;
+        saveConfig();
+        if (const int day = pc_mission_saved_day()) {
+            sMissionSavedDay = day;
+            sMissionAskRow   = 0;
+            return;
+        }
+        openMods(0);
+    } else if (cancel) {
+        sMissionResult = PC_DEVASSIGN_CANCELLED;
+        sMissionOpen   = false;
+    }
+}
+
+// Miniatura en (x, y) de alto `th`; devuelve el ancho (0 si no hay).
+int missionThumb(DGXGraphics* gfx, const std::string& file, int x, int y, int th, int maxW)
+{
+    if (file.empty()) return 0;
+    const std::string name = "@" + file;
+    int aw = 0, ah = 0;
+    Texture* thumb = pc_art_texture(name.c_str());
+    if (!thumb || !pc_art_size(name.c_str(), &aw, &ah) || aw <= 0 || ah <= 0) return 0;
+    const int tw = std::min(maxW, aw * th / ah);
+    const Colour tint(255, 255, 255, 255);
+    const float u1 = float(aw) / thumb->mWidth, v1 = float(ah) / thumb->mHeight;
+    if (pc_settings_p2d_active()) {
+        pc_settings_p2d_image(x, y, tw, th, thumb, u1, v1, tint, 0.0f);
+    } else {
+        gfx->setColour(tint, true);
+        gfx->setAuxColour(tint);
+        gfx->useTexture(thumb, GX_TEXMAP0);
+        gfx->drawRectangle(RectArea(x, y, x + tw, y + th), RectArea(0, 0, aw, ah), nullptr);
+        gfx->useTexture(nullptr, GX_TEXMAP0);
+    }
+    return tw;
+}
+
+void missionCursor(int x, int y)
+{
+    if (pc_settings_p2d_active()) pc_settings_p2d_cursor(x, y, 18, std::fmod(SDL_GetTicks() / 1000.0f * 10.0f, 6.2831853f));
+}
+} // namespace
+
+void pc_mission_prompt_open(void) {
+    sMissionOpen   = true;
+    sMissionResult = PC_DEVASSIGN_PENDING;
+    sMissionScreen = MS_List;
+    pc_campaign_close();
+    sMissionError.clear();
+    sMissionInfo.clear();
+    autoImport();
+    // La lista se vuelve a leer cada vez (mapas copiados con el juego abierto).
+    missionRescan(true);
+    sMissionIndex = 0;
+    for (size_t i = 0; i < sMissionList.size(); i++) {
+        if (sMissionList[i].id == sConfig.missionMap) sMissionIndex = int(packs().size() + i);
+    }
+    sMissionSavedDay = 0;
+    pc_menu_edge_reset();
+}
+bool pc_mission_prompt_active(void) { return sMissionOpen; }
+int pc_mission_prompt_players(void) { return sMissionPlayers; }
+int pc_mission_prompt_result(void) { return sMissionResult; }
+
+void pc_mission_prompt_draw(void) {
+    if (!sMissionOpen) return;
+    if (!gsys || !gsys->mDGXGfx) return;
+    DGXGraphics* gfx = static_cast<DGXGraphics*>(gsys->mDGXGfx);
+    ensureFont();
+    if (!sFont) return;
+    const bool es = vsSpanish();
+
+    const int screenW = pc_gfx_menu_wide() ? pc_gfx_menu_virt_width() : gfx->mScreenWidth;
+    const int screenH = gfx->mScreenHeight;
+    PcSettingsP2DFrame nativeFrame(screenW, screenH);
+    GlassTextScope glassText;
+    Matrix4f ortho;
+    gfx->setOrthogonal(ortho.mMtx, RectArea(0, 0, screenW, screenH));
+
+    const Colour title(255, 229, 120, 255), body(214, 224, 245, 255), dim(150, 165, 195, 255), bad(255, 110, 90, 255);
+    const Colour selC(255, 170, 30, 255), rowC(190, 200, 220, 255), packC(150, 220, 255, 255);
+    const int panelW = std::min(800, screenW - 24), panelH = 452;
+    const int panelX = screenW / 2 - panelW / 2, panelY = screenH / 2 - panelH / 2;
+    drawPikminPanel(gfx, panelX, panelY, panelW, panelH, 22);
+    const int colW = (panelW - 72) / 2;
+    const int lx   = panelX + 24;
+    const int rx   = lx + colW + 24;
+    constexpr int kRowH = 30, kRows = 9;
+    const int listY = panelY + 88;
+    char line[160];
+
+    // ── Modificadores ───────────────────────────────────────────────────────
+    if (sMissionScreen == MS_Mods) {
+        drawPikminHeader(gfx, panelX, panelY, panelW, es ? "Modificadores" : "Modifiers");
+        vsText(lx + 8, panelY + 56, es ? "ANTES DE EMPEZAR" : "BEFORE YOU START", title, 14, 21);
+        for (int r = 0; r < modsRows(); r++) {
+            const bool sel = r == sModsRow;
+            const int ry   = listY + r * 40;
+            if (sel) missionCursor(lx - 8, ry + 8);
+            const char* label = "";
+            char value[48];
+            switch (r) {
+            case 0:
+                label = es ? "Vida de los enemigos" : "Enemy health";
+                snprintf(value, sizeof(value), "%d%%", sModsPick.tekiHealth);
+                break;
+            case 1:
+                label = es ? "Días extra" : "Extra days";
+                snprintf(value, sizeof(value), "+%d", sModsPick.extraDays);
+                break;
+            case 2:
+                label = es ? "Velocidad de carga" : "Carry speed";
+                snprintf(value, sizeof(value), "%d%%", sModsPick.carry);
+                break;
+            default:
+                label = es ? "Sin bajas (pierdes si cae uno)" : "No losses (lose if one falls)";
+                snprintf(value, sizeof(value), "%s", sModsPick.noLosses ? (es ? "Sí" : "Yes") : "No");
+                break;
+            }
+            vsText(lx + 10, ry, label, sel ? selC : rowC, 11, 17);
+            snprintf(line, sizeof(line), sel ? "< %s >" : "%s", value);
+            vsText(lx + panelW - 90 - vsTextW(line, 11), ry, line, sel ? selC : body, 11, 17);
+        }
+        vsText(lx + 10, listY + modsRows() * 40 + 10,
+               sModsPick.any() ? (es ? "Con modificadores, los récords van aparte." : "With modifiers, records are kept apart.")
+                               : (es ? "Partida normal." : "Normal game."),
+               dim, 10, 15);
+        if (!sMissionError.empty()) {
+            vsFitText(sMissionError.c_str(), line, sizeof(line), panelW - 60, 10);
+            vsText(lx, panelY + panelH - 66, line, bad, 10, 15);
+        }
+        drawHelpLine(panelX + panelW / 2, panelY + panelH - 38,
+                     es ? "Arriba/Abajo: opción   Izq/Der: cambiar   A: empezar   B: atrás" : "Up/Down: option   Left/Right: change   A: start   B: back", dim);
+        return;
+    }
+
+    // ── Ranuras de una campaña ──────────────────────────────────────────────
+    if (sMissionScreen == MS_Slots) {
+        const PcCampaignPack& pack = packs()[size_t(sPackIndex)];
+        drawPikminHeader(gfx, panelX, panelY, panelW, pc_campaign_text(pack.doc.name, pack.doc.nameEn).c_str());
+        vsText(lx + 8, panelY + 56, es ? "PARTIDAS" : "SAVE FILES", title, 14, 21);
+        for (int s = 0; s < PC_CAMPAIGN_SLOTS; s++) {
+            const PcCampaignSlotInfo& info = sSlotInfo[s];
+            const bool sel                 = s == sSlotRow;
+            const int y                    = listY + s * 92;
+            vsCard(gfx, lx - 4, y - 6, panelW - 40, 84);
+            if (sel) missionCursor(lx - 8, y + 8);
+            snprintf(line, sizeof(line), "%s %d", es ? "Ranura" : "Slot", s + 1);
+            vsText(lx + 12, y, line, sel ? selC : rowC, 12, 18);
+            if (!info.used) {
+                if (pack.coop)
+                    snprintf(line, sizeof(line), es ? "Nueva partida   < %s >" : "New game   < %s >",
+                             sSlotPlayers == 2 ? (es ? "2 jugadores" : "2 players") : (es ? "1 jugador" : "1 player"));
+                else snprintf(line, sizeof(line), "%s", es ? "Nueva partida" : "New game");
+                vsText(lx + 12, y + 28, line, body, 10, 15);
+                continue;
+            }
+            snprintf(line, sizeof(line), es ? "Día %d   Piezas %d/%d   Pikmin %d   Zonas %d (%d completadas)%s"
+                                            : "Day %d   Parts %d/%d   Pikmin %d   Zones %d (%d complete)%s",
+                     info.day, info.parts, pack.partTotal, info.pikmin, info.zonesOpen, info.zonesDone,
+                     info.players == 2 ? (es ? "   Coop" : "   Co-op") : "");
+            vsText(lx + 12, y + 28, line, body, 10, 15);
+            if (info.ending >= 0)
+                vsText(lx + 12, y + 50, info.ending == 1 ? (es ? "Campaña completada" : "Campaign complete") : (es ? "Se acabaron los días" : "Out of days"),
+                       title, 10, 15);
+            if (sSlotConfirm == s) vsText(lx + 300, y, es ? "Pulsa Y / Supr otra vez para borrar" : "Press Y / Del again to erase", bad, 10, 15);
+        }
+        if (!sMissionError.empty()) {
+            vsFitText(sMissionError.c_str(), line, sizeof(line), panelW - 60, 10);
+            vsText(lx, panelY + panelH - 66, line, bad, 10, 15);
+        }
+        const char* help = es ? "A: jugar   X / C: copiar   Y / Supr: borrar   B: atrás" : "A: play   X / C: copy   Y / Del: erase   B: back";
+        drawHelpLine(panelX + panelW / 2, panelY + panelH - 38, help, dim);
+        return;
+    }
+
+    // ── La lista ────────────────────────────────────────────────────────────
+    drawPikminHeader(gfx, panelX, panelY, panelW, es ? "Mapas personalizados" : "Custom Maps");
+    const bool two = sMissionPlayers == 2;
+    vsText(lx + 8, panelY + 56, two ? (es ? "< MISIONES: 2 JUGADORES >" : "< MISSIONS: 2 PLAYERS >") : (es ? "< MISIONES: 1 JUGADOR >" : "< MISSIONS: 1 PLAYER >"),
+           title, 14, 21);
+    const int n = missionRows();
+    if (n == 0) {
+        vsText(lx + 10, listY, es ? "No hay campañas ni misiones." : "No campaigns or missions yet.", body, 11, 17);
+        vsText(lx + 10, listY + 26, es ? "Campañas: user/campaigns/<nombre>/" : "Campaigns: user/campaigns/<name>/", dim, 10, 15);
+        vsText(lx + 10, listY + 46, es ? "Misiones: user/maps/<nombre>/" : "Missions: user/maps/<name>/", dim, 10, 15);
+    }
+    const int first = std::clamp(sMissionIndex - kRows / 2, 0, std::max(0, n - kRows));
+    for (int i = first; i < n && i < first + kRows; i++) {
+        const bool pack = missionRowIsPack(i);
+        const bool sel  = i == sMissionIndex;
+        const int ry    = listY + (i - first) * kRowH;
+        if (sel) missionCursor(lx - 8, ry + 8);
+        char name[96];
+        const std::string& error = pack ? packs()[size_t(i)].error : missionRowMap(i).error;
+        if (pack) {
+            snprintf(line, sizeof(line), "%s %s", es ? "Campaña:" : "Campaign:", pc_campaign_text(packs()[size_t(i)].doc.name, packs()[size_t(i)].doc.nameEn).c_str());
+        } else {
+            const PcMapCatalogEntry& e = missionRowMap(i);
+            const PcMissionRecord& rec = sMissionRecords[size_t(i) - packs().size()];
+            const char* medal          = pc_mission_medal_name(rec.medal, es);
+            snprintf(line, sizeof(line), "%s%s%s%s", e.name.c_str(), rec.wins ? "  [" : "", rec.wins ? (*medal ? medal : "OK") : "", rec.wins ? "]" : "");
+        }
+        vsFitText(line, name, sizeof(name), colW - 20, 11);
+        const Colour c = !error.empty() ? bad : sel ? selC : pack ? packC : rowC;
+        vsText(lx + 10, ry, name, c, 11, 17);
+    }
+
+    // ── Derecha: la ficha de la campaña elegida ─────────────────────────────
+    if (n > 0 && missionRowIsPack(std::clamp(sMissionIndex, 0, n - 1))) {
+        const PcCampaignPack& c = packs()[size_t(std::clamp(sMissionIndex, 0, n - 1))];
+        int y = panelY + 52;
+        const int tx = rx + 10;
+        vsCard(gfx, rx - 4, y, colW + 8, 300);
+        if (missionThumb(gfx, c.thumb, tx, y + 10, 96, colW - 16)) y += 106;
+        vsFitText(pc_campaign_text(c.doc.name, c.doc.nameEn).c_str(), line, sizeof(line), colW - 20, 14);
+        vsText(tx, y + 12, line, title, 14, 21);
+        char by[96];
+        snprintf(by, sizeof(by), "%s %s", es ? "De" : "By", c.doc.author.empty() ? "?" : c.doc.author.c_str());
+        vsFitText(by, line, sizeof(line), colW - 20, 10);
+        vsText(tx, y + 40, line, body, 10, 15);
+        const std::string& why = !sMissionError.empty() ? sMissionError : c.error;
+        if (!why.empty()) {
+            vsText(tx, y + 70, es ? "No se puede jugar:" : "Can't be played:", bad, 10, 15);
+            vsFitText(why.c_str(), line, sizeof(line), colW - 20, 10);
+            vsText(tx, y + 90, line, body, 10, 15);
+        } else {
+            snprintf(line, sizeof(line), es ? "%zu zonas, %d piezas" : "%zu zones, %d parts", c.doc.zones.size(), c.partTotal);
+            vsText(tx, y + 70, line, body, 10, 15);
+            vsText(tx, y + 92, c.coop ? (es ? "1 o 2 jugadores" : "1 or 2 players") : (es ? "1 jugador" : "1 player"), body, 10, 15);
+            if (c.doc.ending.dayLimit > 0) {
+                snprintf(line, sizeof(line), es ? "Límite: %d días" : "Limit: %d days", c.doc.ending.dayLimit);
+                vsText(tx, y + 114, line, body, 10, 15);
+            }
+        }
+    }
+    // ── Derecha: la ficha del mapa elegido ──────────────────────────────────
+    else if (n > 0) {
+        const PcMapCatalogEntry& e = missionRowMap(std::clamp(sMissionIndex, 0, n - 1));
+        int y = panelY + 52;
+        const int tx = rx + 10;
+        vsCard(gfx, rx - 4, y, colW + 8, 300);
+        if (missionThumb(gfx, e.thumb, tx, y + 10, 96, colW - 16)) y += 106;
+        vsFitText(e.name.c_str(), line, sizeof(line), colW - 20, 14);
+        vsText(tx, y + 12, line, title, 14, 21);
+        char by[96];
+        snprintf(by, sizeof(by), "%s %s", es ? "De" : "By", e.author.empty() ? "?" : e.author.c_str());
+        vsFitText(by, line, sizeof(line), colW - 20, 10);
+        vsText(tx, y + 40, line, body, 10, 15);
+        const std::string& why = !sMissionError.empty() ? sMissionError : e.error;
+        if (!why.empty()) {
+            vsText(tx, y + 70, es ? "No se puede jugar:" : "Can't be played:", bad, 10, 15);
+            vsFitText(why.c_str(), line, sizeof(line), colW - 20, 10);
+            vsText(tx, y + 90, line, body, 10, 15);
+        } else {
+            // La ficha lee el mapa una vez.
+            nectar::MapData m;
+            std::string err;
+            static std::string sInfoId;
+            static nectar::MapData sInfo;
+            if (sInfoId != e.id && pc_map_catalog_load(e.file, m, err)) {
+                sInfo   = m;
+                sInfoId = e.id;
+            }
+            if (sInfoId == e.id) {
+                vsText(tx, y + 70, es ? "OBJETIVO" : "GOAL", title, 12, 18);
+                vsText(tx, y + 92, missionGoalText(sInfo, es), body, 10, 15);
+                const int* sp = sInfo.story.startPikmin;
+                snprintf(line, sizeof(line), es ? "Pikmin al empezar: %d" : "Starting Pikmin: %d", sp[0] + sp[1] + sp[2]);
+                vsText(tx, y + 114, line, body, 10, 15);
+                snprintf(line, sizeof(line), es ? "Días: %d" : "Days: %d", sInfo.story.days);
+                vsText(tx, y + 134, line, body, 10, 15);
+                const int* md = sInfo.story.medals;
+                if (md[0] || md[1] || md[2]) {
+                    snprintf(line, sizeof(line), es ? "Medallas: %d / %d / %d Pikmin" : "Medals: %d / %d / %d Pikmin", md[0], md[1], md[2]);
+                    vsText(tx, y + 154, line, body, 10, 15);
+                }
+                const PcMissionRecord& rec = sMissionRecords[size_t(std::clamp(sMissionIndex, 0, n - 1)) - packs().size()];
+                if (rec.wins) {
+                    const char* medal = pc_mission_medal_name(rec.medal, es);
+                    snprintf(line, sizeof(line), es ? "Récord: %s%s%d Pikmin, %d día(s)" : "Best: %s%s%d Pikmin, %d day(s)", medal, *medal ? ", " : "",
+                             rec.pikmin, rec.days);
+                } else {
+                    snprintf(line, sizeof(line), "%s", es ? "Aún sin cumplir" : "Not completed yet");
+                }
+                vsText(tx, y + 176, line, title, 10, 15);
+            }
+        }
+    }
+
+    // Partida guardada: la pregunta, encima de la ficha.
+    if (sMissionSavedDay > 0) {
+        const int bx = rx - 4, by = panelY + 250, bw = colW + 8;
+        vsCard(gfx, bx, by, bw, 112);
+        char head[64];
+        snprintf(head, sizeof(head), es ? "Partida guardada: día %d" : "Saved game: day %d", sMissionSavedDay);
+        vsText(bx + 14, by + 10, head, title, 12, 18);
+        const char* rows[2] = { es ? "Continuar" : "Continue", es ? "Empezar de nuevo" : "Start over" };
+        for (int r = 0; r < 2; r++) {
+            const bool sel = r == sMissionAskRow;
+            const int ry   = by + 42 + r * 30;
+            if (sel) missionCursor(bx + 6, ry + 8);
+            vsText(bx + 26, ry, rows[r], sel ? selC : body, 11, 17);
+        }
+    }
+
+    // Paquetes instalados (o no) y otros avisos.
+    if (!sMissionInfo.empty()) {
+        vsFitText(sMissionInfo.c_str(), line, sizeof(line), panelW - 60, 10);
+        vsText(lx, panelY + panelH - 84, line, Colour(140, 230, 120, 255), 10, 15);
+    }
+    if (!sMissionError.empty() && n == 0) {
+        vsFitText(sMissionError.c_str(), line, sizeof(line), panelW - 60, 10);
+        vsText(lx, panelY + panelH - 64, line, bad, 10, 15);
+    }
+    const char* help = es ? "Arriba/Abajo: elegir   Izq/Der: jugadores   A: jugar   Y / I: importar   B: salir"
+                          : "Up/Down: choose   Left/Right: players   A: play   Y / I: import   B: back";
+    drawHelpLine(panelX + panelW / 2, panelY + panelH - 38, help, dim);
+}
+
+// ── Campañas: el mapa de zonas ──────────────────────────────────────────────
+// Sustituye al mapa del mundo del juego (MapSelect) cuando hay una campaña: la
+// imagen (la del juego o la del paquete), los caminos, las zonas y la nave,
+// que vuela a la zona elegida. Las zonas recién abiertas aparecen una a una.
+namespace {
+bool sCmapOpen    = false;
+int sCmapResult   = PC_DEVASSIGN_PENDING;
+int sCmapSel      = 0;     // zona bajo el cursor
+int sCmapShip     = 0;     // zona donde está la nave
+int sCmapTarget   = -1;    // volando hacia esta zona
+Uint32 sCmapFlyAt = 0;     // cuándo empezó el vuelo
+bool sCmapQuit    = false; // preguntando si se vuelve al título
+bool sCmapIntro   = false; // enseñando la introducción de la campaña
+std::string sCmapError;
+std::vector<int> sCmapReveal; // zonas nuevas por enseñar
+Uint32 sCmapRevealAt = 0;
+constexpr Uint32 kCmapFlyMs = 1300, kCmapRevealMs = 900;
+
+// Rectángulo de la imagen en pantalla (la que se dibujó por última vez).
+int sCmapX = 0, sCmapY = 0, sCmapW = 1, sCmapH = 1;
+int sCmapScreenW = 640, sCmapScreenH = 480; // el lienzo virtual del último dibujo
+
+const PcCampaignPack* cmapPack() { return pc_campaign_pack(); }
+
+bool cmapRevealing(int zone, float* t)
+{
+    if (sCmapReveal.empty()) return false;
+    const float k = float(SDL_GetTicks() - sCmapRevealAt) / float(kCmapRevealMs);
+    for (size_t i = 0; i < sCmapReveal.size(); i++) {
+        if (sCmapReveal[i] != zone) continue;
+        if (t) *t = std::clamp(k - float(i), 0.0f, 1.0f);
+        return k < float(i) + 1.0f;
+    }
+    return false;
+}
+
+// Abierta y ya enseñada (o enseñándose).
+bool cmapShown(int zone)
+{
+    if (!pc_campaign_zone_open(zone)) return false;
+    float t = 1.0f;
+    if (cmapRevealing(zone, &t)) return t > 0.0f;
+    return true;
+}
+
+// Índices de más allá de las zonas: los puntos de interés.
+int cmapZones() { return int(cmapPack()->doc.zones.size()); }
+int cmapNodes() { return cmapZones() + int(cmapPack()->doc.pois.size()); }
+
+void cmapPoint(int zone, float& x, float& y)
+{
+    const PcCampaignPack* pack = cmapPack();
+    double px, py;
+    if (zone < cmapZones()) {
+        px = pack->doc.zones[size_t(zone)].x;
+        py = pack->doc.zones[size_t(zone)].y;
+    } else {
+        px = pack->doc.pois[size_t(zone - cmapZones())].x;
+        py = pack->doc.pois[size_t(zone - cmapZones())].y;
+    }
+    x = float(sCmapX) + float(px) * float(sCmapW);
+    y = float(sCmapY) + float(py) * float(sCmapH);
+}
+
+// Texto partido en líneas de `w` de ancho desde (x, y); devuelve la y de debajo.
+int drawWrapped(int x, int y, int w, const std::string& text, Colour c, int maxY, int fw = 10, int fh = 15)
+{
+    std::istringstream words(text);
+    std::string word, cur;
+    while (words >> word && y < maxY) {
+        const std::string next = cur.empty() ? word : cur + " " + word;
+        if (vsTextW(next.c_str(), fw) > w && !cur.empty()) {
+            vsText(x, y, cur.c_str(), c, fw, fh);
+            y += fh + 5;
+            cur = word;
+        } else {
+            cur = next;
+        }
+    }
+    if (!cur.empty() && y < maxY) {
+        vsText(x, y, cur.c_str(), c, fw, fh);
+        y += fh + 5;
+    }
+    return y;
+}
+
+// Una PNG del paquete, encajada en (maxW, maxH); devuelve el alto dibujado.
+int drawPackImage(const std::string& dir, const std::string& file, int x, int y, int maxW, int maxH)
+{
+    if (file.empty()) return 0;
+    const std::string name = "@" + dir + "/" + file;
+    int iw = 0, ih = 0;
+    Texture* t = pc_art_texture(name.c_str());
+    if (!t || !pc_art_size(name.c_str(), &iw, &ih) || iw <= 0 || ih <= 0) return 0;
+    int w = maxW, h = maxW * ih / iw;
+    if (h > maxH) {
+        h = maxH;
+        w = maxH * iw / ih;
+    }
+    pc_settings_p2d_image(x + (maxW - w) / 2, y, w, h, t, float(iw) / t->mWidth, float(ih) / t->mHeight, Colour(255, 255, 255, 255));
+    return h;
+}
+
+// La zona más cercana en esa dirección (dx, dy), dentro de un cono de 60°.
+int cmapNeighbour(int from, float dx, float dy)
+{
+    const PcCampaignPack* pack = cmapPack();
+    float fx, fy;
+    cmapPoint(from, fx, fy);
+    int best      = -1;
+    float bestCost = 1e9f;
+    (void)pack;
+    for (int z = 0; z < cmapNodes(); z++) {
+        if (z == from) continue;
+        float x, y;
+        cmapPoint(z, x, y);
+        const float vx = x - fx, vy = y - fy, len = std::sqrt(vx * vx + vy * vy);
+        if (len < 1.0f) continue;
+        const float cosA = (vx * dx + vy * dy) / len;
+        if (cosA < 0.5f) continue;
+        const float cost = len * (2.0f - cosA) * (z >= cmapZones() ? 1.3f : pc_campaign_zone_open(z) ? 1.0f : 1.6f);
+        if (cost < bestCost) {
+            bestCost = cost;
+            best     = int(z);
+        }
+    }
+    return best;
+}
+
+void cmapEnter(int zone)
+{
+    std::string why;
+    if (!pc_campaign_enter(zone, why)) {
+        sCmapError  = why;
+        sCmapTarget = -1;
+        return;
+    }
+    sCmapResult = PC_DEVASSIGN_OK;
+    sCmapOpen   = false;
+}
+
+void pcCampaignMapInput()
+{
+    if (!sCmapOpen || !cmapPack()) return;
+    // Ratón o toque: el punto del lienzo (encajado en la ventana, centrado).
+    int tapNode = -1;
+    if (sTouchTapPending && !sCmapIntro && !sCmapQuit && sCmapTarget < 0) {
+        int dw = 0, dh = 0;
+        pc_gfx_get_drawable_size(&dw, &dh);
+        if (dw > 0 && dh > 0) {
+            const float scale = std::min(float(dw) / sCmapScreenW, float(dh) / sCmapScreenH);
+            const float ox = (dw - sCmapScreenW * scale) * 0.5f, oy = (dh - sCmapScreenH * scale) * 0.5f;
+            const float tx = (sTouchTapX * dw - ox) / scale, ty = (sTouchTapY * dh - oy) / scale;
+            float best = 24.0f * 24.0f;
+            for (int n = 0; n < cmapNodes(); n++) {
+                float x, y;
+                cmapPoint(n, x, y);
+                const float d = (x - tx) * (x - tx) + (y - ty) * (y - ty);
+                if (d < best) {
+                    best    = d;
+                    tapNode = n;
+                }
+            }
+        }
+    }
+    bool up     = keyWentDown(SDL_SCANCODE_UP) || keyWentDown(SDL_SCANCODE_W);
+    bool down   = keyWentDown(SDL_SCANCODE_DOWN) || keyWentDown(SDL_SCANCODE_S);
+    bool left   = keyWentDown(SDL_SCANCODE_LEFT) || keyWentDown(SDL_SCANCODE_A);
+    bool right  = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D);
+    bool accept = menuOkKey();
+    bool cancel = menuCancelKey();
+    up |= (sTouchFrameButtons & PAD_BUTTON_UP) != 0;
+    down |= (sTouchFrameButtons & PAD_BUTTON_DOWN) != 0;
+    left |= (sTouchFrameButtons & PAD_BUTTON_LEFT) != 0;
+    right |= (sTouchFrameButtons & PAD_BUTTON_RIGHT) != 0;
+    accept |= (sTouchFrameButtons & PAD_BUTTON_A) != 0;
+    cancel |= (sTouchFrameButtons & PAD_BUTTON_B) != 0;
+    sTouchTapPending = false;
+    SDL_GameController* ctl = pc_window_get_controller();
+    if (ctl) {
+        if (padNavUp(ctl)) up = true;
+        if (padNavDown(ctl)) down = true;
+        if (padNavLeft(ctl)) left = true;
+        if (padNavRight(ctl)) right = true;
+        if (promptPadA(ctl)) accept = true;
+        if (promptPadB(ctl)) cancel = true;
+    }
+    if (sCmapIntro) {
+        if (accept || cancel) sCmapIntro = false;
+        return;
+    }
+    // Mientras vuela la nave o aparecen zonas, nada.
+    if (sCmapTarget >= 0) return;
+    if (!sCmapReveal.empty()) {
+        if (SDL_GetTicks() - sCmapRevealAt < kCmapRevealMs * sCmapReveal.size()) {
+            if (accept) sCmapRevealAt = SDL_GetTicks() - kCmapRevealMs * Uint32(sCmapReveal.size()); // A lo salta
+            return;
+        }
+        sCmapReveal.clear();
+        pc_campaign_clear_new_zones();
+    }
+    if (sCmapQuit) {
+        if (accept) {
+            sCmapResult = PC_DEVASSIGN_CANCELLED;
+            sCmapOpen   = false;
+        } else if (cancel) {
+            sCmapQuit = false;
+        }
+        return;
+    }
+    // Tocar una zona la elige; tocar la ya elegida es A.
+    if (tapNode >= 0) {
+        if (tapNode == sCmapSel) {
+            accept = true;
+        } else {
+            sCmapSel = tapNode;
+            sCmapError.clear();
+            SeSystem::playSysSe(SYSSE_MOVE1);
+        }
+    }
+    const float dirs[4][2] = { { 0, -1 }, { 0, 1 }, { -1, 0 }, { 1, 0 } };
+    const bool pressed[4]  = { up, down, left, right };
+    for (int d = 0; d < 4; d++) {
+        if (!pressed[d]) continue;
+        const int next = cmapNeighbour(sCmapSel, dirs[d][0], dirs[d][1]);
+        if (next >= 0) {
+            sCmapSel = next;
+            sCmapError.clear();
+            SeSystem::playSysSe(SYSSE_MOVE1);
+        }
+    }
+    if (accept && sCmapSel >= cmapZones()) return; // un punto de interés: solo se lee
+    if (accept) {
+        if (!pc_campaign_zone_open(sCmapSel)) {
+            SeSystem::playSysSe(SYSSE_CANCEL);
+            sCmapError = pc_campaign_lock_text(sCmapSel, vsSpanish());
+            return;
+        }
+        SeSystem::playSysSe(SYSSE_DECIDE1);
+        sCmapError.clear();
+        if (sCmapSel == sCmapShip) {
+            cmapEnter(sCmapSel);
+        } else {
+            sCmapTarget = sCmapSel;
+            sCmapFlyAt  = SDL_GetTicks();
+        }
+    } else if (cancel) {
+        sCmapQuit = true;
+    }
+}
+} // namespace
+
+void pc_campaign_map_open(void)
+{
+    const PcCampaignPack* pack = cmapPack();
+    sCmapOpen   = pack != nullptr;
+    sCmapResult = PC_DEVASSIGN_PENDING;
+    sCmapQuit   = false;
+    sCmapTarget = -1;
+    sCmapError.clear();
+    if (!pack) return;
+    sCmapShip = std::max(0, pc_campaign_current_zone());
+    sCmapSel  = sCmapShip;
+    sCmapReveal    = pc_campaign_new_zones();
+    sCmapRevealAt  = SDL_GetTicks() + 400;
+    // Partida nueva: la introducción, si la hay.
+    sCmapIntro = (!pack->doc.intro.empty() || !pack->doc.introImage.empty()) && pc_campaign_progress().visited.empty() && pc_campaign_day() == 1;
+    pc_menu_edge_reset();
+}
+bool pc_campaign_map_active(void) { return sCmapOpen; }
+int pc_campaign_map_result(void)
+{
+    // El vuelo acaba aquí (cada fotograma, aunque no haya entrada).
+    if (sCmapOpen && sCmapTarget >= 0 && SDL_GetTicks() - sCmapFlyAt >= kCmapFlyMs) {
+        sCmapShip = sCmapTarget;
+        cmapEnter(sCmapTarget);
+    }
+    return sCmapResult;
+}
+
+void pc_campaign_map_draw(void)
+{
+    const PcCampaignPack* pack = cmapPack();
+    if (!sCmapOpen || !pack) return;
+    if (!gsys || !gsys->mDGXGfx) return;
+    DGXGraphics* gfx = static_cast<DGXGraphics*>(gsys->mDGXGfx);
+    ensureFont();
+    if (!sFont) return;
+    const bool es = vsSpanish();
+
+    const int screenW = pc_gfx_menu_wide() ? pc_gfx_menu_virt_width() : gfx->mScreenWidth;
+    const int screenH = gfx->mScreenHeight;
+    sCmapScreenW      = screenW;
+    sCmapScreenH      = screenH;
+    PcSettingsP2DFrame nativeFrame(screenW, screenH);
+    GlassTextScope glassText;
+    Matrix4f ortho;
+    gfx->setOrthogonal(ortho.mMtx, RectArea(0, 0, screenW, screenH));
+    // Solo dentro del marco (PcSettingsP2DFrame) se sabe si hay capa 2D.
+    if (!pc_settings_p2d_active()) return;
+    const Colour title(255, 229, 120, 255), body(214, 224, 245, 255), dim(150, 165, 195, 255), bad(255, 110, 90, 255);
+    const Colour white(255, 255, 255, 255);
+    const float now = SDL_GetTicks() / 1000.0f;
+    char line[200];
+
+    // ── La imagen del mapa, a la izquierda; el panel, a la derecha ──────────
+    const int panelW = std::min(270, screenW / 3);
+    const int areaX = 16, areaY = 16, areaW = screenW - panelW - 40, areaH = screenH - 64;
+    Texture* map = nullptr;
+    int imgW = 4, imgH = 3;
+    float u1 = 1.0f, v1 = 1.0f;
+    if (pack->doc.worldmap == "game") {
+        map = vsIcon("w_map");
+        if (map) imgW = map->mWidth, imgH = map->mHeight;
+    } else {
+        const std::string name = "@" + pack->dir + "/" + pack->doc.worldmap;
+        map                    = pc_art_texture(name.c_str());
+        if (map && pc_art_size(name.c_str(), &imgW, &imgH) && imgW > 0 && imgH > 0) {
+            u1 = float(imgW) / map->mWidth;
+            v1 = float(imgH) / map->mHeight;
+        }
+    }
+    sCmapW = areaW;
+    sCmapH = areaW * imgH / std::max(1, imgW);
+    if (sCmapH > areaH) {
+        sCmapH = areaH;
+        sCmapW = areaH * imgW / std::max(1, imgH);
+    }
+    sCmapX = areaX + (areaW - sCmapW) / 2;
+    sCmapY = areaY + (areaH - sCmapH) / 2;
+    if (map) pc_settings_p2d_image(sCmapX, sCmapY, sCmapW, sCmapH, map, u1, v1, white);
+    else vsCard(gfx, sCmapX, sCmapY, sCmapW, sCmapH);
+
+    // ── Caminos: de puntos, entre zonas abiertas ────────────────────────────
+    Texture* dot = vsIcon("dot_24");
+    for (const auto& p : pack->doc.paths) {
+        const int a = pack->doc.find(p.first), b = pack->doc.find(p.second);
+        if (a < 0 || b < 0 || !cmapShown(a) || !cmapShown(b)) continue;
+        // Si una de las dos está apareciendo, el camino se dibuja poco a poco.
+        float ta = 1.0f, tb = 1.0f;
+        cmapRevealing(a, &ta);
+        cmapRevealing(b, &tb);
+        const float t = std::min(ta, tb);
+        float ax, ay, bx, by;
+        cmapPoint(a, ax, ay);
+        cmapPoint(b, bx, by);
+        const float len = std::sqrt((bx - ax) * (bx - ax) + (by - ay) * (by - ay));
+        // La capa 2D tiene 256 elementos por fotograma: pocos puntos por camino.
+        const int dots  = std::clamp(int(len / 18.0f), 2, 16);
+        for (int k = 1; k < dots && float(k) / float(dots) <= t; k++) {
+            const float f = float(k) / float(dots);
+            const int x = int(ax + (bx - ax) * f), y = int(ay + (by - ay) * f);
+            if (dot) pc_settings_p2d_image(x - 3, y - 3, 6, 6, dot, 1.0f, 1.0f, Colour(255, 240, 200, 220));
+        }
+    }
+
+    // ── Zonas ───────────────────────────────────────────────────────────────
+    Texture* point = vsIcon("dot_32");
+    for (size_t z = 0; z < pack->doc.zones.size(); z++) {
+        float x, y;
+        cmapPoint(int(z), x, y);
+        float t        = 1.0f;
+        const bool rev = cmapRevealing(int(z), &t);
+        const bool shown = cmapShown(int(z));
+        Colour c = !shown ? Colour(110, 110, 120, 200) : pc_campaign_zone_completed(int(z)) ? Colour(255, 215, 60, 255) : Colour(255, 255, 255, 255);
+        int size = shown ? 22 : 12;
+        if (rev) size = int(12 + 10 * t + std::sin(t * 3.14159f) * 14.0f); // aparece con un pequeño salto
+        if (point) pc_settings_p2d_image(int(x) - size / 2, int(y) - size / 2, size, size, point, 1.0f, 1.0f, c);
+        if (int(z) == sCmapSel) pc_settings_p2d_cursor(int(x), int(y), 30, std::fmod(now * 4.0f, 6.2831853f));
+        if (shown) {
+            const std::string& name = pc_campaign_text(pack->doc.zones[z].name, pack->doc.zones[z].nameEn);
+            const int w             = vsTextW(name.c_str(), 9);
+            vsText(int(x) - w / 2, int(y) + 14, name.c_str(), int(z) == sCmapSel ? title : body, 9, 13);
+        }
+    }
+
+    // ── Puntos de interés ───────────────────────────────────────────────────
+    Texture* star = vsIcon("star2");
+    for (size_t k = 0; k < pack->doc.pois.size(); k++) {
+        const nectar::CampaignPoi& poi = pack->doc.pois[k];
+        const int node                 = cmapZones() + int(k);
+        float x, y;
+        cmapPoint(node, x, y);
+        if (Texture* t = star ? star : point) pc_settings_p2d_image(int(x) - 8, int(y) - 8, 16, 16, t, 1.0f, 1.0f, Colour(140, 220, 255, 255));
+        if (node == sCmapSel) pc_settings_p2d_cursor(int(x), int(y), 24, std::fmod(now * 4.0f, 6.2831853f));
+        const std::string& name = pc_campaign_text(poi.name, poi.nameEn);
+        const int w             = vsTextW(name.c_str(), 9);
+        vsText(int(x) - w / 2, int(y) + 10, name.c_str(), node == sCmapSel ? title : Colour(170, 220, 255, 255), 9, 13);
+    }
+
+    // ── La nave: flota sobre su zona o vuela a la elegida ───────────────────
+    if (Texture* ship = vsIcon("i_rocket2")) {
+        float sx, sy;
+        cmapPoint(sCmapShip, sx, sy);
+        if (sCmapTarget >= 0) {
+            float tx, ty;
+            cmapPoint(sCmapTarget, tx, ty);
+            const float k = std::clamp(float(SDL_GetTicks() - sCmapFlyAt) / float(kCmapFlyMs), 0.0f, 1.0f);
+            const float e = k * k * (3.0f - 2.0f * k); // suave al salir y al llegar
+            sx += (tx - sx) * e;
+            sy += (ty - sy) * e - std::sin(k * 3.14159f) * 46.0f; // en arco
+        }
+        sy += std::sin(now * 2.5f) * 3.0f - 30.0f;
+        pc_settings_p2d_image(int(sx) - 16, int(sy) - 20, 32, 40, ship, 1.0f, 1.0f, white);
+    }
+
+    // ── Panel ───────────────────────────────────────────────────────────────
+    const int px = screenW - panelW - 16, pw = panelW;
+    vsCard(gfx, px, 16, pw, screenH - 64);
+    int y = 28;
+    vsFitText(pc_campaign_text(pack->doc.name, pack->doc.nameEn).c_str(), line, sizeof(line), pw - 24, 12);
+    vsText(px + 12, y, line, title, 12, 18);
+    y += 28;
+    const nectar::CampaignProgress& prog = pc_campaign_progress();
+    snprintf(line, sizeof(line), es ? "Día %d%s" : "Day %d%s", prog.day,
+             pc_campaign_day_limit() > 0 ? (std::string(" / ") + std::to_string(pc_campaign_day_limit())).c_str() : "");
+    vsText(px + 12, y, line, body, 10, 15);
+    y += 20;
+    snprintf(line, sizeof(line), es ? "Piezas %zu / %d" : "Parts %zu / %d", prog.parts.size(), pack->partTotal);
+    vsText(px + 12, y, line, body, 10, 15);
+    y += 20;
+    {
+        char raw[96];
+        snprintf(raw, sizeof(raw), es ? "Pikmin: %d rojos, %d amarillos, %d azules" : "Pikmin: %d red, %d yellow, %d blue", prog.pikmin[1], prog.pikmin[2],
+                 prog.pikmin[0]);
+        vsFitText(raw, line, sizeof(line), pw - 24, 10);
+        vsText(px + 12, y, line, body, 10, 15);
+    }
+    y += 32;
+
+    // Un punto de interés: su nombre y su texto.
+    if (sCmapSel >= cmapZones()) {
+        const nectar::CampaignPoi& poi = pack->doc.pois[size_t(sCmapSel - cmapZones())];
+        vsFitText(pc_campaign_text(poi.name, poi.nameEn).c_str(), line, sizeof(line), pw - 24, 12);
+        vsText(px + 12, y, line, title, 12, 18);
+        drawWrapped(px + 12, y + 28, pw - 24, pc_campaign_text(poi.text, poi.textEn), body, screenH - 130);
+    } else {
+    // La zona elegida.
+    const nectar::CampaignZone& zone   = pack->doc.zones[size_t(sCmapSel)];
+    const PcCampaignZoneInfo& info      = pack->zones[size_t(sCmapSel)];
+    const bool open                     = pc_campaign_zone_open(sCmapSel);
+    Texture* photo                      = nullptr;
+    float pu = 1.0f, pv = 1.0f;
+    int phW = 4, phH = 3;
+    if (zone.photo.rfind("game:", 0) == 0) {
+        photo = vsIcon(zone.photo.substr(5).c_str());
+        if (photo) phW = photo->mWidth, phH = photo->mHeight;
+    } else {
+        const std::string file = zone.photo.empty() ? info.thumb : pack->dir + "/" + zone.photo;
+        if (!file.empty()) {
+            const std::string name = "@" + file;
+            photo                  = pc_art_texture(name.c_str());
+            if (photo && pc_art_size(name.c_str(), &phW, &phH) && phW > 0 && phH > 0) {
+                pu = float(phW) / photo->mWidth;
+                pv = float(phH) / photo->mHeight;
+            }
+        }
+    }
+    if (photo && open) {
+        const int w = pw - 24, h = std::min(140, w * phH / std::max(1, phW));
+        pc_settings_p2d_image(px + 12, y, w, h, photo, pu, pv, white);
+        y += h + 10;
+    }
+    vsFitText(open ? pc_campaign_text(zone.name, zone.nameEn).c_str() : "???", line, sizeof(line), pw - 24, 12);
+    vsText(px + 12, y, line, title, 12, 18);
+    y += 26;
+    if (!open) {
+        vsText(px + 12, y, es ? "Cerrada. Falta:" : "Locked. Needs:", bad, 10, 15);
+        y += 20;
+        const std::string lock = pc_campaign_lock_text(sCmapSel, es);
+        vsFitText(lock.c_str(), line, sizeof(line), pw - 24, 10);
+        vsText(px + 12, y, line, body, 10, 15);
+        y += 20;
+    } else {
+        snprintf(line, sizeof(line), es ? "Piezas: %d / %zu" : "Parts: %d / %zu", pc_campaign_zone_parts_found(sCmapSel), info.parts.size());
+        vsText(px + 12, y, line, body, 10, 15);
+        y += 20;
+        const char* medal = pc_mission_medal_name(pc_campaign_zone_medal(sCmapSel), es);
+        if (pc_campaign_zone_completed(sCmapSel)) snprintf(line, sizeof(line), "%s%s%s", es ? "Completada" : "Complete", *medal ? " - " : "", medal);
+        else snprintf(line, sizeof(line), "%s", info.hasGoal ? (es ? "Con un objetivo por cumplir" : "Has a goal to complete") : (es ? "Para explorar" : "To explore"));
+        vsText(px + 12, y, line, body, 10, 15);
+        y += 20;
+    }
+    }
+    if (!sCmapError.empty()) {
+        vsFitText(sCmapError.c_str(), line, sizeof(line), pw - 24, 10);
+        vsText(px + 12, y + 6, line, bad, 10, 15);
+    }
+    if (pc_campaign_ending() == 1) vsText(px + 12, screenH - 112, es ? "¡Campaña completada!" : "Campaign complete!", title, 11, 17);
+    else if (pc_campaign_ending() == 0) vsText(px + 12, screenH - 112, es ? "Se acabaron los días" : "Out of days", bad, 11, 17);
+
+    // Aviso de zonas nuevas.
+    if (!sCmapReveal.empty()) {
+        const int k = std::clamp(int((SDL_GetTicks() - sCmapRevealAt) / kCmapRevealMs), 0, int(sCmapReveal.size()) - 1);
+        const nectar::CampaignZone& nz = pack->doc.zones[size_t(sCmapReveal[size_t(k)])];
+        snprintf(line, sizeof(line), es ? "¡Nueva zona: %s!" : "New zone: %s!", pc_campaign_text(nz.name, nz.nameEn).c_str());
+        const int w = vsTextW(line, 14);
+        vsCard(gfx, sCmapX + sCmapW / 2 - w / 2 - 16, sCmapY + sCmapH - 60, w + 32, 40);
+        vsText(sCmapX + sCmapW / 2 - w / 2, sCmapY + sCmapH - 50, line, title, 14, 21);
+    }
+
+    // Preguntas a pantalla completa.
+    if (sCmapIntro || sCmapQuit) {
+        const bool introImage = sCmapIntro && !pack->doc.introImage.empty();
+        const int bw = std::min(560, screenW - 40), bh = sCmapIntro ? (introImage ? 400 : 220) : 120;
+        const int bx = screenW / 2 - bw / 2, by = screenH / 2 - bh / 2;
+        drawPikminPanel(gfx, bx, by, bw, bh, 18);
+        if (sCmapIntro) {
+            vsText(bx + 20, by + 18, pc_campaign_text(pack->doc.name, pack->doc.nameEn).c_str(), title, 14, 21);
+            int ly = by + 52;
+            if (introImage) ly += drawPackImage(pack->dir, pack->doc.introImage, bx + 20, ly, bw - 40, 180) + 10;
+            drawWrapped(bx + 20, ly, bw - 40, pc_campaign_text(pack->doc.intro, pack->doc.introEn), body, by + bh - 50);
+            drawHelpLine(screenW / 2, by + bh - 34, es ? "A: empezar" : "A: start", dim);
+        } else {
+            vsText(bx + 20, by + 20, es ? "¿Volver al título?" : "Back to the title?", title, 13, 19);
+            vsText(bx + 20, by + 50, es ? "La partida se guarda al final de cada día." : "The game is saved at the end of each day.", body, 10, 15);
+            drawHelpLine(screenW / 2, by + bh - 34, es ? "A: sí   B: no" : "A: yes   B: no", dim);
+        }
+        return;
+    }
+    drawHelpLine(screenW / 2, screenH - 36, sCmapSel >= cmapZones() ? (es ? "Flechas: elegir   B: título" : "Arrows: choose   B: title")
+                                                                     : (es ? "Flechas: zona   A: ir   B: título" : "Arrows: zone   A: go   B: title"), dim);
+}
+
 bool pc_vs_end_screen_active(void) { return vsEndScreenShown(); }
 
 // Marcador, reloj, cuenta atrás (con el mundo en pausa) y pantalla final.
@@ -6449,6 +7684,197 @@ void pc_settings_draw_vs_hud(void) {
 
     if (const char* msg = pc_vs_announcement()) {
         drawTextOutline(cx - menuTextWidth(msg) / 2, (int)(screenH * 0.30f), "%s", Colour(255, 229, 120, 255), shadow, msg);
+    }
+}
+
+
+// Custom Maps: la pantalla de resultados al acabar (la misión o el día).
+namespace {
+int sMissionEndRow = 0;
+
+const char* missionExitLabel(int kind, bool es)
+{
+    switch (kind) {
+    case PC_MISSION_EXIT_NEXT_DAY: return es ? "Día siguiente" : "Next day";
+    case PC_MISSION_EXIT_MAP: return es ? "Al mapa de zonas" : "To the zone map";
+    case PC_MISSION_EXIT_RETRY: return es ? "Reintentar" : "Retry";
+    default: return es ? "Salir al título" : "Back to title";
+    }
+}
+
+void pcMissionEndInput()
+{
+    bool left   = keyWentDown(SDL_SCANCODE_LEFT) || keyWentDown(SDL_SCANCODE_A) || keyWentDown(SDL_SCANCODE_UP);
+    bool right  = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D) || keyWentDown(SDL_SCANCODE_DOWN);
+    bool accept = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
+    left |= (sTouchFrameButtons & (PAD_BUTTON_LEFT | PAD_BUTTON_UP)) != 0;
+    right |= (sTouchFrameButtons & (PAD_BUTTON_RIGHT | PAD_BUTTON_DOWN)) != 0;
+    accept |= (sTouchFrameButtons & PAD_BUTTON_A) != 0;
+    sTouchTapPending = false;
+    SDL_GameController* ctl = pc_window_get_controller();
+    if (ctl) {
+        if (padNavLeft(ctl) || padNavUp(ctl)) left = true;
+        if (padNavRight(ctl) || padNavDown(ctl)) right = true;
+        if (promptPadA(ctl)) accept = true;
+    }
+    int kinds[4];
+    const int n = pc_mission_end_options(kinds, 4);
+    if (n <= 0) return;
+    if (left || right) {
+        sMissionEndRow = (sMissionEndRow + (left ? n - 1 : 1)) % n;
+        SeSystem::playSysSe(SYSSE_MOVE1);
+    }
+    if (accept) {
+        SeSystem::playSysSe(SYSSE_DECIDE1);
+        pc_mission_choose_exit(kinds[std::clamp(sMissionEndRow, 0, n - 1)]);
+        sMissionEndRow = 0;
+    }
+}
+
+void drawMissionEndScreen(DGXGraphics* gfx, int screenW, int screenH, bool es)
+{
+    const Colour title(255, 229, 120, 255), body(214, 224, 245, 255), dim(150, 165, 195, 255), selC(255, 170, 30, 255);
+    const PcMissionStats st = pc_mission_stats();
+    const int result        = pc_mission_result();
+    // Campaña: el diario de esta noche y, al acabar, la imagen del final.
+    const bool zone          = pc_mission_zone_mode() && pc_campaign_active();
+    const std::string& diary = zone ? pc_campaign_diary() : std::string();
+    const std::string endImg = zone && pc_campaign_ending() >= 0 ? pc_campaign_pack()->doc.ending.image : std::string();
+    const int pw = std::min(600, screenW - 40), ph = std::min(screenH - 40, 330 + (diary.empty() ? 0 : 110) + (endImg.empty() ? 0 : 170));
+    const int px = screenW / 2 - pw / 2, py = screenH / 2 - ph / 2;
+    drawPikminPanel(gfx, px, py, pw, ph, 20);
+    const char* head = pc_mission_announcement(es);
+    char fit[200];
+    vsFitText(head, fit, sizeof(fit), pw - 40, 13);
+    vsText(px + 20, py + 18, fit, title, 13, 20);
+    char line[160];
+    int y = py + 56;
+    auto row = [&](const char* label, const char* value) {
+        vsText(px + 30, y, label, body, 10, 15);
+        vsText(px + pw - 30 - vsTextW(value, 10), y, value, body, 10, 15);
+        y += 22;
+    };
+    char v[64];
+    const int secs = int(st.seconds);
+    snprintf(v, sizeof(v), "%d:%02d", secs / 60, secs % 60);
+    row(es ? "Tiempo de juego" : "Play time", v);
+    if (st.days > 1) {
+        snprintf(v, sizeof(v), "%d / %d", st.day, st.days);
+        row(es ? "Día" : "Day", v);
+    } else if (pc_mission_zone_mode()) {
+        snprintf(v, sizeof(v), "%d", st.day);
+        row(es ? "Día" : "Day", v);
+    }
+    snprintf(v, sizeof(v), "%d", st.born);
+    row(es ? "Pikmin nacidos" : "Pikmin born", v);
+    snprintf(v, sizeof(v), "%d", st.lost);
+    row(es ? "Pikmin perdidos" : "Pikmin lost", v);
+    snprintf(v, sizeof(v), "%d", st.kills);
+    row(es ? "Enemigos derrotados" : "Enemies defeated", v);
+    if (result == 2 || pc_mission_zone_mode()) {
+        // Fin del día: los que pasan la noche en cada cebolla.
+        snprintf(v, sizeof(v), es ? "%d rojos, %d amarillos, %d azules" : "%d red, %d yellow, %d blue", st.night[1], st.night[2], st.night[0]);
+        row(es ? "A salvo esta noche" : "Safe tonight", v);
+        snprintf(v, sizeof(v), "%d", st.lostAtNight);
+        row(es ? "Perdidos al anochecer" : "Lost at sunset", v);
+    } else {
+        snprintf(v, sizeof(v), "%d", st.pikmin);
+        row(es ? "Pikmin al acabar" : "Pikmin at the end", v);
+        if (st.medal >= 0) row(es ? "Medalla" : "Medal", pc_mission_medal_name(st.medal, es));
+        if (st.newRecord) row(es ? "¡Nuevo récord!" : "New record!", "");
+    }
+    if (pc_mission_mods().any()) {
+        vsText(px + 30, y, es ? "Con modificadores (récords aparte)" : "With modifiers (separate records)", dim, 9, 13);
+        y += 20;
+    }
+    if (!endImg.empty()) y += drawPackImage(pc_campaign_pack()->dir, endImg, px + 30, y + 4, pw - 60, 160) + 10;
+    if (!diary.empty()) {
+        vsText(px + 30, y + 4, es ? "Diario" : "Diary", title, 11, 17);
+        drawWrapped(px + 30, y + 28, pw - 60, diary, body, py + ph - 60);
+    }
+    // Las salidas, en fila.
+    int kinds[4];
+    const int n   = pc_mission_end_options(kinds, 4);
+    const int bw  = (pw - 40) / std::max(1, n);
+    for (int i = 0; i < n; i++) {
+        const bool sel = i == sMissionEndRow;
+        const int bx   = px + 20 + i * bw;
+        snprintf(line, sizeof(line), sel ? "> %s <" : "%s", missionExitLabel(kinds[i], es));
+        vsText(bx + bw / 2 - vsTextW(line, 11) / 2, py + ph - 44, line, sel ? selC : body, 11, 17);
+    }
+}
+} // namespace
+
+// Custom Maps: el objetivo arriba en el centro y, al acabar, el resultado.
+void pc_settings_draw_mission_hud(void) {
+    if (!pc_mission_active()) return;
+    if (sMenuOpen || pc_glass_menu_active()) return;
+    const bool live = sLastGameplayFrameMs != 0 && SDL_GetTicks() - sLastGameplayFrameMs <= 250;
+    if (!live && !pc_mission_over() && !pc_mission_textbox()) return; // con el cuadro abierto, el mundo está parado
+    if (!gsys || !gsys->mDGXGfx) return;
+    static bool sWasOver = false;
+    const bool over      = pc_mission_over();
+    if (over && !sWasOver) SeSystem::playSysSe(pc_mission_result() > 0 ? SYSSE_WORK_FINISH : SYSSE_TIME_SIGNAL);
+    sWasOver = over;
+
+    DGXGraphics* gfx = static_cast<DGXGraphics*>(gsys->mDGXGfx);
+    ensureFont();
+    if (!sFont) return;
+    const bool es     = vsSpanish();
+    const int screenW = gfx->mScreenWidth;
+    const int screenH = gfx->mScreenHeight;
+    PcSettingsP2DFrame nativeFrame(screenW, screenH);
+    Matrix4f ortho;
+    gfx->setOrthogonal(ortho.mMtx, RectArea(0, 0, screenW, screenH));
+    const Colour shadow(8, 12, 28, 255);
+    const int cx = screenW / 2;
+    char status[64];
+    pc_mission_status(status, sizeof(status), es);
+    drawTextOutline(cx - menuTextWidth(status) / 2, 18, "%s", Colour(255, 255, 255, 255), shadow, status);
+    // Cuenta atrás (de un disparador o del límite de tiempo).
+    const f32 left = pc_mission_countdown();
+    if (left >= 0.0f) {
+        char clock[32];
+        const int secs = int(left + 0.999f);
+        snprintf(clock, sizeof(clock), "%d:%02d", secs / 60, secs % 60);
+        drawTextOutline(cx - menuTextWidth(clock) / 2, 44, "%s", secs <= 10 ? Colour(255, 110, 90, 255) : Colour(255, 229, 120, 255), shadow, clock);
+    }
+    // Cuadro de texto: el mundo se para mientras está abierto.
+    static bool sPausedByBox = false;
+    const char* box          = pc_mission_textbox();
+    if ((box != nullptr) != sPausedByBox) {
+        sPausedByBox       = box != nullptr;
+        gameflow.mPauseAll = sPausedByBox ? TRUE : FALSE;
+    }
+    if (box) {
+        const int bw = std::min(620, screenW - 40), bh = 150;
+        const int bx = cx - bw / 2, by = screenH - bh - 30;
+        drawPikminPanel(gfx, bx, by, bw, bh, 18);
+        std::istringstream words(box);
+        std::string word, cur;
+        int ly = by + 20;
+        while (words >> word && ly < by + bh - 40) {
+            const std::string next = cur.empty() ? word : cur + " " + word;
+            if (vsTextW(next.c_str(), 11) > bw - 40 && !cur.empty()) {
+                vsText(bx + 20, ly, cur.c_str(), Colour(255, 255, 255, 255), 11, 17);
+                ly += 22;
+                cur = word;
+            } else {
+                cur = next;
+            }
+        }
+        if (!cur.empty()) vsText(bx + 20, ly, cur.c_str(), Colour(255, 255, 255, 255), 11, 17);
+        drawHelpLine(cx, by + bh - 30, es ? "A: seguir" : "A: continue", Colour(150, 165, 195, 255));
+        return;
+    }
+    if (pc_mission_end_screen()) {
+        drawMissionEndScreen(gfx, screenW, screenH, es);
+    } else if (over) {
+        const char* msg = pc_mission_announcement(es);
+        drawTextOutline(cx - menuTextWidth(msg) / 2, (int)(screenH * 0.30f), "%s", Colour(255, 229, 120, 255), shadow, msg);
+    } else if (const char* msg = pc_mission_message(); *msg) {
+        // Mensaje de un disparador del mapa.
+        drawTextOutline(cx - menuTextWidth(msg) / 2, (int)(screenH * 0.22f), "%s", Colour(255, 255, 255, 255), shadow, msg);
     }
 }
 
@@ -6963,12 +8389,16 @@ int pc_settings_get_navi_health_pct(void) { if (pc_speedrun_active()) return 100
 }
 
 int pc_settings_get_teki_health_pct(void) { if (pc_speedrun_active()) return 100;
+    // Misiones y campañas: el modificador elegido al empezar.
+    if (pc_mission_active()) return pc_mission_mods().tekiHealth;
     return pc_hardmode_active() ? 100 : sConfig.tekiHealthPct;
 }
 
 int pc_settings_get_infinite_day(void) { if (pc_speedrun_active()) return 0;
     // VS: el día no avanza; la partida la cierra su propio reloj.
     if (pc_vs_active()) return 1;
+    // Misión: el día acaba con el reloj (decide el resultado).
+    if (pc_mission_active()) return 0;
     return pc_hardmode_active() ? 0 : sConfig.infiniteDay;
 }
 
@@ -7012,6 +8442,9 @@ float pc_settings_get_free_camera_pad_scale(void) { return sConfig.freeCamPadPct
 int pc_settings_get_bomb_control(void) { if (pc_speedrun_active()) return 0;
     return sConfig.bombControl;
 }
+int pc_settings_get_bomb_respawn(void) { if (pc_speedrun_active()) return 0;
+    return sConfig.bombRespawnSec;
+}
 
 int pc_settings_get_onion_step10(void) { if (pc_speedrun_active()) return 0;
     return sConfig.onionStep10;
@@ -7019,7 +8452,9 @@ int pc_settings_get_onion_step10(void) { if (pc_speedrun_active()) return 0;
 
 int pc_settings_get_piki_invincible(void) { if (pc_speedrun_active()) return 0; return pc_hardmode_active() ? 0 : sConfig.pikiInvincible; }
 int pc_settings_get_all_flowers(void) { if (pc_speedrun_active()) return 0; return pc_hardmode_active() ? 0 : sConfig.allFlowers; }
-float pc_settings_get_carry_speed_scale(void) { if (pc_speedrun_active()) return 1.0f; return pc_hardmode_active() ? 1.0f : sConfig.carrySpeedPct / 100.0f; }
+float pc_settings_get_carry_speed_scale(void) { if (pc_speedrun_active()) return 1.0f;
+    if (pc_mission_active()) return pc_mission_mods().carry / 100.0f;
+    return pc_hardmode_active() ? 1.0f : sConfig.carrySpeedPct / 100.0f; }
 float pc_settings_get_navi_speed_scale(void) { if (pc_speedrun_active()) return 1.0f; return pc_hardmode_active() ? 1.0f : sConfig.naviSpeedPct / 100.0f; }
 int pc_settings_get_unlock_zones(void) { if (pc_speedrun_active()) return 0; return pc_hardmode_active() ? 0 : sConfig.unlockZones; }
 int pc_settings_get_no_day_advance(void) { if (pc_speedrun_active()) return 0; return pc_hardmode_active() ? 0 : sConfig.noDayAdvance; }
@@ -7374,6 +8809,11 @@ void modsRowValue(int i, char* value, size_t n) {
     case 39: snprintf(value, n, "%s", sPending.p2Selection ? "On" : "Off"); break;
     case 40: snprintf(value, n, "%s", sPending.eternalNight ? "On" : "Off (original)"); break;
     case 41: snprintf(value, n, "%s", sPending.fireflies ? "On" : "Off (original)"); break;
+    case 42:
+        if (sPending.bombRespawnSec <= 0) snprintf(value, n, "Off (original)");
+        else if (sPending.bombRespawnSec < 60) snprintf(value, n, "Every %d s", sPending.bombRespawnSec);
+        else snprintf(value, n, "Every %d min", sPending.bombRespawnSec / 60);
+        break;
     case 38: snprintf(value, n, sPending.freeCamPadPct == 100 ? "%d%%  (original)" : "%d%%", sPending.freeCamPadPct); break;
     case 28: speedPctLabel(sPending.carrySpeedPct, value, n); break;
     case 29: speedPctLabel(sPending.naviSpeedPct, value, n); break;
@@ -7489,6 +8929,7 @@ const GroupRow kControlsRows[] = {
     { SRC_MODS, 39, "Pikmin 2 Selection", "D-pad as in Pikmin 2. Left/Right chooses the colour for every throw. Hold A and press Up/Down to pick leaf, bud, flower or a Yellow with a bomb rock. Off: Left/Right only picks the next throw." },
     { SRC_MODS, 24, "Onion: Move 10 at a Time", "In the Onion menu, hold Y while pressing up or down to move 10 Pikmin at a time." },
     { SRC_MODS, 35, "Bomb Control", "Bomb button (B on keyboard, set a controller button in Controls): a Yellow with a bomb rock throws it at the cursor, or drops it at its feet if the cursor is too close. Yellows already thrown go first." },
+    { SRC_MODS, 42, "Bomb Rock Respawn", "Used bomb rock piles grow back one rock at a time during the same day, instead of only the next morning." },
     { SRC_MODS, 15, "Lock-On", "Automatic: locks onto the nearest enemy or object as you approach. Manual: press the Lock-On button (set it in Controls)." },
     { SRC_MODS, 16, "Charge", "With a target locked, send the whole squad at it." },
     { SRC_ADV, 1, "Stick Dead Zone", "Ignores tiny stick movements. Raise it if the cursor or Olimar moves on its own (stick drift)." },

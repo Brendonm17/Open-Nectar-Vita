@@ -1,5 +1,6 @@
 #include "nectar_mapcore/compile.h"
 
+#include "nectar_assets/mesh_mod.h"
 #include "nectar_assets/mod.h"
 
 #include <algorithm>
@@ -7,7 +8,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <map>
+#include <sstream>
 
 #include "nectar_mapcore/i18n.h"
 
@@ -69,6 +72,8 @@ constexpr u32 kWallCode  = kMapCodeRock;
 constexpr u32 kChunkHeader = 0x00, kChunkVertex = 0x10, kChunkNormal = 0x11, kChunkColour = 0x13, kChunkUv0 = 0x18,
               kChunkTexture = 0x20, kChunkTexAttr = 0x22, kChunkMaterial = 0x30, kChunkVtxMatrix = 0x40, kChunkMesh = 0x50,
               kChunkJoint = 0x60, kChunkPrism = 0x100, kChunkGrid = 0x110, kChunkEnd = 0xFFFF;
+// Del port (no está en los .mod del juego): base de índices de cada malla.
+constexpr u32 kChunkPcArrayBase = 0xF00;
 
 struct Writer {
 	std::vector<u8> b;
@@ -190,8 +195,75 @@ struct MeshBuild {
 	std::vector<std::array<int, 3>> uv[8];
 };
 
-// GX_TRIANGLES con el formato de vértice de la malla.
-std::vector<u8> displayList(const MeshBuild& m)
+// Los índices de las listas de dibujo son de 16 bits (y 0xFFFF lo salta el
+// hardware). Si una malla se sale de 0..0xFFFE, se parte en trozos en los que
+// cada array (posición, normal, color, UV 0-7) cabe en un tramo, y cada trozo
+// cuenta desde su base: el juego la lee del bloque 0xF00 (Mesh::mPcArrayBase).
+constexpr int kMaxIndex = 0xFFFE;
+struct MeshPart {
+	MeshBuild mesh;
+	int base[11] = {};
+};
+std::vector<MeshPart> splitForIndices(const MeshBuild& m)
+{
+	std::vector<MeshPart> out;
+	int lo[11], hi[11];
+	auto reset = [&] {
+		for (int k = 0; k < 11; k++) {
+			lo[k] = 0x7FFFFFFF;
+			hi[k] = -1;
+		}
+	};
+	auto finish = [&] {
+		if (out.empty() || out.back().mesh.tris.empty()) return;
+		for (int k = 0; k < 11; k++) out.back().base[k] = hi[k] > kMaxIndex ? lo[k] : 0;
+	};
+	reset();
+	for (std::size_t t = 0; t < m.tris.size(); t++) {
+		const Tri& tri = m.tris[t];
+		int tlo[11], thi[11];
+		for (int k = 0; k < 11; k++) {
+			tlo[k] = 0x7FFFFFFF;
+			thi[k] = -1;
+		}
+		for (int c = 0; c < 3; c++) {
+			int idx[11] = { tri.v[c], tri.n[c], (m.flags & 4) ? tri.col[c] : -1 };
+			for (int k = 0; k < 8; k++) idx[3 + k] = (m.flags & (1u << (3 + k))) ? m.uv[k][t][c] : -1;
+			for (int k = 0; k < 11; k++) {
+				if (idx[k] < 0) continue;
+				tlo[k] = std::min(tlo[k], idx[k]);
+				thi[k] = std::max(thi[k], idx[k]);
+			}
+		}
+		bool fits = !out.empty();
+		for (int k = 0; k < 11 && fits; k++) {
+			if (thi[k] < 0) continue;
+			const int a = std::min(lo[k], tlo[k]), b = std::max(hi[k], thi[k]);
+			fits = b <= kMaxIndex || b - a <= kMaxIndex;
+		}
+		if (!fits) {
+			finish();
+			reset();
+			out.push_back({ MeshBuild { m.material, m.flags, {}, {} }, {} });
+		}
+		for (int k = 0; k < 11; k++) {
+			if (thi[k] < 0) continue;
+			lo[k] = std::min(lo[k], tlo[k]);
+			hi[k] = std::max(hi[k], thi[k]);
+		}
+		MeshBuild& o = out.back().mesh;
+		o.tris.push_back(tri);
+		for (int k = 0; k < 8; k++) {
+			if (t < m.uv[k].size()) o.uv[k].push_back(m.uv[k][t]);
+		}
+	}
+	finish();
+	if (out.empty()) out.push_back({ MeshBuild { m.material, m.flags, {}, {} }, {} });
+	return out;
+}
+
+// GX_TRIANGLES con el formato de vértice de la malla (índices desde `base`).
+std::vector<u8> displayList(const MeshBuild& m, const int (&base)[11])
 {
 	Writer w;
 	std::size_t i = 0;
@@ -202,11 +274,11 @@ std::vector<u8> displayList(const MeshBuild& m)
 		for (std::size_t t = i; t < i + n; t++) {
 			for (int c = 0; c < 3; c++) {
 				if (m.flags & 1) w.u8_(0);
-				w.s16(m.tris[t].v[c]);
-				w.s16(m.tris[t].n[c]);
-				if (m.flags & 4) w.s16(m.tris[t].col[c]);
+				w.s16(m.tris[t].v[c] - base[0]);
+				w.s16(m.tris[t].n[c] - base[1]);
+				if (m.flags & 4) w.s16(m.tris[t].col[c] - base[2]);
 				for (int k = 0; k < 8; k++) {
-					if (m.flags & (1u << (3 + k))) w.s16(m.uv[k][t][c]);
+					if (m.flags & (1u << (3 + k))) w.s16(m.uv[k][t][c] - base[3 + k]);
 				}
 			}
 		}
@@ -289,6 +361,8 @@ struct PropContext {
 	std::vector<Tri>& coll;
 	PropTables& tables;
 	int baseTextures, baseTexAttrs, baseTevInfos, baseMaterials;
+	/// Tramos de `coll` de los props que se pisan (no cortan caminos).
+	std::vector<std::pair<std::size_t, std::size_t>> groundColl {};
 };
 
 void putBE32(std::vector<u8>& b, std::size_t at, u32 v)
@@ -298,6 +372,7 @@ void putBE32(std::vector<u8>& b, std::size_t at, u32 v)
 
 bool addProp(const MapProp& prop, const Model& model, PropContext& ctx, std::string& error)
 {
+	const std::size_t collStart = ctx.coll.size();
 	if (ctx.tables.materials.size() + std::size_t(ctx.baseMaterials) + model.materials.size() > 0x7FFF) {
 		error = tr("demasiados materiales con los objetos");
 		return false;
@@ -405,10 +480,11 @@ bool addProp(const MapProp& prop, const Model& model, PropContext& ctx, std::str
 				}
 				out.tris.push_back(tri);
 
-				if (prop.collide) {
+				if (prop.collide && model.collision.empty()) {
 					// Colisión con la cara hacia fuera: si la del triángulo no
 					// coincide con su normal de vértice, se le da la vuelta.
 					Tri c = tri;
+					if (prop.ground) c.code = kFloorCode;
 					const V3 face = triNormal(ctx.verts, c);
 					const V3 vn   = ctx.normals[std::size_t(tri.n[0])];
 					if (face.DP(vn) < 0.0f) std::swap(c.v[1], c.v[2]);
@@ -418,6 +494,30 @@ bool addProp(const MapProp& prop, const Model& model, PropContext& ctx, std::str
 		}
 		if (!out.tris.empty()) ctx.meshes.push_back(std::move(out));
 	}
+	// Con colisión propia (recortes de escenarios): esa, con sus códigos (el
+	// agua sigue siendo agua), en vez de los triángulos que se dibujan.
+	if (prop.collide && !model.collision.empty()) {
+		std::map<int, int> at;
+		for (const ModCollTri& t : model.collision) {
+			Tri c {};
+			bool ok = true;
+			for (int k = 0; k < 3 && ok; k++) {
+				ok = t.v[k] >= 0 && std::size_t(t.v[k]) < model.positions.size();
+				if (!ok) break;
+				auto it = at.find(t.v[k]);
+				if (it == at.end()) {
+					const Vec3 w = place.point(model.positions[std::size_t(t.v[k])]);
+					it           = at.emplace(t.v[k], int(ctx.verts.size())).first;
+					ctx.verts.push_back(V3(w.x, w.y, w.z));
+				}
+				c.v[k] = it->second;
+			}
+			if (!ok) continue;
+			c.code = t.code;
+			if (triNormal(ctx.verts, c).length() > 0.0f) ctx.coll.push_back(c);
+		}
+	}
+	if (prop.ground) ctx.groundColl.push_back({ collStart, ctx.coll.size() });
 	return true;
 }
 
@@ -601,6 +701,41 @@ bool buildIni(const MapData& map, const GameFileReader& read, const std::string&
 		setField("direction", direction);
 		// Paralela en GX = punto muy lejano sin atenuación, del lado del sol.
 		setField("position", position);
+	}
+	// Ambiente del editor: brillo y tinte de la luz principal, brillo de la
+	// ambiente y distancia de la niebla, en todas las horas del día.
+	if (map.brightness != 1.0f || map.fogScale != 1.0f || map.tint[0] != 255 || map.tint[1] != 255 || map.tint[2] != 255) {
+		std::istringstream in(text);
+		std::ostringstream o;
+		std::string ln;
+		std::vector<std::string> blocks;
+		while (std::getline(in, ln)) {
+			std::string t = ln;
+			t.erase(0, t.find_first_not_of(" \t"));
+			const std::string inside = blocks.empty() ? "" : blocks.back();
+			if (t.rfind("colour", 0) == 0 && (inside.rfind("light 0", 0) == 0 || inside.rfind("ambient", 0) == 0)) {
+				int c[4] = { 0, 0, 0, 0 };
+				if (std::sscanf(t.c_str() + 6, "%d %d %d %d", &c[0], &c[1], &c[2], &c[3]) >= 3) {
+					const bool light = inside.rfind("light 0", 0) == 0;
+					for (int k = 0; k < 3; k++) c[k] = std::max(0, std::min(255, int(std::lround(c[k] * map.brightness * (light ? map.tint[k] / 255.0f : 1.0f)))));
+					char buf[96];
+					std::snprintf(buf, sizeof(buf), "%.*scolour  %d %d %d %d", int(ln.size() - t.size()), ln.c_str(), c[0], c[1], c[2], c[3]);
+					ln = buf;
+				}
+			} else if (t.rfind("dist", 0) == 0 && inside.rfind("fog", 0) == 0) {
+				float a = 0, b = 0;
+				if (std::sscanf(t.c_str() + 4, "%f %f", &a, &b) == 2) {
+					char buf[96];
+					std::snprintf(buf, sizeof(buf), "%.*sdist  %.2f %.2f", int(ln.size() - t.size()), ln.c_str(), a * map.fogScale, b * map.fogScale);
+					ln = buf;
+				}
+			}
+			const std::size_t open = t.find('{');
+			if (open != std::string::npos) blocks.push_back(t.substr(0, open));
+			if (t.find('}') != std::string::npos && !blocks.empty()) blocks.pop_back();
+			o << ln << '\n';
+		}
+		text = o.str();
 	}
 	out.assign(text.begin(), text.end());
 	return true;
@@ -1320,6 +1455,7 @@ bool compileMap(const MapData& map, const GameFileReader& read, const std::strin
 
 	// ── Props ──────────────────────────────────────────────────────────────
 	std::vector<MeshBuild> propMeshes;
+	std::vector<std::pair<std::size_t, std::size_t>> groundRanges;
 	if (!map.props.empty()) {
 		std::string why;
 		if (!loadBase()) return false;
@@ -1340,7 +1476,28 @@ bool compileMap(const MapData& map, const GameFileReader& read, const std::strin
 			if (it == loaded.end()) {
 				std::vector<u8> bytes;
 				Model model;
-				if (!read(prop.asset, bytes) || bytes.empty()) {
+				// Recorte de un escenario: se saca de su .mod (de la copia del
+				// juego de cada uno; el mapa solo guarda la caja).
+				std::string cutMod;
+				Vec3 cutLo, cutHi;
+				bool cutObject = false;
+				if (parseCutAsset(prop.asset, cutMod, cutLo, cutHi, &cutObject)) {
+					auto course = loaded.find(cutMod);
+					if (course == loaded.end()) {
+						std::vector<u8> src;
+						Model whole;
+						if (!read(cutMod, src) || src.empty() || !parseMod(src.data(), src.size(), whole, why)) {
+							error = tr("falta el escenario del recorte ") + cutMod + tr(" (en assets/dataDir)");
+							return false;
+						}
+						course = loaded.emplace(cutMod, std::move(whole)).first;
+					}
+					ModRegionInfo cutInfo;
+					if (!extractModRegion(course->second, cutLo, cutHi, bytes, cutInfo, why, cutObject)) {
+						error = prop.asset + ": " + why;
+						return false;
+					}
+				} else if (!read(prop.asset, bytes) || bytes.empty()) {
 					error = tr("falta el objeto ") + prop.asset + tr(" (en assets/dataDir)");
 					return false;
 				}
@@ -1348,10 +1505,20 @@ bool compileMap(const MapData& map, const GameFileReader& read, const std::strin
 					error = prop.asset + ": " + why;
 					return false;
 				}
+				// Los que no son del juego (mallas importadas): texturas con los
+				// datos que dicen sus lados, o el juego leería de más.
+				for (const ModTexture& t : model.textures) {
+					const std::size_t need = modTextureBytes(t.format, t.width, t.height);
+					if (!need || t.data.size() < need) {
+						error = prop.asset + tr(": textura rota");
+						return false;
+					}
+				}
 				it = loaded.emplace(prop.asset, std::move(model)).first;
 			}
 			if (!addProp(prop, it->second, ctx, error)) return false;
 		}
+		groundRanges = ctx.groundColl;
 		result.props = map.props.size();
 	}
 
@@ -1383,12 +1550,22 @@ bool compileMap(const MapData& map, const GameFileReader& read, const std::strin
 		}
 	}
 
-	// Las listas de dibujo indexan vértices, normales, colores y UV con 16 bits.
-	bool tooBig = verts.size() > 0xFFFF || normals.size() > 0xFFFF || colours.size() > 0xFFFF;
-	for (const std::vector<V2>& u : uvs) tooBig = tooBig || u.size() > 0xFFFF;
-	if (tooBig) {
-		error = tr("el mapa es demasiado grande (más de 65535 vértices): hazlo más pequeño, con celdas más grandes o con menos objetos");
+	// Las listas de dibujo usan índices de 16 bits: las mallas que no caben se
+	// parten (ver splitForIndices). El tope es por memoria y por la caché de
+	// mallas del port.
+	std::size_t drawnTris = 0;
+	for (const MeshBuild* m : meshes) drawnTris += m->tris.size();
+	if (verts.size() > kMapMaxVertices || drawnTris > kMapMaxTriangles) {
+		error = tr("el mapa es demasiado grande (más de 250000 vértices o 300000 triángulos): hazlo más pequeño, con celdas más grandes o con menos objetos");
 		return false;
+	}
+	std::vector<MeshPart> parts;
+	for (const MeshBuild* m : meshes) {
+		for (MeshPart& p : splitForIndices(*m)) parts.push_back(std::move(p));
+	}
+	bool needBases = false;
+	for (const MeshPart& p : parts) {
+		for (int k = 0; k < 11; k++) needBases = needBases || p.base[k] != 0;
 	}
 
 	// ── Escritura ──────────────────────────────────────────────────────────
@@ -1477,10 +1654,11 @@ bool compileMap(const MapData& map, const GameFileReader& read, const std::strin
 	w.end();
 
 	w.begin(kChunkMesh);
-	w.s32(u32(meshes.size()));
+	w.s32(u32(parts.size()));
 	w.pad32();
-	for (const MeshBuild* m : meshes) {
-		const std::vector<u8> dl = displayList(*m);
+	for (const MeshPart& part : parts) {
+		const MeshBuild* m       = &part.mesh;
+		const std::vector<u8> dl = displayList(*m, part.base);
 		w.s32(0);        // articulación padre
 		w.s32(m->flags); // formato de vértice
 		w.s32(1);        // grupos de matrices
@@ -1506,12 +1684,22 @@ bool compileMap(const MapData& map, const GameFileReader& read, const std::strin
 	w.vec(V3(1.0f, 1.0f, 1.0f));
 	w.vec(V3(0.0f, 0.0f, 0.0f));
 	w.vec(V3(0.0f, 0.0f, 0.0f));
-	w.s32(u32(meshes.size()));
-	for (std::size_t i = 0; i < meshes.size(); i++) {
-		w.s16(meshes[i]->material);
+	w.s32(u32(parts.size()));
+	for (std::size_t i = 0; i < parts.size(); i++) {
+		w.s16(parts[i].mesh.material);
 		w.s16(int(i));
 	}
 	w.end();
+
+	if (needBases) {
+		w.begin(kChunkPcArrayBase);
+		w.s32(u32(parts.size()));
+		w.pad32();
+		for (const MeshPart& p : parts) {
+			for (int k = 0; k < 11; k++) w.s32(u32(p.base[k]));
+		}
+		w.end();
+	}
 
 	w.begin(kChunkPrism);
 	w.s32(u32(coll.size()));
@@ -1585,16 +1773,88 @@ bool compileMap(const MapData& map, const GameFileReader& read, const std::strin
 	// a un punto a cada lado: son lo único que cruza esas líneas.
 	std::string ini = "// Route info file for the VS arena\nroute {\n\tid\t\ttest\n\tname\t'vs arena'\n\tcolour\t0 119 255 97\n\n";
 	const f32 step = map.routeStep, margin = map.routeMargin;
-	const int px = int((map.maxX - map.minX - 2.0f * margin) / step) + 1, pz = int((map.maxZ - map.minZ - 2.0f * margin) / step) + 1;
-	// Con terreno, los puntos van a la altura del suelo.
-	auto ground  = [&](f32 x, f32 z) { return map.grid ? terrainHeight(map, x, z) - pondDepth(map, x, z) : 0.0f; };
-	auto gridPos = [&](int ix, int iz) {
-		const f32 x = map.minX + margin + ix * step, z = map.minZ + margin + iz * step;
-		return V3(x, ground(x, z), z);
+	// La red, en múltiplos de `step` (alineada al mundo): en los mapas espejo
+	// sale igual en los dos lados.
+	const f32 gx0 = std::ceil((map.minX + margin) / step) * step, gz0 = std::ceil((map.minZ + margin) / step) * step;
+	const int px = int((map.maxX - margin - gx0) / step) + 1, pz = int((map.maxZ - margin - gz0) / step) + 1;
+
+	// Lo que se pisa sale de la colisión de verdad (terreno, charcas, mallas
+	// que se pisan...): en cada punto puede haber varias alturas (un puente
+	// de malla sobre el terreno). Triángulos por casillas de 100.
+	constexpr f32 kHashCell = 100.0f;
+	std::map<std::pair<int, int>, std::vector<int>> collHash;
+	std::vector<V3> collNormal(coll.size());
+	for (std::size_t t = 0; t < coll.size(); t++) {
+		collNormal[t] = triNormal(verts, coll[t]);
+		f32 lx = 1e9f, hx = -1e9f, lz = 1e9f, hz = -1e9f;
+		for (int c = 0; c < 3; c++) {
+			const V3& p = verts[std::size_t(coll[t].v[c])];
+			lx          = std::min(lx, p.x);
+			hx          = std::max(hx, p.x);
+			lz          = std::min(lz, p.z);
+			hz          = std::max(hz, p.z);
+		}
+		for (int cz = int(std::floor(lz / kHashCell)); cz <= int(std::floor(hz / kHashCell)); cz++) {
+			for (int cx = int(std::floor(lx / kHashCell)); cx <= int(std::floor(hx / kHashCell)); cx++) collHash[{ cx, cz }].push_back(int(t));
+		}
+	}
+	// Alturas de la colisión en (x, z): solo lo que se pisa (hasta ~60°) o todo.
+	auto surfaces = [&](f32 x, f32 z, bool walkable, std::vector<f32>& ys) {
+		ys.clear();
+		auto it = collHash.find({ int(std::floor(x / kHashCell)), int(std::floor(z / kHashCell)) });
+		if (it == collHash.end()) return;
+		for (int t : it->second) {
+			const V3 &a = verts[std::size_t(coll[std::size_t(t)].v[0])], &b = verts[std::size_t(coll[std::size_t(t)].v[1])],
+			         &c = verts[std::size_t(coll[std::size_t(t)].v[2])];
+			if (walkable && collNormal[std::size_t(t)].y < 0.5f) continue;
+			const f32 d00 = (b.x - a.x) * (b.x - a.x) + (b.z - a.z) * (b.z - a.z), d01 = (b.x - a.x) * (c.x - a.x) + (b.z - a.z) * (c.z - a.z);
+			const f32 d11 = (c.x - a.x) * (c.x - a.x) + (c.z - a.z) * (c.z - a.z);
+			const f32 d20 = (x - a.x) * (b.x - a.x) + (z - a.z) * (b.z - a.z), d21 = (x - a.x) * (c.x - a.x) + (z - a.z) * (c.z - a.z);
+			const f32 den = d00 * d11 - d01 * d01;
+			if (std::fabs(den) < 1e-6f) continue;
+			const f32 v = (d11 * d20 - d01 * d21) / den, w = (d00 * d21 - d01 * d20) / den, u = 1.0f - v - w;
+			if (u < -0.001f || v < -0.001f || w < -0.001f) continue;
+			ys.push_back(a.y * u + b.y * v + c.y * w);
+		}
+	};
+	// Alturas donde puede haber un punto de camino: suelo con sitio encima.
+	auto layers = [&](f32 x, f32 z) {
+		std::vector<f32> ys, solid, out;
+		surfaces(x, z, true, ys);
+		surfaces(x, z, false, solid);
+		std::sort(ys.begin(), ys.end(), std::greater<f32>());
+		for (f32 y : ys) {
+			if (!out.empty() && out.back() - y < 30.0f) continue;
+			bool roof = false;
+			for (f32 s : solid) roof = roof || (s > y + 8.0f && s < y + 45.0f);
+			if (!roof) out.push_back(y);
+		}
+		return out;
+	};
+	auto surfaceNear = [&](f32 x, f32 z, f32 y, f32 tol) {
+		std::vector<f32> ys;
+		surfaces(x, z, true, ys);
+		for (f32 s : ys) {
+			if (std::fabs(s - y) <= tol) return true;
+		}
+		return false;
+	};
+	// La altura más cercana a la del terreno (para los puntos de paso).
+	auto ground = [&](f32 x, f32 z) {
+		const f32 want = map.grid ? terrainHeight(map, x, z) - pondDepth(map, x, z) : 0.0f;
+		f32 best = want, bestD = 1e9f;
+		for (f32 y : layers(x, z)) {
+			if (std::fabs(y - want) < bestD) {
+				bestD = std::fabs(y - want);
+				best  = y;
+			}
+		}
+		return best;
 	};
 	// Hueco que tapa cada compuerta: 256 de ancho en su X local, 70 de fondo.
-	Obstacle gates[2];
-	for (int p = 0; p < 2; p++) {
+	// Solo en VS (en solo y coop no se ponen).
+	Obstacle gates[2] = {};
+	for (int p = 0; p < 2 && (map.modes & MAPMODE_VS); p++) {
 		const MapSpot& g = map.gates[p];
 		const f32 hx = 128.0f * std::cos(g.face), hz = -128.0f * std::sin(g.face);
 		gates[p]     = { g.x - hx, g.z - hz, g.x + hx, g.z + hz, 70.0f, 0.0f };
@@ -1608,6 +1868,10 @@ bool compileMap(const MapData& map, const GameFileReader& read, const std::strin
 		// La caja en planta de cada triángulo de colisión de los props que
 		// sobresale del suelo (lo bajo se pisa, no corta el camino).
 		for (std::size_t ti = firstPropColl; ti < coll.size(); ti++) {
+			if (coll[ti].code == kFloorCode) continue; // mallas que se pisan
+			bool groundTri = false;
+			for (const auto& r : groundRanges) groundTri = groundTri || (ti >= r.first && ti < r.second);
+			if (groundTri) continue;
 			f32 lx = 1e9f, hx = -1e9f, lz = 1e9f, hz = -1e9f, hy = -1e9f;
 			for (int c = 0; c < 3; c++) {
 				const V3& p = verts[coll[ti].v[c]];
@@ -1621,19 +1885,27 @@ bool compileMap(const MapData& map, const GameFileReader& read, const std::strin
 		}
 	}
 	auto blocked = [&](const V3& p, f32 margin) {
-		if (!terrainSolid(map, p.x, p.z)) return true; // sin suelo
+		// Zonas sin caminos (a mano).
+		for (const auto& poly : map.routeBlocks) {
+			bool inside = false;
+			for (std::size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++) {
+				const auto &a = poly[i], &b = poly[j];
+				if ((a.second > p.z) != (b.second > p.z) && p.x < (b.first - a.first) * (p.z - a.second) / (b.second - a.second) + a.first) inside = !inside;
+			}
+			if (inside) return true;
+		}
 		for (const Obstacle& o : obstacles) {
 			if (o.contains(p, margin)) return true;
 		}
-		for (const Obstacle& g : gates) {
-			if (g.contains(p, margin)) return true;
+		for (int g = 0; g < 2 && (map.modes & MAPMODE_VS); g++) {
+			if (gates[g].contains(p, margin)) return true;
 		}
 		for (const Box& b : propBoxes) {
 			if (p.x >= b.x0 - margin && p.x <= b.x1 + margin && p.z >= b.z0 - margin && p.z <= b.z1 + margin) return true;
 		}
 		return false;
 	};
-	std::vector<int> index(std::size_t(px) * pz, -1);
+	std::vector<std::vector<int>> index(std::size_t(px) * pz);
 	std::vector<V3> points;
 	char line[160];
 	auto addPoint = [&](const V3& p) {
@@ -1650,36 +1922,41 @@ bool compileMap(const MapData& map, const GameFileReader& read, const std::strin
 	};
 	for (int iz = 0; iz < pz; iz++) {
 		for (int ix = 0; ix < px; ix++) {
-			const V3 p = gridPos(ix, iz);
-			if (!blocked(p, 45.0f)) index[std::size_t(iz) * px + ix] = addPoint(p);
+			const f32 x = gx0 + ix * step, z = gz0 + iz * step;
+			for (f32 y : layers(x, z)) {
+				const V3 p(x, y, z);
+				if (!blocked(p, 45.0f)) index[std::size_t(iz) * px + ix].push_back(addPoint(p));
+			}
 		}
 	}
 	std::vector<std::pair<int, int>> links;
 	for (int iz = 0; iz < pz; iz++) {
 		for (int ix = 0; ix < px; ix++) {
-			const int i = index[std::size_t(iz) * px + ix];
-			if (i < 0) continue;
+			for (const int i : index[std::size_t(iz) * px + ix]) {
 			for (int dz = -1; dz <= 1; dz++) {
 				for (int dx = -1; dx <= 1; dx++) {
 					const int nx = ix + dx, nz = iz + dz;
 					if ((!dx && !dz) || nx < 0 || nx >= px || nz < 0 || nz >= pz) continue;
-					const int j = index[std::size_t(nz) * px + nx];
-					if (j < 0) continue;
-					const V3 a = points[i], b = points[j];
+					for (const int j : index[std::size_t(nz) * px + nx]) {
+					const V3 a = points[std::size_t(i)], b = points[std::size_t(j)];
 					// El muro de cada base solo se cruza por los puntos de paso.
 					bool crosses = false;
 					for (f32 bx : map.barrierX) crosses = crosses || (a.x - bx) * (b.x - bx) < 0.0f;
 					if (crosses) continue;
 					bool clear = true;
 					for (int k = 1; k < 10 && clear; k++) clear = !blocked(a + (b - a) * (k / 10.0f), 25.0f);
-					// Con relieve, nada de cuestas por las que se resbala (más de ~30°).
-					for (int k = 0; k < 10 && clear && map.grid; k++) {
-						const V3 p0 = a + (b - a) * (k / 10.0f), p1 = a + (b - a) * ((k + 1) / 10.0f);
-						const f32 run = std::sqrt((p1.x - p0.x) * (p1.x - p0.x) + (p1.z - p0.z) * (p1.z - p0.z));
-						clear = std::fabs(ground(p1.x, p1.z) - ground(p0.x, p0.z)) <= run * 0.55f;
+					// Nada de cuestas por las que se resbala (más de ~30°), y suelo
+					// seguido de un punto al otro (a la altura de la línea).
+					const f32 run = std::sqrt((b.x - a.x) * (b.x - a.x) + (b.z - a.z) * (b.z - a.z));
+					clear         = clear && std::fabs(b.y - a.y) <= run * 0.55f;
+					for (int k = 1; k < 10 && clear; k++) {
+						const V3 q = a + (b - a) * (k / 10.0f);
+						clear      = surfaceNear(q.x, q.z, q.y, 20.0f + run * 0.06f);
 					}
 					if (clear) links.push_back({ i, j });
+					}
 				}
+			}
 			}
 		}
 	}
@@ -1706,6 +1983,41 @@ bool compileMap(const MapData& map, const GameFileReader& read, const std::strin
 				links.push_back({ best, gp });
 			}
 		}
+	}
+	// Enlaces a mano: sus dos extremos, unidos entre sí y al punto más
+	// cercano de su altura.
+	const std::size_t gridPoints = firstPass;
+	for (const MapData::RouteLink& l : map.routeLinks) {
+		int ends[2];
+		for (int e = 0; e < 2; e++) {
+			const f32* p = e ? l.b : l.a;
+			f32 y = p[1], bestDy = 60.0f; // al suelo más cercano, si lo hay
+			for (f32 s : layers(p[0], p[2])) {
+				if (std::fabs(s - p[1]) < bestDy) {
+					bestDy = std::fabs(s - p[1]);
+					y      = s;
+				}
+			}
+			const V3 at(p[0], y, p[2]);
+			ends[e]  = addPoint(at);
+			int best = -1;
+			f32 bestD = step * 1.6f;
+			for (std::size_t k = 0; k < gridPoints; k++) {
+				const V3 d = points[k] - at;
+				if (std::fabs(d.y) > 40.0f) continue;
+				const f32 dist = d.length();
+				if (dist < bestD) {
+					bestD = dist;
+					best  = int(k);
+				}
+			}
+			if (best >= 0) {
+				links.push_back({ ends[e], best });
+				links.push_back({ best, ends[e] });
+			}
+		}
+		links.push_back({ ends[0], ends[1] });
+		links.push_back({ ends[1], ends[0] });
 	}
 	for (const auto& l : links) {
 		snprintf(line, sizeof(line), "\tlink { %d %d }\n", l.first, l.second);

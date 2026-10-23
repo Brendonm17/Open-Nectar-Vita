@@ -7,6 +7,7 @@
 
 #include "Pellet.h"
 #include "pc_coop.h"
+#include "mods/pc_mission.h"
 #include "settings/pc_settings.h"
 
 namespace {
@@ -153,6 +154,7 @@ int pc_achievements_unlocked_count(void)
 const char* pc_achievements_blocked_reason(void)
 {
 	if (pc_vs_active()) return "Achievements are off in Versus mode.";
+	if (pc_mission_active()) return "Achievements are off in custom maps.";
 	if (pc_settings_get_piki_invincible() || pc_settings_get_all_flowers() || pc_settings_get_unlock_zones()
 	    || pc_settings_get_no_day_advance() || pc_settings_get_all_onions() || pc_settings_get_infinite_day()
 	    || pc_settings_get_carry_speed_scale() != 1.0f || pc_settings_get_navi_speed_scale() != 1.0f

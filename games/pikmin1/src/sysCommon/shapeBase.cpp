@@ -2818,6 +2818,24 @@ void BaseShape::read(RandomAccessStream& stream)
 			stream.skipPadding(0x20);
 			break;
 		}
+#if defined(PIKI_PC_PORT)
+		case BaseShapeChunk::PcArrayBase:
+		{
+			const int count = stream.readInt();
+			stream.skipPadding(0x20);
+			for (int i = 0; i < count; i++) {
+				for (int k = 0; k < 11; k++) {
+					const int base = stream.readInt();
+					if (i < mMeshCount) {
+						mMeshList[i].mPcArrayBase[k] = base;
+						mMeshList[i].mPcHasArrayBase = true;
+					}
+				}
+			}
+			stream.skipPadding(0x20);
+			break;
+		}
+#endif
 		default:
 		{
 			skipChunk(stream, chunkLength);

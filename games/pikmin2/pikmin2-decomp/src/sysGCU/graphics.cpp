@@ -419,6 +419,11 @@ void Graphics::addViewport(Viewport* vp)
  */
 Viewport* Graphics::getViewport(int id)
 {
+#ifdef PIKI_PC_PORT
+	if (!mViewports || id < 0 || id >= mMaxViewports) {
+		return nullptr;
+	}
+#endif
 	return mViewports[id];
 }
 

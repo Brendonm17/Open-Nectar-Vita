@@ -1,5 +1,6 @@
 #include "pc_vs_arena.h"
 #include "pc_vs_map.h"
+#include "pc_mission.h"
 
 #include "MapMgr.h"
 #include "Stream.h"
@@ -7,6 +8,10 @@
 #include "system.h"
 
 #include "nectar_mapcore/compile.h"
+
+static_assert(PC_VS_MAX_PELLETS == nectar::kMapMaxPellets && PC_VS_MAX_PIECES == nectar::kMapMaxPieces && PC_VS_MAX_GUARDS == nectar::kMapMaxGuards
+                  && PC_VS_MAX_ENEMIES == nectar::kMapMaxEnemies && PC_VS_MAX_OBJECTS == nectar::kMapMaxObjects,
+              "los límites del mapa y los del juego deben coincidir");
 
 #include <cstdio>
 #include <cstring>
@@ -24,8 +29,25 @@ PcVsReaction reaction(const nectar::MapReaction& r)
 	return { r.kind, r.pellet, r.teki, r.boss, r.count, r.radius };
 }
 
+const PcVsMap* sourceMap();
+
 bool readGameFile(const std::string& path, std::vector<u8>& out)
 {
+	// "map:..." : un archivo de la carpeta del mapa (mallas importadas).
+	if (path.rfind("map:", 0) == 0) {
+		const std::string rel = path.substr(4);
+		const PcVsMap* map    = sourceMap();
+		if (!map || map->dir.empty() || rel.empty() || rel.find("..") != std::string::npos || rel[0] == '/' || rel[0] == '\\') return false;
+		FILE* f = fopen((map->dir + "/" + rel).c_str(), "rb");
+		if (!f) return false;
+		fseek(f, 0, SEEK_END);
+		const long n = ftell(f);
+		fseek(f, 0, SEEK_SET);
+		out.resize(n > 0 ? size_t(n) : 0);
+		const bool ok = n > 0 && fread(out.data(), 1, out.size(), f) == out.size();
+		fclose(f);
+		return ok;
+	}
 	RandomAccessStream* s = gsys->openFile(path.c_str(), true);
 	if (!s) {
 		return false;
@@ -39,6 +61,13 @@ bool readGameFile(const std::string& path, std::vector<u8>& out)
 	return n > 0;
 }
 
+// El mapa que sirve la arena: el de la misión si se va a jugar una, si no el
+// del VS. La huella distingue los dos (cada uno lleva su propio contador).
+bool useMission() { return pc_mission_pending() || pc_mission_active(); }
+const PcVsMap* sourceMap() { return useMission() ? pc_mission_map() : pc_vs_map(); }
+const std::string& sourceError() { return useMission() ? pc_mission_error() : pc_vs_map_error(); }
+int sourceSerial() { return useMission() ? pc_mission_serial() * 2 + 1 : pc_vs_map_serial() * 2; }
+
 // Lo compilado del mapa activo (se tira al elegir otro).
 std::vector<u8> sMod, sIni, sGen, sPlants;
 int sBuiltSerial = -1;
@@ -46,9 +75,9 @@ std::string sBuildError;
 
 bool build()
 {
-	const PcVsMap* map = pc_vs_map();
+	const PcVsMap* map = sourceMap();
 	if (!map) {
-		sBuildError = pc_vs_map_error();
+		sBuildError = sourceError();
 		return false;
 	}
 	nectar::CompiledMap out;
@@ -67,12 +96,12 @@ bool build()
 
 void dropIfStale()
 {
-	if (sBuiltSerial != pc_vs_map_serial()) {
+	if (sBuiltSerial != sourceSerial()) {
 		sMod.clear();
 		sIni.clear();
 		sGen.clear();
 		sPlants.clear();
-		sBuiltSerial = pc_vs_map_serial();
+		sBuiltSerial = sourceSerial();
 	}
 }
 
@@ -117,7 +146,7 @@ namespace {
 const PcVsMap& activeMap()
 {
 	static const PcVsMap sEmpty {};
-	const PcVsMap* m = pc_vs_map();
+	const PcVsMap* m = sourceMap();
 	return m ? *m : sEmpty;
 }
 
@@ -126,6 +155,11 @@ const PcVsMap& activeMap()
 f32 groundAt(f32 x, f32 z)
 {
 	if (!activeMap().course.empty() && mapMgr) return mapMgr->getMinY(x, z, true);
+	// Con mallas que se pisan, lo que diga la colisión (puede haber suelo
+	// encima del terreno o donde el terreno no tiene).
+	bool ground = false;
+	for (const nectar::MapProp& p : activeMap().props) ground = ground || p.ground;
+	if (ground && mapMgr) return mapMgr->getMinY(x, z, true);
 	return nectar::terrainHeight(activeMap(), x, z);
 }
 } // namespace

@@ -11,6 +11,7 @@
 #if defined(PIKI_PC_PORT)
 #include "pc_gfx.h"
 #include "pc_coop.h"
+#include "mods/pc_mission.h"
 #include "settings/pc_settings.h"
 #endif
 
@@ -104,7 +105,7 @@ void zen::ogScrPauseMgr::start(bool isChallengeMode)
 	static char sVsQuitEn[]   = "Quit match";
 	static char sVsQuitEs[]   = "Salir de la partida";
 	char* subText             = sChalSubText;
-	if (pc_vs_active()) {
+	if (pc_vs_active() || pc_mission_active()) {
 		char* quit = pc_settings_get_language() == 3 ? sVsQuitEs : sVsQuitEn; // OS_LANG_SPANISH
 		mContLastSaveMainTextBox1->setString(quit);
 		mContLastSaveMainTextBox2->setString(quit);
@@ -151,9 +152,16 @@ zen::ogScrPauseMgr::PauseStatus zen::ogScrPauseMgr::update(Controller* controlle
 	pc_randomizer_pause_update();
 #endif
 
-	if (playerState->getCurrDay() == 0 || playerState->getCurrDay() == playerState->getTotalDays() - 1
+	if ((playerState->getCurrDay() == 0 || playerState->getCurrDay() == playerState->getTotalDays() - 1
 #if defined(PIKI_PC_PORT)
-	    || pc_vs_active() // VS: sin atardecer; la revancha está en la pantalla final
+	     || pc_vs_active() // VS: sin atardecer; la revancha está en la pantalla final
+	     || pc_mission_active() // misión suelta: el día lo acaba el reloj
+#endif
+	     )
+#if defined(PIKI_PC_PORT)
+	    // Zona de campaña: el día de la campaña no es el del juego; siempre se
+	    // puede ir al atardecer.
+	    && !(pc_mission_active() && pc_mission_zone_mode())
 #endif
 	) {
 		// disable "Go to Sunset" menu option on day 1 (trapped in tutorial) and day 30 (can't die early)

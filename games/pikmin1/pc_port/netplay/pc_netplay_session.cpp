@@ -671,16 +671,16 @@ void compute_local_hello()
 		Vector3f big;
 		pc_vs_arena_big_piece(big);
 		put(&big, sizeof(big));
-		PcVsPelletSpot pellets[16];
-		put(pellets, sizeof(pellets[0]) * (size_t)pc_vs_arena_pellet_spots(pellets, 16));
-		PcVsPieceSpot pieces[16];
-		put(pieces, sizeof(pieces[0]) * (size_t)pc_vs_arena_piece_spots(pieces, 16));
-		PcVsGuardSpot guards[4];
-		put(guards, sizeof(guards[0]) * (size_t)pc_vs_arena_guard_spots(guards, 4));
-		PcVsEnemySpot enemies[48];
-		put(enemies, sizeof(enemies[0]) * (size_t)pc_vs_arena_enemy_spots(enemies, 48));
-		PcVsObjectSpot objects[32];
-		put(objects, sizeof(objects[0]) * (size_t)pc_vs_arena_object_spots(objects, 32));
+		PcVsPelletSpot pellets[PC_VS_MAX_PELLETS];
+		put(pellets, sizeof(pellets[0]) * (size_t)pc_vs_arena_pellet_spots(pellets, PC_VS_MAX_PELLETS));
+		PcVsPieceSpot pieces[PC_VS_MAX_PIECES];
+		put(pieces, sizeof(pieces[0]) * (size_t)pc_vs_arena_piece_spots(pieces, PC_VS_MAX_PIECES));
+		PcVsGuardSpot guards[PC_VS_MAX_GUARDS];
+		put(guards, sizeof(guards[0]) * (size_t)pc_vs_arena_guard_spots(guards, PC_VS_MAX_GUARDS));
+		PcVsEnemySpot enemies[PC_VS_MAX_ENEMIES];
+		put(enemies, sizeof(enemies[0]) * (size_t)pc_vs_arena_enemy_spots(enemies, PC_VS_MAX_ENEMIES));
+		PcVsObjectSpot objects[PC_VS_MAX_OBJECTS];
+		put(objects, sizeof(objects[0]) * (size_t)pc_vs_arena_object_spots(objects, PC_VS_MAX_OBJECTS));
 	}
 	sha.final(sLocal.vsMapSha);
 	sVsMapHexStr       = pc_netplay_sha::hex(sLocal.vsMapSha, 32);

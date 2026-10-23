@@ -87,6 +87,8 @@ int pc_settings_get_no_trip(void);
 // Whistling over sprouts plucks them, one every 0.08 s while held. Off by default.
 int pc_settings_get_whistle_pluck(void);
 int pc_settings_get_bomb_control(void);
+/// Mod "Bomb Rock Respawn" (#78): segundos por roca repuesta (0 = original).
+int pc_settings_get_bomb_respawn(void);
 int pc_settings_get_breakable_gates(void);    ///< issue #70
 int pc_settings_get_p2_selection(void);       ///< issue #67
 float pc_settings_get_free_camera_pad_scale(void); ///< issue #66, 1 = default
@@ -140,6 +142,22 @@ void pc_vsrules_prompt_open(void);
 bool pc_vsrules_prompt_active(void);
 int  pc_vsrules_prompt_result(void);
 void pc_vsrules_prompt_draw(void);
+/// Custom Maps: selector de misiones. Resultado: PC_DEVASSIGN_*.
+void pc_mission_prompt_open(void);
+bool pc_mission_prompt_active(void);
+int  pc_mission_prompt_result(void);
+/// Jugadores elegidos en el selector (1 o 2).
+int  pc_mission_prompt_players(void);
+void pc_mission_prompt_draw(void);
+/// Campañas: el mapa de zonas (en MapSelect, en lugar del mapa del mundo).
+/// Resultado: PC_DEVASSIGN_OK (zona elegida y preparada), _CANCELLED (al
+/// título) o _PENDING.
+void pc_campaign_map_open(void);
+bool pc_campaign_map_active(void);
+int  pc_campaign_map_result(void);
+void pc_campaign_map_draw(void);
+/// Custom Maps: objetivo y aviso final de la misión en curso.
+void pc_settings_draw_mission_hud(void);
 /// VS: la pantalla final está abierta (tiene la entrada).
 bool pc_vs_end_screen_active(void);
 /// Latido del bucle de juego: lo llama newPikiGame en cada tick de simulación.

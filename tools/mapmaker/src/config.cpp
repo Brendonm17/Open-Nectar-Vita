@@ -54,6 +54,7 @@ bool Config::load()
 		lastMap      = j.value("lastMap", "");
 		favorites    = j.value("favorites", std::vector<std::string>());
 		recents      = j.value("recents", std::vector<std::string>());
+		pieces       = j.value("pieces", std::vector<std::pair<std::string, std::string>>());
 		snap         = j.value("snap", true);
 		tutorialDone = j.value("tutorialDone", false);
 		language     = j.value("language", std::string("en"));
@@ -80,7 +81,7 @@ bool Config::save() const
 		             { "tutorialDone", tutorialDone }, { "language", language },
 		             { "toolboxWidth", toolboxWidth }, { "sidePanelWidth", sidePanelWidth },
 		             { "showToolbox", showToolbox }, { "showSidePanel", showSidePanel },
-		             { "ignoreDecorSelection", ignoreDecorSelection }, { "localGizmo", localGizmo } };
+		             { "ignoreDecorSelection", ignoreDecorSelection }, { "localGizmo", localGizmo }, { "pieces", pieces } };
 	std::ofstream f(fs::path(directory()) / "config.json");
 	if (!f) return false;
 	f << j.dump(2);

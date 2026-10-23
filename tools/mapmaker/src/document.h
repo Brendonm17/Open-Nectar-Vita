@@ -10,7 +10,10 @@
 
 namespace nm {
 
-enum class ItemType { Base, Rocket, Gate, BombPile, Onion, Pellet, Piece, BigPiece, Guard, Prop, Wall, Pond, Enemy, Object, Gen };
+// Captain, Ship, StoryOnion y ShipPart son de la misión (solo y coop, sección
+// "story"); Base, Rocket, Gate, BombPile, Onion, Piece y BigPiece, del VS.
+enum class ItemType { Base, Rocket, Gate, BombPile, Onion, Pellet, Piece, BigPiece, Guard, Prop, Wall, Pond, Enemy, Object, Gen,
+	                  Captain, Ship, StoryOnion, ShipPart };
 
 struct ItemRef {
 	ItemType type = ItemType::Base;
@@ -51,8 +54,16 @@ struct DecorItem {
 };
 const std::vector<DecorItem>& decorItems();
 
-/// Todo lo que hay en el mapa, en orden (para la lista de capas).
+/// Todo lo que hay en el mapa, en orden (para la lista de capas). Lo del VS,
+/// solo si el mapa es para VS; lo de la misión, solo si tiene sección "story".
 std::vector<ItemRef> allItems(const nectar::MapDoc& d);
+/// Es de la misión (solo y coop) / del VS.
+bool isStoryItem(ItemType t);
+bool isVsItem(ItemType t);
+/// Prepara la sección "story" (capitanes, nave, una cebolla roja) cerca del
+/// centro o de la salida del Jugador 1, si aún no la tiene; en coop, con dos
+/// capitanes.
+void ensureStory(nectar::MapDoc& d, bool coop);
 
 /// El otro jugador del mismo marcador (J1 <-> J2), si lo tiene.
 bool counterpart(const ItemRef& r, ItemRef& out);

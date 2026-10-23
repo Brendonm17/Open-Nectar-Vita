@@ -120,6 +120,8 @@ struct PcLockState {
 	Vector3f mPinned = Vector3f(0.0f);
 	/// Mod "Charge": segundos que el grupo sigue corriendo hacia el objetivo.
 	f32 mCharge = 0.0f;
+	/// Enemigo de la carga: el fijado o, sin Lock-On, el que habia bajo el cursor.
+	Creature* mChargeTarget = nullptr;
 };
 static PcLockState sPcLock[2];
 // 1P: capitan del ultimo Lock-On (al cambiar con Y se empieza de cero).
@@ -133,6 +135,9 @@ static void pcLockClearAll()
 		sPcLock[i] = PcLockState();
 	}
 }
+
+// clearHeap (cambio de subnivel): los objetivos fijados vivian en ese montón.
+void pc_navi_lock_reset() { pcLockClearAll(); }
 
 /// Jugador del mando del capitan: P2 con el mando del puerto 2 (co-op, VS).
 static int pcNaviPlayer(Navi* navi)
@@ -302,12 +307,19 @@ static void pcUpdateLockOn(Navi* navi)
 	const bool chargePressed = pc_window_take_swarm_press_for(pcNaviPlayer(navi));
 	const int mode           = pc_settings_get_lock_on();
 	PcLockState& lock        = pcLockOf(navi);
-	if (!mode || (!pc_p2_coop_active() && sPcLockNavi != navi)) {
-		// Otro capitan (cambio con Y) o mod apagado: se empieza de cero. En
-		// co-op cada capitan lleva el suyo.
+	if (!pc_p2_coop_active() && sPcLockNavi != navi) {
+		// Otro capitan (cambio con Y): se empieza de cero. En co-op cada
+		// capitan lleva el suyo.
 		pcLockClearAll();
 		sPcLockNavi = navi;
-		if (!mode) {
+	}
+	if (!mode) {
+		// Lock-On apagado: nada fijado, pero Charge sigue funcionando (#156).
+		lock.mTarget = nullptr;
+		lock.mIgnore = nullptr;
+		if (!pc_settings_get_charge()) {
+			lock.mCharge       = 0.0f;
+			lock.mChargeTarget = nullptr;
 			return;
 		}
 	}
@@ -319,7 +331,7 @@ static void pcUpdateLockOn(Navi* navi)
 	// en el y el libre sigue en lock.mAim.
 	const Vector3f aim = naviPos + (lock.mTarget ? lock.mAim : cursor);
 
-	if (lock.mTarget) {
+	if (mode && lock.mTarget) {
 		Creature* target = lock.mTarget;
 		bool stillValid  = false;
 		if (pcForEachLockable([target](Creature* c) { return c == target; })) {
@@ -337,7 +349,7 @@ static void pcUpdateLockOn(Navi* navi)
 
 	// El objetivo soltado a mano en automatico no se recoge otra vez hasta que
 	// el cursor sale de el.
-	if (lock.mIgnore) {
+	if (mode && lock.mIgnore) {
 		Creature* ignore = lock.mIgnore;
 		if (!pcForEachLockable([ignore](Creature* c) { return c == ignore; })
 		    || pcLockDistXZ(ignore, aim) > pcLockRadius(ignore) + 12.0f) {
@@ -365,7 +377,9 @@ static void pcUpdateLockOn(Navi* navi)
 	};
 
 	Creature* acquired = nullptr;
-	if (lockPressed) {
+	if (!mode) {
+		// sin Lock-On no se fija nada
+	} else if (lockPressed) {
 		if (lock.mTarget) {
 			// Segunda pulsacion: suelta el objetivo.
 			if (mode == 2) {
@@ -386,31 +400,41 @@ static void pcUpdateLockOn(Navi* navi)
 		lock.mPinned = cursor;
 	}
 
-	// Cargar solo tiene sentido contra lo que se ataca: los Pikmin en
-	// formacion van a por el; los que ya trabajan siguen a lo suyo.
+	// Charge: el grupo corre hacia el enemigo fijado o, sin el, hacia el
+	// cursor. Contra un enemigo, los Pikmin en formacion van a por el; los que
+	// ya trabajan siguen a lo suyo.
 	// Antes se lanzaba ACT_Attack desde la formacion: salian en fila, sin ruta,
 	// y muchos se quedaban por el camino. Ahora el grupo entero corre hacia el
 	// objetivo (lo empuja makeCStick) y cada Pikmin ataca al llegar; al
 	// agotarse el tiempo van los que queden.
-	const bool chargeable = lock.mTarget && pc_settings_get_charge() && lock.mTarget->mObjectTypeID == OBJTYPE_Teki;
-	if (chargePressed) { // TEMP depuracion Charge en Android
-		printf("[Charge] press target=%p type=%d setting=%d chargeable=%d\n", (void*)lock.mTarget,
-		       lock.mTarget ? (int)lock.mTarget->mObjectTypeID : -1, pc_settings_get_charge(), (int)chargeable);
-	}
-	if (!chargeable) {
-		lock.mCharge = 0.0f;
+	if (!pc_settings_get_charge()) {
+		lock.mCharge       = 0.0f;
+		lock.mChargeTarget = nullptr;
 		return;
 	}
 	if (chargePressed) {
-		lock.mCharge = 2.5f;
+		// Hacia el enemigo fijado si lo hay; si no, hacia el cursor.
+		lock.mChargeTarget = lock.mTarget && lock.mTarget->mObjectTypeID == OBJTYPE_Teki ? lock.mTarget : nullptr;
+		lock.mCharge       = 2.5f;
 	}
 	if (lock.mCharge <= 0.0f) {
+		lock.mCharge       = 0.0f;
+		lock.mChargeTarget = nullptr;
 		return;
 	}
+	if (lock.mChargeTarget) {
+		Creature* target = lock.mChargeTarget;
+		if (!pcForEachLockable([target](Creature* c) { return c == target; })) {
+			lock.mChargeTarget = nullptr; // murio o desaparecio: sigue hacia el cursor
+		}
+	}
 	lock.mCharge -= sys->mDeltaTime;
+	if (!lock.mChargeTarget) {
+		return; // sin enemigo: makeCStick lleva el grupo al cursor mientras dure
+	}
 	const bool last     = lock.mCharge <= 0.0f;
-	const Vector3f goal = lock.mTarget->getPosition();
-	const f32 reach     = pcLockRadius(lock.mTarget) + 40.0f;
+	const Vector3f goal = lock.mChargeTarget->getPosition();
+	const f32 reach     = pcLockRadius(lock.mChargeTarget) + 40.0f;
 	{
 		Iterator<Piki> iter(pikiMgr);
 		CI_LOOP(iter)
@@ -426,7 +450,7 @@ static void pcUpdateLockOn(Navi* navi)
 				continue;
 			}
 			PikiAI::ActAttackArg arg;
-			arg.mCreature = lock.mTarget;
+			arg.mCreature = lock.mChargeTarget;
 			arg.mCollPart = nullptr;
 			piki->mBrain->start(PikiAI::ACT_Attack, &arg);
 		}
@@ -3008,9 +3032,9 @@ void Navi::makeCStick(bool disable)
 #ifdef PIKI_PC_PORT
 	// Boton Swarm (necesario con Free Camera, que quita el stick derecho al
 	// enjambre): el grupo carga hacia el cursor a plena fuerza.
-	// Durante el Charge el empuje va al objetivo fijado en vez de al cursor.
+	// Durante el Charge el empuje va al enemigo fijado o, sin el, al cursor.
 	PcLockState& pcLock   = pcLockOf(this);
-	const bool pcCharging = pcLock.mCharge > 0.0f && pcLock.mTarget;
+	const bool pcCharging = pcLock.mCharge > 0.0f && pc_settings_get_charge();
 	// Co-op: el boton de swarm del jugador de este capitan.
 	const bool pcSwarmHeld = pcNaviPlayer(this) == 1 ? pc_window_swarm_held_p2() : pc_window_swarm_held();
 	// El swarm lleva el grupo entero al cursor (issue #76): el C-stick a fondo
@@ -3018,7 +3042,8 @@ void Navi::makeCStick(bool disable)
 	bool pcSwarmToGoal = false;
 	Vector3f pcSwarmGoal;
 	if (!disable && (pcCharging || (mController1 && pcSwarmHeld))) {
-		Vector3f toCursor = pcCharging ? pcLock.mTarget->getPosition() - getPosition() : mWhistle->mNaviOffsetVec;
+		Vector3f toCursor = pcCharging && pcLock.mChargeTarget ? pcLock.mChargeTarget->getPosition() - getPosition()
+		                                                       : mWhistle->mNaviOffsetVec;
 		toCursor.y        = 0.0f;
 		const f32 len     = toCursor.length();
 		if (len > 1.0f) {

@@ -1645,6 +1645,10 @@ PelletMgr::PelletMgr(MapMgr* mgr)
 	load("parms/", "pelMgr.bin", 1);
 #if defined(VERSION_PIKIDEMO) || defined(VERSION_GPIJ01_01)
 	create(64);
+#elif defined(PIKI_PC_PORT)
+	// Mapas del editor: hasta 48 pastillas y 32 piezas (o 30 de misión), más
+	// las que sueltan los enemigos.
+	create(160);
 #else
 	create(96);
 #endif

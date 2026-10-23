@@ -20,6 +20,8 @@
 #include "pc_gfx.h"
 #include "pc_permadeath.h"
 #include "pc_coop.h"
+#include "mods/pc_mission.h"
+#include "mods/pc_campaign.h"
 #include "pc_vs.h"
 #include "pc_speedrun.h"
 #include "pc_day_history.h"
@@ -153,6 +155,41 @@ struct CardSelectSetupSection : public Node {
 			mNextSectionsFlag                = 0; // no destination: the exit starts the new run
 			mState                           = Exit;
 			gsys->setFade(0.0f);
+		} else if (std::string why; gameflow.mIsChallengeMode && pc_mission_pending() && pc_campaign_direct_take_setup(why)) {
+			// Editor de mapas (--campaign): partida de prueba directa a una zona.
+			pc_coop_take_chosen_at_title();
+			pc_window_input_reset_assignment();
+			pc_coop_set_captain(0, PC_CAPTAIN_OLIMAR);
+			if (!why.empty()) {
+				fprintf(stderr, "[campaign] --campaign: no se puede jugar: %s\n", why.c_str());
+				pc_mission_set_pending(false);
+				pc_campaign_close();
+				mNextSectionsFlag = PACK_NEXT_ONEPLAYER(ONEPLAYER_GameExit);
+			}
+			mState = Exit;
+			gsys->setFade(0.0f);
+		} else if (gameflow.mIsChallengeMode && pc_mission_pending() && pc_mission_direct_take_setup()) {
+			// Editor de mapas (--mission-map): sin menús. J1 teclado + mando 1
+			// (Olimar); en coop, J2 mando 2 (Louie). Si el mapa no se puede
+			// montar, se dice en la consola y se vuelve al título.
+			pc_coop_take_chosen_at_title();
+			pc_window_input_reset_assignment();
+			pc_coop_set_captain(0, PC_CAPTAIN_OLIMAR);
+			pc_coop_set_captain(1, PC_CAPTAIN_LOUIE);
+			pc_mission_start(false);
+			const char* why = pc_mission_map() ? pc_vs_arena_prepare() : pc_mission_error().c_str();
+			if (why) {
+				fprintf(stderr, "[mission] --mission-map: el mapa no se puede jugar: %s\n", why);
+				pc_mission_set_pending(false);
+				pc_coop_set_pending(false);
+				mNextSectionsFlag = PACK_NEXT_ONEPLAYER(ONEPLAYER_GameExit);
+			}
+			mState = Exit;
+			gsys->setFade(0.0f);
+		} else if (gameflow.mIsChallengeMode && pc_mission_pending() && pc_coop_take_chosen_at_title()) {
+			// Custom Maps: el selector de misiones; luego, directo al mapa.
+			mAwaitingMission = true;
+			pc_mission_prompt_open();
 		} else if (gameflow.mIsChallengeMode && pc_vs_pending() && pc_coop_take_chosen_at_title()) {
 			// VS: primero la explicación y las reglas; luego mandos y
 			// capitanes de los dos jugadores; sin fichero.
@@ -213,7 +250,7 @@ struct CardSelectSetupSection : public Node {
 #if defined(PIKI_PC_PORT)
 		// Los prompts que van antes del slot llevan de fondo el degradado y
 		// las estrellas de la selección de slot, como el de New Game.
-		if (mAwaitingCaptain || mAwaitingDevAssign || mAwaitingVsRules || mAwaitingSpeedrunIntro
+		if (mAwaitingCaptain || mAwaitingDevAssign || mAwaitingVsRules || mAwaitingMission || mAwaitingSpeedrunIntro
 		    || mAwaitingRandomizerIntro || pc_erased_notice_active()) {
 			mPcBackdrop = new zen::ogScrFileChkSelMgr();
 			mPcBackdrop->pcStartBackdrop();
@@ -373,13 +410,48 @@ struct CardSelectSetupSection : public Node {
 			}
 			mAwaitingCaptain = false;
 			if (choice == PC_DEVASSIGN_CANCELLED) {
+				pc_mission_set_pending(false);
 				mNextSectionsFlag = PACK_NEXT_ONEPLAYER(ONEPLAYER_GameExit);
 				mState            = Exit;
 				gsys->setFade(0.0f);
 				return;
 			}
+			if (pc_mission_pending()) {
+				// Misión: sin selector de fichero; la salida lleva al mapa.
+				mState = Exit;
+				gsys->setFade(0.0f);
+				return;
+			}
 			memcardWindow = new zen::ogScrFileChkSelMgr();
 			memcardWindow->start(gameflow.mIsChallengeMode);
+			return;
+		}
+		if (mAwaitingMission) {
+			const int choice = pc_mission_prompt_result();
+			if (choice == PC_DEVASSIGN_PENDING) {
+				return;
+			}
+			mAwaitingMission = false;
+			if (choice == PC_DEVASSIGN_CANCELLED) {
+				// Atrás: vuelta al título.
+				pc_mission_set_pending(false);
+				mNextSectionsFlag = PACK_NEXT_ONEPLAYER(ONEPLAYER_GameExit);
+				mState            = Exit;
+				gsys->setFade(0.0f);
+				return;
+			}
+			// Sin fichero: 1 jugador elige capitán; 2, mandos y capitanes. La
+			// salida lleva al mapa.
+			pc_window_input_reset_assignment();
+			if ((pc_campaign_active() ? pc_campaign_players() : pc_mission_players()) == 2) {
+				pc_coop_set_pending(true);
+				mAwaitingDevAssign = true;
+				pc_devassign_prompt_open();
+			} else {
+				pc_coop_set_pending(false);
+				mAwaitingCaptain = true;
+				pc_captain_prompt_open();
+			}
 			return;
 		}
 		if (mAwaitingVsRules) {
@@ -432,11 +504,12 @@ struct CardSelectSetupSection : public Node {
 				return;
 			}
 			mAwaitingDevAssign = false;
-			if (pc_vs_pending()) {
+			if (pc_vs_pending() || pc_mission_pending()) {
 				if (choice == PC_DEVASSIGN_CANCELLED) {
-					// Atrás en VS: vuelta al título.
+					// Atrás en VS o en una misión: vuelta al título.
 					pc_window_input_reset_assignment();
 					pc_vs_set_pending(false);
+					pc_mission_set_pending(false);
 					pc_coop_set_pending(false);
 					mNextSectionsFlag = PACK_NEXT_ONEPLAYER(ONEPLAYER_GameExit);
 				}
@@ -592,7 +665,7 @@ struct CardSelectSetupSection : public Node {
 					// VS: la arena propia (mods/pc_vs_arena), sin selector. El
 					// StageInfo es el de Impact Site (música, cielo); el escenario
 					// y el mapa son las rutas virtuales de la arena.
-					if (pc_vs_pending()) {
+					if (pc_vs_pending() || pc_mission_pending()) {
 						FOREACH_NODE(StageInfo, flowCont.mStageList.mChild, stage)
 						{
 							if (stage->mChalStageID == CHALSTAGE_Practice) {
@@ -600,8 +673,14 @@ struct CardSelectSetupSection : public Node {
 								sprintf(flowCont.mCurrStageFilePath, "%s", PC_VS_ARENA_STAGE);
 								sprintf(flowCont.mDoorStageFilePath, "%s", PC_VS_ARENA_STAGE);
 								// Mediodía (el sol en lo más alto); en VS el día no avanza.
-								gameflow.mWorldClock.setTime((gameflow.mParameters->mStartHour() + gameflow.mParameters->mEndHour()) * 0.5f);
+								// Las misiones empiezan al amanecer, como un día normal.
+								if (pc_mission_pending()) gameflow.mWorldClock.setTime(pc_mission_start_hour(gameflow.mParameters->mStartHour()));
+								else gameflow.mWorldClock.setTime((gameflow.mParameters->mStartHour() + gameflow.mParameters->mEndHour()) * 0.5f);
 								gameflow.mNextOnePlayerSectionID = ONEPLAYER_NewPikiGame;
+								// Campaña: antes, el mapa de zonas (allí se elige dónde ir).
+								// (La prueba desde el editor ya tiene la zona preparada: directo.)
+								if (pc_mission_pending() && pc_campaign_active() && !pc_campaign_take_direct_zone())
+									gameflow.mNextOnePlayerSectionID = ONEPLAYER_MapSelect;
 								break;
 							}
 						}
@@ -683,6 +762,13 @@ struct CardSelectSetupSection : public Node {
 				mPcBackdrop->drawBackdrop(gfx);
 			}
 			pc_vsrules_prompt_draw();
+			return;
+		}
+		if (mAwaitingMission) {
+			if (mPcBackdrop) {
+				mPcBackdrop->drawBackdrop(gfx);
+			}
+			pc_mission_prompt_draw();
 			return;
 		}
 		if (mAwaitingDevAssign) {
@@ -857,6 +943,7 @@ struct CardSelectSetupSection : public Node {
 	bool mAwaitingRandomizerSettings = false; ///< Randomizer: ajustes de la partida nueva (ranura vacía).
 	bool mAwaitingDevAssign     = false; ///< The controller assignment prompt is up.
 	bool mAwaitingVsRules       = false; ///< VS: explicación y reglas, antes de los mandos.
+	bool mAwaitingMission       = false; ///< Custom Maps: selector de misiones.
 	bool mAwaitingNewGameChoice = false; ///< The new-game prompt is up.
 	zen::ogScrFileChkSelMgr* mPromptBackdrop     = nullptr; ///< Pantalla de slots dibujada bajo el prompt.
 	zen::ogScrFileChkSelMgr* mPcBackdrop         = nullptr; ///< Solo fondo, para los prompts previos al slot.

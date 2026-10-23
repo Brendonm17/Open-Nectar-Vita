@@ -16,6 +16,7 @@
 #include "pc_photo_mode.h"
 #include "pc_record.h"
 #include "pc_coop.h"
+#include "mods/pc_mission.h"
 #include "randomizer/pc_randomizer_catalog.h"
 #include "mods/pc_vs_arena.h"
 #include "pc_vs.h"
@@ -135,7 +136,7 @@ zen::DrawAccount* accountWindow;
 
 // VS: sin escena de extinción (se empieza sin Pikmin en el campo).
 #if defined(PIKI_PC_PORT)
-#define PC_NOT_VS && !pc_vs_active()
+#define PC_NOT_VS && !pc_vs_active() && !pc_mission_active()
 #else
 #define PC_NOT_VS
 #endif
@@ -940,6 +941,7 @@ void GameCoreSection::exitStage()
 	// Fin de la partida (VS/cooperativo): la siguiente vuelve a leer lo pendiente.
 	gameflow.mPauseAll = FALSE;
 	pc_coop_end_run();
+	pc_mission_end_run();
 #endif
 }
 
@@ -1015,7 +1017,7 @@ static f32 sReinforceCd[2] = { 0.0f, 0.0f };
 struct PcVsNectar {
 	f32 x, z, timer;
 };
-static PcVsNectar sVsNectar[16];
+static PcVsNectar sVsNectar[PC_VS_MAX_OBJECTS];
 static int sVsNectarCount = 0;
 
 enum PcVsReactionTrigger { VS_TRIGGER_Defeated, VS_TRIGGER_Building, VS_TRIGGER_Work, VS_TRIGGER_Hidden, VS_TRIGGER_Door };
@@ -1122,15 +1124,20 @@ static Creature* pcVsSpawnEnemy(MapMgr* map, int tekiType, int bossType, f32 x, 
 	return teki;
 }
 
-static void pcVsRunReaction(MapMgr* map, const PcVsReactionWatch& watch)
+// Hace una reacción alrededor de `center` (VS y misiones).
+static void pcRunReactionAt(MapMgr* map, const PcVsReaction& reaction, const Vector3f& center, std::vector<Creature*>* spawned = nullptr)
 {
-	const Vector3f center = watch.source->mSRT.t;
+	struct {
+		PcVsReaction reaction;
+	} watch { reaction };
 	for (int i = 0; i < watch.reaction.count; i++) {
 		const f32 angle = watch.reaction.count > 1 ? f32(i) * 6.2831853f / f32(watch.reaction.count) : 0.0f;
 		const f32 distance = watch.reaction.count > 1 ? watch.reaction.radius : 0.0f;
 		const f32 x = center.x + cosf(angle) * distance, z = center.z + sinf(angle) * distance;
-		if (watch.reaction.kind == PC_VS_REACT_ENEMY)
-			pcVsSpawnEnemy(map, watch.reaction.teki, watch.reaction.boss, x, z, angle);
+		if (watch.reaction.kind == PC_VS_REACT_ENEMY) {
+			Creature* enemy = pcVsSpawnEnemy(map, watch.reaction.teki, watch.reaction.boss, x, z, angle);
+			if (enemy && spawned) spawned->push_back(enemy);
+		}
 		else if (watch.reaction.kind == PC_VS_REACT_PELLET)
 			pcVsSpawnPellet(map, watch.reaction.pelletId, x, z);
 		else if (watch.reaction.kind == PC_VS_REACT_BOMB) {
@@ -1147,6 +1154,12 @@ static void pcVsRunReaction(MapMgr* map, const PcVsReactionWatch& watch)
 			}
 		}
 	}
+}
+
+static void pcVsRunReaction(MapMgr* map, const PcVsReactionWatch& watch)
+{
+	const Vector3f center = watch.source->mSRT.t;
+	pcRunReactionAt(map, watch.reaction, center);
 }
 
 // Reloj y eventos, cada fotograma de juego.
@@ -1210,8 +1223,8 @@ static void pcVsUpdate(MapMgr* map)
 	}
 	if (pc_vs_take_pellet_event()) {
 		// Solo si el sitio está libre, para que no se amontonen.
-		PcVsPelletSpot spots[16];
-		const int n = pc_vs_arena_pellet_spots(spots, 16);
+		PcVsPelletSpot spots[PC_VS_MAX_PELLETS];
+		const int n = pc_vs_arena_pellet_spots(spots, PC_VS_MAX_PELLETS);
 		for (int i = 0; i < n; i++) {
 			bool busy = false;
 			Iterator it(pelletMgr);
@@ -1390,6 +1403,299 @@ static u64 pcVsHashMode()
 	return h;
 }
 
+// VS y misiones: pastillas del mapa.
+static void pcCustomSpawnPellets(MapMgr* map)
+{
+	PcVsPelletSpot spots[PC_VS_MAX_PELLETS];
+	const int n = pc_vs_arena_pellet_spots(spots, PC_VS_MAX_PELLETS);
+	for (int i = 0; i < n; i++) {
+		if (pc_mission_active() && pc_mission_pellet_done(i)) continue; // ya entregada otro día
+		Pellet* pellet = pelletMgr->newPellet(spots[i].pelletId, nullptr);
+		if (!pellet) continue;
+		Vector3f pos(spots[i].x, 0.0f, spots[i].z);
+		pos.y = map->getMinY(pos.x, pos.z, true);
+		pellet->init(pos);
+		pellet->startAI(0);
+	}
+}
+
+// Misiones: jefes puestos en el editor (objetivo "boss") y compuertas,
+// puertas y llaves, con su índice en el mapa (lo que se acaba un día ya no
+// sale los siguientes).
+static std::vector<std::pair<int, Creature*>> sCustomBosses, sCustomEnemies, sCustomObjects;
+// Cebollas enterradas que aún no ha encontrado nadie.
+static std::vector<GoalItem*> sDormantOnions;
+// Enemigos sacados por disparadores de oleada (objetivo "waves").
+static std::vector<Creature*> sWaveEnemies;
+// Acción «cámara»: las cámaras miran otra cosa hasta que se acaba el tiempo.
+static bool sCameraFocus = false;
+
+static void pcCameraLookAt(Creature* target)
+{
+	PcamCameraManager* mgrs[2] = { cameraMgrP1 ? cameraMgrP1 : cameraMgr, cameraMgrP2 };
+	for (int i = 0; i < 2; i++) {
+		if (!mgrs[i] || !mgrs[i]->mCamera) continue;
+		Creature* t = target ? target : static_cast<Creature*>(naviMgr->getNavi(i));
+		if (t) mgrs[i]->mCamera->setTarget(t);
+	}
+}
+
+// Lo que haya más cerca de (x, z): construcciones, enemigos, cebollas, nave
+// y pastillas (o nada a más de 600).
+static Creature* pcNearestThing(f32 x, f32 z)
+{
+	Creature* best = nullptr;
+	f32 bestD      = 600.0f * 600.0f;
+	auto consider  = [&](Creature* c) {
+		if (!c || !c->isAlive()) return;
+		const f32 dx = c->mSRT.t.x - x, dz = c->mSRT.t.z - z, d = dx * dx + dz * dz;
+		if (d < bestD) {
+			bestD = d;
+			best  = c;
+		}
+	};
+	for (const auto& o : sCustomObjects) consider(o.second);
+	for (const auto& e : sCustomEnemies) consider(e.second);
+	Iterator items(itemMgr->getMeltingPotMgr());
+	CI_LOOP(items) consider(*items);
+	Iterator pellets(pelletMgr);
+	CI_LOOP(pellets) consider(*pellets);
+	return best;
+}
+
+// Disparador «romper o terminar»: como si se cargara terminada (doLoad).
+static void pcFinishObject(Creature* c)
+{
+	u8 buf[256];
+	RamStream out(buf, sizeof(buf));
+	if (c->mObjType == OBJTYPE_WorkObject) {
+		WorkObject* w = static_cast<WorkObject*>(c);
+		if (w->isBridge()) {
+			Bridge* b = static_cast<Bridge*>(w);
+			for (int i = 0; i < b->getStage(); i++) out.writeFloat(b->mMaxHealth);
+		} else if (w->isHinderRock()) {
+			out.writeByte(2);
+		} else {
+			return;
+		}
+	} else if (c->mObjType == OBJTYPE_SluiceSoft || c->mObjType == OBJTYPE_SluiceHard || c->mObjType == OBJTYPE_SluiceBomb) {
+		BuildingItem* g = static_cast<BuildingItem*>(c);
+		out.writeFloat(0.0f);
+		out.writeFloat(g->mMaxHealth);
+		out.writeInt(g->mNumStages);
+		out.writeInt(g->mNumStages);
+		out.writeInt(g->mSAICtx.mCurrAnimId);
+	} else {
+		return;
+	}
+	RamStream in(buf, out.getPosition());
+	c->doLoad(in);
+}
+
+// Mapas propios con generadores del juego: su caché (la que la historia guarda
+// al acabar el día) va al guardado de la misión, en el hueco de Impact Site
+// (el StageInfo de la arena). La de la historia se aparta y se devuelve.
+static std::vector<u8> pcGenCacheSnapshot()
+{
+	std::vector<u8> buf(GENCACHE_HEAP_SIZE + 4096);
+	RamStream out(buf.data(), int(buf.size()));
+	generatorCache->saveCard(out);
+	buf.resize(size_t(out.getPosition()));
+	return buf;
+}
+
+static void pcGenCacheRestore(std::vector<u8> buf)
+{
+	if (buf.empty()) return;
+	RamStream in(buf.data(), int(buf.size()));
+	generatorCache->loadCard(in);
+}
+
+static std::string pcHex(const std::vector<u8>& bytes)
+{
+	static const char kDigits[] = "0123456789abcdef";
+	std::string hex;
+	hex.reserve(bytes.size() * 2);
+	for (u8 b : bytes) {
+		hex += kDigits[b >> 4];
+		hex += kDigits[b & 15];
+	}
+	return hex;
+}
+
+static std::vector<u8> pcUnhex(const std::string& hex)
+{
+	auto nib = [](char c) { return c >= 'a' ? c - 'a' + 10 : c - '0'; };
+	std::vector<u8> out(hex.size() / 2);
+	for (size_t i = 0; i < out.size(); i++) out[i] = u8(nib(hex[2 * i]) << 4 | nib(hex[2 * i + 1]));
+	return out;
+}
+
+static void pcMissionSaveGenCache()
+{
+	if (!generatorList || !flowCont.mCurrentStage) return;
+	bool any = false;
+	Generator* gen;
+	FOREACH_NODE_REUSE(Generator, generatorList->mGenListHead->mChild, gen)
+	{
+		any = any || (gen->mCarryOverFlags & GENCARRY_SaveGenerator);
+	}
+	if (!any) return;
+	const std::vector<u8> keep = pcGenCacheSnapshot();
+	generatorCache->initGame();
+	generatorCache->beginSave(flowCont.mCurrentStage->mStageIndex);
+	FOREACH_NODE_REUSE(Generator, generatorList->mGenListHead->mChild, gen)
+	{
+		if (gen->mCarryOverFlags & GENCARRY_SaveGenerator) generatorCache->saveGenerator(gen);
+	}
+	FOREACH_NODE_REUSE(Generator, generatorList->mGenListHead->mChild, gen)
+	{
+		if ((gen->mCarryOverFlags & GENCARRY_SaveGenerator) && (gen->mCarryOverFlags & GENCARRY_SaveCreature)) {
+			generatorCache->saveGeneratorCreature(gen);
+		}
+	}
+	// Las piezas de la nave no: las lleva la misión.
+	generatorCache->endSave();
+	pc_mission_set_gen_cache(pcHex(pcGenCacheSnapshot()));
+	pcGenCacheRestore(keep);
+}
+
+// Misiones: el estado de una construcción (Creature::doSave / doLoad, el mismo
+// que usa el guardado de la historia), en hex para el guardado de la misión.
+static std::string pcSaveObjectState(Creature* obj)
+{
+	u8 buf[256];
+	RamStream out(buf, sizeof(buf));
+	obj->doSave(out);
+	static const char kHex[] = "0123456789abcdef";
+	std::string hex;
+	for (int i = 0; i < out.getPosition() && i < int(sizeof(buf)); i++) {
+		hex += kHex[buf[i] >> 4];
+		hex += kHex[buf[i] & 15];
+	}
+	return hex;
+}
+
+static void pcLoadObjectState(Creature* obj, int index)
+{
+	if (!pc_mission_active()) return;
+	const std::string& hex = pc_mission_object_state(index);
+	if (hex.empty() || hex.size() % 2 || hex.size() > 512) return;
+	u8 buf[256];
+	auto nib = [](char c) { return c >= 'a' ? c - 'a' + 10 : c - '0'; };
+	const int n = int(hex.size() / 2);
+	for (int i = 0; i < n; i++) buf[i] = u8(nib(hex[size_t(2 * i)]) << 4 | nib(hex[size_t(2 * i + 1)]));
+	RamStream in(buf, n);
+	obj->doLoad(in);
+}
+
+// VS y misiones: guardianes, enemigos y construcciones del mapa (con sus
+// reacciones) y fuentes de néctar.
+static void pcCustomSpawnEntities(MapMgr* map)
+{
+	sCustomBosses.clear();
+	sCustomEnemies.clear();
+	sCustomObjects.clear();
+	const bool mission = pc_mission_active();
+	// Bulborbs grandes durmiendo junto a las medianas custodiadas.
+	PcVsGuardSpot guards[PC_VS_MAX_GUARDS];
+	const int ng = pc_vs_arena_guard_spots(guards, PC_VS_MAX_GUARDS);
+	for (int i = 0; i < ng; i++) {
+		Teki* teki = tekiMgr->newTeki(TEKI_Swallow);
+		if (!teki) continue;
+		TekiPersonality pers;
+		pers.mPosition.set(guards[i].x, map->getMinY(guards[i].x, guards[i].z, true), guards[i].z);
+		pers.mNestPosition  = pers.mPosition;
+		pers.mFaceDirection = i == 0 ? 1.5707963f : -1.5707963f;
+		pers.setF(TekiPersonality::FLT_TerritoryRange, 250.0f);
+		teki->mPersonality->input(pers);
+		teki->reset();
+		teki->startAI(0);
+		teki->mSRT.r.set(0.0f, pers.mFaceDirection, 0.0f);
+		pcVsWatch(teki, guards[i].reaction, VS_TRIGGER_Defeated);
+	}
+
+	// Enemigos y jefes puestos en el editor.
+	PcVsEnemySpot enemies[PC_VS_MAX_ENEMIES];
+	const int ne = pc_vs_arena_enemy_spots(enemies, PC_VS_MAX_ENEMIES);
+	for (int i = 0; i < ne; i++) {
+		if (mission && !pc_mission_enemy_spawns(i)) continue; // derrotado y no vuelve, o no es su día
+		Creature* enemy = pcVsSpawnEnemy(map, enemies[i].teki, enemies[i].boss, enemies[i].x, enemies[i].z, enemies[i].face);
+		if (enemy && enemies[i].boss >= 0) sCustomBosses.push_back({ i, enemy });
+		if (enemy) sCustomEnemies.push_back({ i, enemy });
+		pcVsWatch(enemy, enemies[i].reaction, VS_TRIGGER_Defeated);
+	}
+
+	// Construcciones: puentes y rampas que construyen los Pikmin, bloques que
+	// se empujan y puertas que se derriban.
+	PcVsObjectSpot objects[PC_VS_MAX_OBJECTS];
+	const int no   = pc_vs_arena_object_spots(objects, PC_VS_MAX_OBJECTS);
+	sVsNectarCount = 0;
+	for (int i = 0; i < no; i++) {
+		const PcVsObjectSpot& o = objects[i];
+		if (mission && pc_mission_object_done(i)) continue; // rota o usada otro día
+		Vector3f pos(o.x, 0.0f, o.z);
+		pos.y = map->getMinY(pos.x, pos.z, true) + o.y;
+		if (o.kind == PC_VS_OBJ_NECTAR) {
+			if (sVsNectarCount < PC_VS_MAX_OBJECTS) sVsNectar[sVsNectarCount++] = { o.x, o.z, 10.0f };
+			continue;
+		}
+		if (o.kind == PC_VS_OBJ_KEY || o.kind == PC_VS_OBJ_KEY_DOOR) {
+			// Llave y puerta con cerradura (en el juego, sin usar): el capitán
+			// coge la llave al tocarla y la gasta al tocar la puerta, que se
+			// hunde y desaparece. Ver Navi::collisionCallback.
+			Creature* obj = itemMgr->birth(o.kind == PC_VS_OBJ_KEY ? OBJTYPE_Key : OBJTYPE_Gate);
+			if (!obj) continue;
+			obj->init(pos);
+			obj->mFaceDirection = o.face;
+			obj->mSRT.r.set(0.0f, o.face, 0.0f);
+			if (o.kind == PC_VS_OBJ_KEY_DOOR) static_cast<DoorItem*>(obj)->mLabelText = "";
+			// Sin vida, la colisión las ignora (isAlive mira mHealth > 0).
+			obj->mHealth = obj->mMaxHealth = 1.0f;
+			obj->startAI(0);
+			pcVsWatch(obj, o.reaction, o.kind == PC_VS_OBJ_KEY ? VS_TRIGGER_Hidden : VS_TRIGGER_Door);
+			sCustomObjects.push_back({ i, obj });
+			continue;
+		}
+		if (o.kind >= PC_VS_OBJ_GATE_SOFT) {
+			const int type = o.kind == PC_VS_OBJ_GATE_SOFT ? OBJTYPE_SluiceSoft : o.kind == PC_VS_OBJ_GATE_HARD ? OBJTYPE_SluiceHard : OBJTYPE_SluiceBomb;
+			if (BuildingItem* gate = static_cast<BuildingItem*>(itemMgr->birth(type))) {
+				gate->mNumStages = o.kind == PC_VS_OBJ_GATE_BOMB ? 2 : 3;
+				gate->init(pos);
+				gate->mFaceDirection = o.face;
+				gate->mSRT.r.set(0.0f, o.face, 0.0f);
+				gate->startAI(0);
+				if (gate->mWayPoint) gate->mWayPoint->setFlag(false);
+				pcLoadObjectState(gate, i); // golpes de otro día
+				pcVsWatch(gate, o.reaction, VS_TRIGGER_Building);
+				sCustomObjects.push_back({ i, gate });
+			}
+			continue;
+		}
+		// Forma del WorkObjectMgr: 0 puente, 1 rampa de subida, 2 de bajada, 3 bloque, 4 puente largo.
+		static const int kShape[] = { 0, 4, 1, 2, 3 };
+		const bool rock = o.kind == PC_VS_OBJ_PUSH_ROCK;
+		Creature* obj   = workObjectMgr->birth(rock ? 1 : 0, kShape[o.kind]);
+		if (!obj) continue;
+		obj->init(pos);
+		obj->mSRT.r.set(0.0f, o.face, 0.0f);
+		obj->mFaceDirection = o.face;
+		if (rock) {
+			HinderRock* box            = static_cast<HinderRock*>(obj);
+			box->mDestinationPosition  = Vector3f(pos.x + sinf(o.face) * o.push, pos.y, pos.z + cosf(o.face) * o.push);
+			box->mAmountPushersToStart = 10;
+			box->mPushSpeed            = 50.0f;
+		}
+		// Trabajo por tramo del puente (en el juego, de 1 a 4).
+		obj->mHealth    = f32(o.work);
+		obj->mMaxHealth = obj->mHealth;
+		obj->startAI(0);
+		pcLoadObjectState(obj, i); // tramos construidos o roca ya empujada otro día
+		pcVsWatch(obj, o.reaction, VS_TRIGGER_Work);
+		sCustomObjects.push_back({ i, obj });
+	}
+}
+
 /// VS (fase 2): cada jugador recibe sus tres cebollas, 15 Pikmin (5 de cada
 /// color) en su grupo, y aparecen las pastillas de prueba del mapa.
 static void pcVsSetupBases(MapMgr* map)
@@ -1446,16 +1752,7 @@ static void pcVsSetupBases(MapMgr* map)
 	}
 	GameStat::update();
 
-	PcVsPelletSpot spots[16];
-	const int n = pc_vs_arena_pellet_spots(spots, 16);
-	for (int i = 0; i < n; i++) {
-		Pellet* pellet = pelletMgr->newPellet(spots[i].pelletId, nullptr);
-		if (!pellet) continue;
-		Vector3f pos(spots[i].x, 0.0f, spots[i].z);
-		pos.y = map->getMinY(pos.x, pos.z, true);
-		pellet->init(pos);
-		pellet->startAI(0);
-	}
+	pcCustomSpawnPellets(map);
 
 	// Cohete de cada jugador: recibe las piezas.
 	for (int player = 0; player < 2; player++) {
@@ -1473,8 +1770,8 @@ static void pcVsSetupBases(MapMgr* map)
 	}
 
 	// Piezas del principio (la gorda sale en el minuto 5).
-	PcVsPieceSpot pieces[16];
-	const int np = pc_vs_arena_piece_spots(pieces, 16);
+	PcVsPieceSpot pieces[PC_VS_MAX_PIECES];
+	const int np = pc_vs_arena_piece_spots(pieces, PC_VS_MAX_PIECES);
 	for (int i = 0; i < np; i++) {
 		pcVsSpawnPellet(map, pieces[i].part ? pieces[i].part : sVsPieceIds[pieces[i].kind], pieces[i].x, pieces[i].z);
 	}
@@ -1506,94 +1803,301 @@ static void pcVsSetupBases(MapMgr* map)
 		}
 	}
 
-	// Bulborbs grandes durmiendo junto a las medianas custodiadas.
-	PcVsGuardSpot guards[4];
-	const int ng = pc_vs_arena_guard_spots(guards, 4);
-	for (int i = 0; i < ng; i++) {
-		Teki* teki = tekiMgr->newTeki(TEKI_Swallow);
-		if (!teki) continue;
-		TekiPersonality pers;
-		pers.mPosition.set(guards[i].x, map->getMinY(guards[i].x, guards[i].z, true), guards[i].z);
-		pers.mNestPosition  = pers.mPosition;
-		pers.mFaceDirection = i == 0 ? 1.5707963f : -1.5707963f;
-		pers.setF(TekiPersonality::FLT_TerritoryRange, 250.0f);
-		teki->mPersonality->input(pers);
-		teki->reset();
-		teki->startAI(0);
-		teki->mSRT.r.set(0.0f, pers.mFaceDirection, 0.0f);
-		pcVsWatch(teki, guards[i].reaction, VS_TRIGGER_Defeated);
-	}
+	pcCustomSpawnEntities(map);
+}
 
-	// Enemigos y jefes puestos en el editor.
-	PcVsEnemySpot enemies[48];
-	const int ne = pc_vs_arena_enemy_spots(enemies, 48);
-	for (int i = 0; i < ne; i++) {
-		Creature* enemy = pcVsSpawnEnemy(map, enemies[i].teki, enemies[i].boss, enemies[i].x, enemies[i].z, enemies[i].face);
-		pcVsWatch(enemy, enemies[i].reaction, VS_TRIGGER_Defeated);
-	}
+/// Misión (Custom Maps): cebollas, Pikmin del principio, nave y piezas de la
+/// sección "story" del mapa, y lo común con el VS. El capitán ya está en su
+/// sitio (initStage).
+static void pcMissionSetup(MapMgr* map)
+{
+	sVsReactions.clear();
+	const nectar::MapData* m = pc_mission_map();
+	if (!m) return;
+	const nectar::MapStory& st = m->story;
 
-	// Construcciones: puentes y rampas que construyen los Pikmin, bloques que
-	// se empujan y puertas que se derriban.
-	PcVsObjectSpot objects[32];
-	const int no   = pc_vs_arena_object_spots(objects, 32);
-	sVsNectarCount = 0;
-	for (int i = 0; i < no; i++) {
-		const PcVsObjectSpot& o = objects[i];
-		Vector3f pos(o.x, 0.0f, o.z);
-		pos.y = map->getMinY(pos.x, pos.z, true) + o.y;
-		if (o.kind == PC_VS_OBJ_NECTAR) {
-			if (sVsNectarCount < 16) sVsNectar[sVsNectarCount++] = { o.x, o.z, 10.0f };
-			continue;
+	// Sin escenas de la historia: todas cuentan como ya vistas.
+	for (int d = 0; d < DEMOFLAG_COUNT; d++) playerState->mDemoFlags.setFlagOnly(d);
+
+	// Cebollas activas desde el principio (las enterradas, de momento, también).
+	// En una zona de campaña, las de la partida y las que se encuentran aquí
+	// (pc_mission_onions). En coop, los Pikmin del principio se reparten entre
+	// los dos grupos.
+	Navi* navis[2] = { naviMgr->getNavi(0), pc_coop_active() ? naviMgr->getNavi(1) : nullptr };
+	sDormantOnions.clear();
+	sWaveEnemies.clear();
+	sCameraFocus = false;
+	for (const PcMissionOnion& o : pc_mission_onions()) {
+		if (o.dormant) {
+			// Enterrada: dormida (GOAL_BootInit) hasta que la encuentre un
+			// capitán (pcMissionUpdate).
+			playerState->mContainerFlag &= u8(~((1 << o.color) | (1 << (o.color + 3))));
+		} else {
+			playerState->setContainer(o.color);
+			playerState->setBootContainer(o.color);
 		}
-		if (o.kind == PC_VS_OBJ_KEY || o.kind == PC_VS_OBJ_KEY_DOOR) {
-			// Llave y puerta con cerradura (en el juego, sin usar): el capitán
-			// coge la llave al tocarla y la gasta al tocar la puerta, que se
-			// hunde y desaparece. Ver Navi::collisionCallback.
-			Creature* obj = itemMgr->birth(o.kind == PC_VS_OBJ_KEY ? OBJTYPE_Key : OBJTYPE_Gate);
-			if (!obj) continue;
-			obj->init(pos);
-			obj->mFaceDirection = o.face;
-			obj->mSRT.r.set(0.0f, o.face, 0.0f);
-			if (o.kind == PC_VS_OBJ_KEY_DOOR) static_cast<DoorItem*>(obj)->mLabelText = "";
-			// Sin vida, la colisión las ignora (isAlive mira mHealth > 0).
-			obj->mHealth = obj->mMaxHealth = 1.0f;
-			obj->startAI(0);
-			pcVsWatch(obj, o.reaction, o.kind == PC_VS_OBJ_KEY ? VS_TRIGGER_Hidden : VS_TRIGGER_Door);
-			continue;
-		}
-		if (o.kind >= PC_VS_OBJ_GATE_SOFT) {
-			const int type = o.kind == PC_VS_OBJ_GATE_SOFT ? OBJTYPE_SluiceSoft : o.kind == PC_VS_OBJ_GATE_HARD ? OBJTYPE_SluiceHard : OBJTYPE_SluiceBomb;
-			if (BuildingItem* gate = static_cast<BuildingItem*>(itemMgr->birth(type))) {
-				gate->mNumStages = o.kind == PC_VS_OBJ_GATE_BOMB ? 2 : 3;
-				gate->init(pos);
-				gate->mFaceDirection = o.face;
-				gate->mSRT.r.set(0.0f, o.face, 0.0f);
-				gate->startAI(0);
-				if (gate->mWayPoint) gate->mWayPoint->setFlag(false);
-				pcVsWatch(gate, o.reaction, VS_TRIGGER_Building);
+		Vector3f pos(o.x, map->getMinY(o.x, o.z, true), o.z);
+		GoalItem* goal = static_cast<GoalItem*>(itemMgr->birth(OBJTYPE_Goal));
+		if (!goal) continue;
+		goal->setColorType(o.color);
+		goal->init(pos);
+		goal->startAI(0);
+		if (o.dormant) sDormantOnions.push_back(goal);
+		goal->mHeldPikis[Leaf] = goal->mHeldPikis[Bud] = goal->mHeldPikis[Flower] = 0;
+		// Los que pasaron la noche están dentro, cada uno con su hoja, capullo o flor.
+		for (int stage = Leaf; stage <= Flower; stage++) {
+			for (int k = 0; k < o.stages[stage]; k++) {
+				pikiInfMgr.incPiki(o.color, stage);
+				goal->mHeldPikis[stage]++;
+				GameStat::containerPikis.inc(o.color);
 			}
+		}
+
+		// El primer día, los Pikmin de ese color, en el grupo del capitán.
+		const int start = pc_mission_start_pikmin(o.color);
+		for (int i = 0; navis[0] && i < start; i++) {
+			Navi* navi = navis[1] && (i & 1) ? navis[1] : navis[0];
+			Piki* piki = static_cast<Piki*>(pikiMgr->birth());
+			if (!piki) break;
+			GameStat::workPikis.inc(o.color);
+			piki->init(navi);
+			Vector3f at = navi->mSRT.t;
+			at.x += (o.color - 1) * 25.0f + (i / 5) * 12.0f;
+			at.z += (i % 5 - 2) * 20.0f;
+			at.y = map->getMinY(at.x, at.z, true);
+			piki->Creature::init(at);
+			piki->initColor(o.color);
+			piki->changeMode(PikiMode::FormationMode, navi);
+		}
+	}
+	GameStat::update();
+
+	// La nave: recibe las piezas. Por fuera, más arreglada cuantas más lleva.
+	playerState->mShipUpgradeLevel = u8(pc_mission_ship_level());
+	{
+		Vector3f pos(st.ship.x, map->getMinY(st.ship.x, st.ship.z, true), st.ship.z);
+		if (UfoItem* ufo = static_cast<UfoItem*>(itemMgr->birth(OBJTYPE_Ufo))) {
+			ufo->init(pos);
+			ufo->mFaceDirection = st.ship.face;
+			ufo->mSRT.r.set(0.0f, st.ship.face, 0.0f);
+			ufo->startAI(0);
+		}
+	}
+	for (size_t i = 0; i < st.parts.size(); i++) {
+		if (!pc_mission_part_done(int(i))) pcVsSpawnPellet(map, st.parts[i].id, st.parts[i].x, st.parts[i].z);
+	}
+
+	pcCustomSpawnPellets(map);
+	pcCustomSpawnEntities(map);
+}
+
+/// Misión: reacciones del mapa y objetivo, cada fotograma de juego.
+static void pcMissionUpdate(MapMgr* map)
+{
+	for (PcVsReactionWatch& watch : sVsReactions) {
+		if (watch.fired || !watch.source) continue;
+		bool fire = false;
+		switch (watch.trigger) {
+		case VS_TRIGGER_Defeated: fire = !watch.source->isAlive(); break;
+		case VS_TRIGGER_Building: fire = static_cast<BuildingItem*>(watch.source)->isCompleted(); break;
+		case VS_TRIGGER_Work: fire = static_cast<WorkObject*>(watch.source)->isFinished(); break;
+		case VS_TRIGGER_Hidden: fire = !watch.source->isVisible(); break;
+		case VS_TRIGGER_Door: fire = static_cast<DoorItem*>(watch.source)->mStateId == DoorState::Vanishing
+		                                  || static_cast<DoorItem*>(watch.source)->mStateId == DoorState::Killed; break;
+		}
+		if (!fire) continue;
+		watch.fired = true;
+		pcVsRunReaction(map, watch);
+	}
+	int bosses = 0;
+	for (const auto& boss : sCustomBosses) {
+		if (boss.second->isAlive()) bosses++;
+	}
+	// Pikmin que quedan: en el campo, brotes y en las cebollas.
+	int pikmin = 0;
+	Iterator it(pikiMgr);
+	CI_LOOP(it)
+	{
+		if ((*it)->isAlive()) pikmin++;
+	}
+	pikmin += GameStat::containerPikis;
+	if (itemMgr) {
+		Iterator items(itemMgr);
+		CI_LOOP(items)
+		{
+			if ((*items)->mObjType == OBJTYPE_Pikihead && (*items)->isAlive()) pikmin++;
+		}
+	}
+	// La cámara vuelve a los capitanes al acabar su tiempo.
+	if (sCameraFocus && pc_mission_camera_hold() <= 0.0f) {
+		pcCameraLookAt(nullptr);
+		sCameraFocus = false;
+	}
+	// Lo que miran los disparadores: Pikmin por color, capitanes, oleadas y
+	// construcciones terminadas o rotas.
+	PcMissionWorld world;
+	world.hour = gameflow.mWorldClock.mTimeOfDay;
+	{
+		Iterator pit(pikiMgr);
+		CI_LOOP(pit)
+		{
+			Piki* piki = static_cast<Piki*>(*pit);
+			if (piki->isAlive() && piki->mColor >= 0 && piki->mColor < 3) world.pikmin[piki->mColor]++;
+		}
+		for (int c = 0; c < 3; c++) world.pikmin[c] += GameStat::containerPikis[c];
+		Iterator items(itemMgr);
+		CI_LOOP(items)
+		{
+			Creature* c = *items;
+			if (c->mObjType != OBJTYPE_Pikihead || !c->isAlive()) continue;
+			const int color = static_cast<PikiHeadItem*>(c)->mSeedColor;
+			if (color >= 0 && color < 3) world.pikmin[color]++;
+		}
+		for (int n = 0; n < 2; n++) {
+			if (Navi* navi = naviMgr->getNavi(n)) {
+				world.cx[world.captains] = navi->mSRT.t.x;
+				world.cz[world.captains] = navi->mSRT.t.z;
+				world.captains++;
+			}
+		}
+		for (Creature* e : sWaveEnemies) world.waveAlive += e->isAlive() ? 1 : 0;
+		for (const auto& obj : sCustomObjects) {
+			Creature* c = obj.second;
+			bool done   = false;
+			switch (c->mObjType) {
+			case OBJTYPE_Key: done = !c->isVisible(); break;
+			case OBJTYPE_Gate:
+				done = static_cast<DoorItem*>(c)->mStateId == DoorState::Vanishing || static_cast<DoorItem*>(c)->mStateId == DoorState::Killed;
+				break;
+			case OBJTYPE_WorkObject: done = static_cast<WorkObject*>(c)->isFinished(); break;
+			default: done = static_cast<BuildingItem*>(c)->isCompleted(); break;
+			}
+			if (done) pc_mission_note_object_done(obj.first);
+		}
+	}
+	// Cebollas enterradas: se despiertan al acercarse un capitán (como el
+	// descubrimiento de la historia, sin la cinemática): sale su primera semilla.
+	const f32 bootRadius = demoParms ? demoParms->mParms.mOnionBootTriggerRadius() : 150.0f;
+	for (size_t k = 0; k < sDormantOnions.size();) {
+		GoalItem* goal = sDormantOnions[k];
+		bool near      = false;
+		for (int n = 0; n < 2; n++) {
+			Navi* navi = naviMgr->getNavi(n);
+			if (navi && qdist2(navi, goal) <= bootRadius) near = true;
+		}
+		if (!near) {
+			k++;
 			continue;
 		}
-		// Forma del WorkObjectMgr: 0 puente, 1 rampa de subida, 2 de bajada, 3 bloque, 4 puente largo.
-		static const int kShape[] = { 0, 4, 1, 2, 3 };
-		const bool rock = o.kind == PC_VS_OBJ_PUSH_ROCK;
-		Creature* obj   = workObjectMgr->birth(rock ? 1 : 0, kShape[o.kind]);
-		if (!obj) continue;
-		obj->init(pos);
-		obj->mSRT.r.set(0.0f, o.face, 0.0f);
-		obj->mFaceDirection = o.face;
-		if (rock) {
-			HinderRock* box            = static_cast<HinderRock*>(obj);
-			box->mDestinationPosition  = Vector3f(pos.x + sinf(o.face) * o.push, pos.y, pos.z + cosf(o.face) * o.push);
-			box->mAmountPushersToStart = 10;
-			box->mPushSpeed            = 50.0f;
-		}
-		// Trabajo por tramo del puente (en el juego, de 1 a 4).
-		obj->mHealth    = f32(o.work);
-		obj->mMaxHealth = obj->mHealth;
-		obj->startAI(0);
-		pcVsWatch(obj, o.reaction, VS_TRIGGER_Work);
+		playerState->setContainer(goal->mOnionColour);
+		goal->startBoot();
+		C_SAI(goal)->start(goal, GoalAI::GOAL_BootEmit);
+		pc_mission_note_onion_found(goal->mOnionColour);
+		SeSystem::playSysSe(SYSSE_CONTAINER_OK);
+		sDormantOnions.erase(sDormantOnions.begin() + long(k));
 	}
+	pc_mission_note_counts(GameStat::bornPikis, GameStat::killTekis);
+	pc_mission_update(gsys->getFrameTime(), pikmin, bosses, world);
+	// Disparadores: lo que hace el juego (aparecer, romper). Mensajes, cuadros,
+	// cuentas atrás, ganar y perder los lleva la misión (y el HUD).
+	if (const nectar::MapData* m = pc_mission_map()) {
+		int t, a;
+		bool wave;
+		while (pc_mission_take_action(t, a, wave)) {
+			const nectar::MapAction& act = m->story.triggers[size_t(t)].actions[size_t(a)];
+			const nectar::MapReaction& r = act.reaction;
+			Creature* target             = nullptr;
+			for (const auto& obj : sCustomObjects) {
+				if (obj.first == act.index) target = obj.second;
+			}
+			if (act.type == nectar::MAPACT_Break) {
+				if (target) pcFinishObject(target);
+			} else if (act.type == nectar::MAPACT_Camera) {
+				if (Creature* look = pcNearestThing(act.x, act.z)) {
+					pcCameraLookAt(look);
+					sCameraFocus = true;
+					pc_mission_set_camera_hold(f32(act.seconds));
+				}
+			} else if (r.kind != nectar::MAPREACT_None) {
+				Vector3f at(act.x, 0.0f, act.z);
+				if (act.type == nectar::MAPACT_SpawnAt) {
+					const nectar::MapObject* o = act.index >= 0 && act.index < int(m->objects.size()) ? &m->objects[size_t(act.index)] : nullptr;
+					if (target) at = target->mSRT.t;
+					else if (o) at = Vector3f(o->x, 0.0f, o->z);
+				}
+				at.y = map->getMinY(at.x, at.z, true);
+				pcRunReactionAt(map, { r.kind, r.pellet, r.teki, r.boss, r.count, r.radius }, at, wave ? &sWaveEnemies : nullptr);
+			}
+		}
+	}
+	// Acabar el día ya (acción, cuenta atrás o límite de tiempo).
+	if (pc_mission_take_end_day()) gameflow.mWorldClock.setTime(pc_mission_end_hour(gameflow.mParameters->mEndHour()));
+
+	// Anochecer: los Pikmin del grupo, los que están junto a una cebolla o la
+	// nave y los brotes pasan la noche en su cebolla; los demás se pierden.
+	if (pc_mission_over() || gameflow.mWorldClock.mTimeOfDay < pc_mission_end_hour(gameflow.mParameters->mEndHour())) return;
+	for (const auto& enemy : sCustomEnemies) {
+		if (!enemy.second->isAlive()) pc_mission_set_enemy_dead(enemy.first);
+	}
+	pcMissionSaveGenCache();
+	for (const auto& obj : sCustomObjects) {
+		Creature* c = obj.second;
+		bool done   = false;
+		switch (c->mObjType) {
+		case OBJTYPE_Key: done = !c->isVisible(); break;
+		case OBJTYPE_Gate:
+			done = static_cast<DoorItem*>(c)->mStateId == DoorState::Vanishing || static_cast<DoorItem*>(c)->mStateId == DoorState::Killed;
+			break;
+		case OBJTYPE_WorkObject:
+			// Puentes y rocas: siempre salen; se guarda cómo están.
+			pc_mission_set_object_state(obj.first, pcSaveObjectState(c));
+			break;
+		default:
+			// Compuertas: rotas ya no salen; a medias, se guarda cómo están.
+			done = static_cast<BuildingItem*>(c)->isCompleted();
+			if (!done) pc_mission_set_object_state(obj.first, pcSaveObjectState(c));
+			break;
+		}
+		if (done) pc_mission_set_object_done(obj.first);
+	}
+	std::vector<Creature*> havens; // cebollas y nave
+	int night[3][3] = {}; // por color y fase (hoja, capullo, flor)
+	int lost        = 0;
+	Iterator hv(itemMgr->getMeltingPotMgr());
+	CI_LOOP(hv)
+	{
+		Creature* c = *hv;
+		if (c->mObjType == OBJTYPE_Ufo) havens.push_back(c);
+		if (c->mObjType == OBJTYPE_Goal) {
+			GoalItem* goal = static_cast<GoalItem*>(c);
+			havens.push_back(goal);
+			if (goal->mOnionColour < 3) {
+				for (int stage = Leaf; stage <= Flower; stage++) night[goal->mOnionColour][stage] += goal->mHeldPikis[stage];
+			}
+		}
+	}
+	Iterator pit(pikiMgr);
+	CI_LOOP(pit)
+	{
+		Piki* piki = static_cast<Piki*>(*pit);
+		if (!piki->isAlive() || piki->mColor < 0 || piki->mColor >= 3) continue;
+		bool safe = piki->mMode == PikiMode::FormationMode;
+		for (Creature* h : havens) {
+			const f32 dx = h->mSRT.t.x - piki->mSRT.t.x, dz = h->mSRT.t.z - piki->mSRT.t.z;
+			if (dx * dx + dz * dz < 250.0f * 250.0f) safe = true;
+		}
+		if (safe) night[piki->mColor][std::clamp(piki->mHappa, int(Leaf), int(Flower))]++;
+		else lost++;
+	}
+	Iterator sp(itemMgr);
+	CI_LOOP(sp)
+	{
+		Creature* c = *sp;
+		if (c->mObjType != OBJTYPE_Pikihead || !c->isAlive()) continue;
+		const PikiHeadItem* seed = static_cast<PikiHeadItem*>(c);
+		if (seed->mSeedColor >= 0 && seed->mSeedColor < 3) night[seed->mSeedColor][std::clamp(seed->mFlowerStage, int(Leaf), int(Flower))]++;
+	}
+	pc_mission_end_day(night, lost);
 }
 #endif
 
@@ -1658,6 +2162,17 @@ void GameCoreSection::initStage()
 
 	PRINT("--------------- GeneratorCache : preload start\n");
 	memStat->start("genCache");
+#if defined(PIKI_PC_PORT)
+	// Arena (VS y mapas propios): nada de la caché de la historia; en misiones,
+	// la suya de los días anteriores. La de la historia vuelve tras cargar.
+	std::vector<u8> pcStoryGenCache;
+	const bool pcArena = strcmp(flowCont.mCurrStageFilePath, PC_VS_ARENA_STAGE) == 0;
+	if (pcArena) {
+		pcStoryGenCache = pcGenCacheSnapshot();
+		generatorCache->initGame();
+		if (pc_mission_active() && !pc_mission_gen_cache().empty()) pcGenCacheRestore(pcUnhex(pc_mission_gen_cache()));
+	}
+#endif
 	const bool hasAuthoritativeStageCache = generatorCache->preload(flowCont.mCurrentStage->mStageIndex);
 	memStat->end("genCache");
 	PRINT("--------------- GeneratorCache : preload done\n");
@@ -1850,21 +2365,37 @@ void GameCoreSection::initStage()
 #if defined(PIKI_PC_PORT)
 	// VS: la arena no tiene .gen, así que las pastillas que pone el modo se
 	// registran aquí para que se carguen sus modelos.
-	if (pc_vs_active()) {
-		pc_settings_apply_vs_rules(); // reglas del menú previo
-		pc_vs_match_reset();
-		PcVsPelletSpot spots[16];
-		const int n = pc_vs_arena_pellet_spots(spots, 16);
+	// Misión: lo mismo menos lo propio del VS, más sus piezas de la nave.
+	if (pc_vs_active() || pc_mission_active()) {
+		const bool vs = pc_vs_active();
+		if (vs) {
+			pc_settings_apply_vs_rules(); // reglas del menú previo
+			pc_vs_match_reset();
+		} else {
+			pc_mission_begin_day();
+			if (const nectar::MapData* m = pc_mission_map()) {
+				for (const nectar::MapShipPart& part : m->story.parts) pelletMgr->addUseList(part.id);
+				// Lo que sacan los disparadores.
+				for (const nectar::MapTrigger& t : m->story.triggers) {
+					for (const nectar::MapAction& a : t.actions) {
+						const nectar::MapReaction& r = a.reaction;
+						pcVsPreloadReaction({ r.kind, r.pellet, r.teki, r.boss, r.count, r.radius });
+					}
+				}
+			}
+		}
+		PcVsPelletSpot spots[PC_VS_MAX_PELLETS];
+		const int n = pc_vs_arena_pellet_spots(spots, PC_VS_MAX_PELLETS);
 		for (int i = 0; i < n; i++) pelletMgr->addUseList(spots[i].pelletId);
-		pcVsChoosePieces();
+		if (vs) pcVsChoosePieces();
 		for (u32 id : sVsPieceIds) {
-			if (id) pelletMgr->addUseList(id);
+			if (vs && id) pelletMgr->addUseList(id);
 		}
 		tekiMgr->mUsingType[TEKI_Swallow] = true; // Bulborbs custodios
-		itemMgr->addUseList(OBJTYPE_SluiceBomb);   // compuertas de roca-bomba
+		if (vs) itemMgr->addUseList(OBJTYPE_SluiceBomb); // compuertas de roca-bomba
 		// Piezas concretas elegidas en el editor: puntos según lo que pesan.
-		PcVsPieceSpot pieces[16];
-		const int np = pc_vs_arena_piece_spots(pieces, 16);
+		PcVsPieceSpot pieces[PC_VS_MAX_PIECES];
+		const int np = vs ? pc_vs_arena_piece_spots(pieces, PC_VS_MAX_PIECES) : 0;
 		for (int i = 0; i < np; i++) {
 			if (!pieces[i].part) continue;
 			pelletMgr->addUseList(pieces[i].part);
@@ -1873,8 +2404,8 @@ void GameCoreSection::initStage()
 			pc_vs_set_piece_points(pieces[i].part, carry <= 15 ? 1 : carry <= 25 ? 2 : carry <= 35 ? 3 : 5);
 		}
 		// Enemigos, jefes y construcciones del editor: sus modelos.
-		PcVsEnemySpot enemies[48];
-		const int ne = pc_vs_arena_enemy_spots(enemies, 48);
+		PcVsEnemySpot enemies[PC_VS_MAX_ENEMIES];
+		const int ne = pc_vs_arena_enemy_spots(enemies, PC_VS_MAX_ENEMIES);
 		for (int i = 0; i < ne; i++) {
 			if (enemies[i].teki >= 0) tekiMgr->mUsingType[enemies[i].teki] = true;
 			if (enemies[i].boss >= 0) {
@@ -1884,17 +2415,18 @@ void GameCoreSection::initStage()
 			}
 			pcVsPreloadReaction(enemies[i].reaction);
 		}
-		PcVsGuardSpot guards[4];
-		const int ng = pc_vs_arena_guard_spots(guards, 4);
+		PcVsGuardSpot guards[PC_VS_MAX_GUARDS];
+		const int ng = pc_vs_arena_guard_spots(guards, PC_VS_MAX_GUARDS);
 		for (int i = 0; i < ng; i++) pcVsPreloadReaction(guards[i].reaction);
-		for (int player = 0; player < 2; player++) pcVsPreloadReaction(pc_vs_arena_gate_reaction(player));
-		PcVsObjectSpot objects[32];
-		const int no = pc_vs_arena_object_spots(objects, 32);
+		for (int player = 0; player < 2 && vs; player++) pcVsPreloadReaction(pc_vs_arena_gate_reaction(player));
+		PcVsObjectSpot objects[PC_VS_MAX_OBJECTS];
+		const int no = pc_vs_arena_object_spots(objects, PC_VS_MAX_OBJECTS);
 		for (int i = 0; i < no; i++) {
 			static const int kShape[] = { 0, 4, 1, 2, 3 };
 			if (objects[i].kind <= PC_VS_OBJ_PUSH_ROCK) workObjectMgr->addUseList(kShape[objects[i].kind]);
 			else if (objects[i].kind == PC_VS_OBJ_GATE_SOFT) itemMgr->addUseList(OBJTYPE_SluiceSoft);
 			else if (objects[i].kind == PC_VS_OBJ_GATE_HARD) itemMgr->addUseList(OBJTYPE_SluiceHard);
+			else if (objects[i].kind == PC_VS_OBJ_GATE_BOMB) itemMgr->addUseList(OBJTYPE_SluiceBomb);
 			pcVsPreloadReaction(objects[i].reaction);
 		}
 	}
@@ -1945,6 +2477,9 @@ void GameCoreSection::initStage()
 	memStat->start("genCache");
 	generatorCache->load(flowCont.mCurrentStage->mStageIndex);
 	memStat->end("genCache");
+#if defined(PIKI_PC_PORT)
+	if (pcArena) pcGenCacheRestore(pcStoryGenCache);
+#endif
 
 	if (useDay) {
 		PRINT("*** GEN2\n");
@@ -1989,6 +2524,22 @@ void GameCoreSection::initStage()
 			navi->mSRT.r.set(0.0f, face, 0.0f);
 		}
 		pcVsSetupBases(mMapMgr);
+	} else if (pc_mission_active()) {
+		// Misión: cada capitán en su sitio del mapa (en coop, los dos), y lo demás.
+		const nectar::MapData* m = pc_mission_map();
+		for (int i = 0; m && i < 2; i++) {
+			Navi* navi = naviMgr->getNavi(i);
+			const nectar::MapSpot& c = m->story.captains[i < m->story.captainCount ? i : 0];
+			if (navi) {
+				Vector3f pos(c.x, mMapMgr->getMinY(c.x, c.z, true), c.z);
+				navi->mSRT.t          = pos;
+				navi->mLastPosition   = pos;
+				navi->mDayEndPosition = pos;
+				navi->mFaceDirection  = c.face;
+				navi->mSRT.r.set(0.0f, c.face, 0.0f);
+			}
+		}
+		pcMissionSetup(mMapMgr);
 	}
 #endif
 	attentionCamera = new AttentionCamera;
@@ -2315,6 +2866,7 @@ GameCoreSection::GameCoreSection(Controller* controller, MapMgr* mgr, Camera& ca
 	naviMgr = new NaviMgr();
 #if defined(PIKI_PC_PORT)
 	pc_coop_begin_run();
+	pc_mission_begin_run();
 	// VS: reaprovecha el modo versus que Nintendo dejó a medias (Pikmin con
 	// dueño, rivales como enemigos). Se puso a FALSE justo arriba.
 	flowCont.mIsVersusMode = pc_vs_active() ? TRUE : FALSE;
@@ -2778,6 +3330,8 @@ void GameCoreSection::update()
 	pcApplyPendingTutorialSkip();
 	if (pc_vs_active()) {
 		pcVsUpdate(mMapMgr);
+	} else if (pc_mission_active()) {
+		pcMissionUpdate(mMapMgr);
 	}
 #endif
 #if defined(PIKI_PC_PORT) && PIKI_DEBUG_KEYS

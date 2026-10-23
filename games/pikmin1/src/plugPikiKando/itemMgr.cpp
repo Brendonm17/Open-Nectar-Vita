@@ -426,7 +426,13 @@ ItemMgr::ItemMgr()
 		mItemShapes[i] = nullptr;
 	}
 
+#if defined(PIKI_PC_PORT)
+	// Mapas del editor: hasta 64 construcciones (puertas, llaves...), además de
+	// cebollas, brotes y bombas.
+	create(192);
+#else
 	create(96);
+#endif
 
 	addUseList(OBJTYPE_Goal);
 	addUseList(OBJTYPE_Ufo);

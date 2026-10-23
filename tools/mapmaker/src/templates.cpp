@@ -1,5 +1,8 @@
 #include "templates.h"
 
+#include "course_import.h"
+#include "document.h"
+
 #include "nectar_mapcore/i18n.h"
 
 #include <algorithm>
@@ -12,6 +15,8 @@ using nectar::tr;
 using namespace nectar;
 
 namespace {
+
+std::string gTemplateDataDir;
 
 constexpr double kPi = 3.14159265358979323846;
 
@@ -49,12 +54,23 @@ struct Pt {
 	std::vector<double> w; ///< peso de cada material de la paleta
 };
 
+double snoise(double x, double z, double scale, unsigned seed);
+double baseZone(double x);
+double baseIn(double x);
+
 /// Ayuda para montar una plantilla: parte del mapa por defecto (bases,
 /// cebollas, cohetes y murallas curvas) y se rellena el terreno y las cosas.
 struct Builder {
 	MapDoc d;
 	unsigned seed = 1;
 	std::function<void(double, double, Pt&)> field;
+	/// Contorno irregular si `field` no dice dónde hay suelo; relieve fino
+	/// (ruido) y acantilados de roca en las pendientes fuertes.
+	bool organic      = true;
+	double outlinePower = 2.8, outlineWave = 90; ///< forma del contorno y ondas grandes
+	double relief     = 7;
+	int cliffMat      = -1;
+	double cliffSlope = 1.0;
 
 	Builder(const char* name, const char* stage)
 	{
@@ -66,6 +82,7 @@ struct Builder {
 		d.pieces.clear();
 		d.terrain.palette.clear();
 		d.terrain.layers.clear();
+		nectar::resampleTerrain(d, 25.0); // detalle fino
 	}
 	int mat(const Mat& m)
 	{
@@ -83,6 +100,13 @@ struct Builder {
 		p.w.assign(d.terrain.palette.size(), 0.0);
 		if (!p.w.empty()) p.w[0] = 1;
 		field(x, z, p);
+		if (organic && p.in >= 1000) {
+			// Borde redondeado e irregular, con las bases enteras.
+			const double ax = std::fabs(x) / 1380.0, az = std::fabs(z) / (d.maxZ - 30.0);
+			const double v  = 1.0 - std::pow(std::pow(ax, outlinePower) + std::pow(az, outlinePower), 1.0 / outlinePower);
+			p.in            = std::max(baseIn(x), v * 700.0 + outlineWave * snoise(x, z, 380, 9) + 40.0 * snoise(x, z, 150, 5));
+		}
+		p.h += relief * snoise(x, z, 110, 77) * (1.0 - baseZone(x));
 		return p;
 	}
 	/// Pasa `field` a los campos por punto del terreno.
@@ -188,9 +212,138 @@ struct Builder {
 		arcWall(cx, cz, r, gap + 40, gap + 320);
 		object("gate_soft", cx, cz + (up ? r : -r), 0);
 	}
+	/// Piezas de los niveles del juego (officialPieces) en la mitad de J1 (el
+	/// espejo pone la otra): junto a los bordes (`edge`) o en cualquier sitio
+	/// abierto, siempre en llano y seco y lejos de lo que hay que coger.
+	void pieces(std::vector<const char*> ids, int count, bool edge = true, double minScale = 0.8, double maxScale = 1.25)
+	{
+		int placed = 0;
+		for (int attempt = 0; attempt < count * 160 && placed < count; attempt++) {
+			// Primero junto a los bordes; si no caben, donde haya sitio.
+			if (attempt == count * 80) edge = false;
+			const double x = lerp(d.minX + 80, -150.0, rnd()), z = lerp(d.minZ + 80, d.maxZ - 80, rnd());
+			const OfficialPiece* pc = findOfficialPiece(ids[std::size_t(rnd() * double(ids.size())) % ids.size()]);
+			if (!pc || std::fabs(x) > 1000 || len(x, z) < 330) continue;
+			// Las salidas de la base (puerta y pasos) libres.
+			if (x < -820 && (std::fabs(z) < 140 || std::fabs(std::fabs(z) - 445) < 160)) continue;
+			const double scale = lerp(minScale, maxScale, rnd());
+			const double half  = std::max(pc->hi[0] - pc->lo[0], pc->hi[2] - pc->lo[2]) * 0.5 * scale;
+			const Pt p         = sample(x, z);
+			if (p.wet > -30 || p.in < 30) continue;
+			if (edge && p.in > half + 260) continue;
+			bool ok = true;
+			for (int k = 0; k < 8 && ok; k++) {
+				const double a = k * kPi / 4, qx = x + std::cos(a) * half, qz = z + std::sin(a) * half;
+				const Pt q     = sample(qx, qz);
+				ok             = q.in > 0 && q.wet < -10 && std::fabs(q.h - p.h) < 40;
+			}
+			if (!ok) continue;
+			// Las que chocan, solo en sitios abiertos: nunca tapando un
+			// pasillo (alrededor, suelo en casi todas las direcciones).
+			if (pc->collide) {
+				int open = 0;
+				for (int k = 0; k < 8; k++) {
+					const double a = k * kPi / 4 + 0.3;
+					const Pt q = sample(x + std::cos(a) * (half + 150), z + std::sin(a) * (half + 150));
+					open += q.in > 0 && std::fabs(q.h - p.h) < 30 ? 1 : 0; // y llano: ni rampas ni bordes de meseta
+				}
+				if (open < 6) continue;
+			}
+			const double keep = half + 140;
+			auto near         = [&](double ox, double oz, double r) { return len(ox - x, oz - z) < r || len(-ox - x, -oz - z) < r; };
+			bool crowded      = false;
+			for (const DocPiece& o : d.pieces) crowded = crowded || near(o.x, o.z, keep);
+			for (const DocPellet& o : d.pellets) crowded = crowded || near(o.x, o.z, keep);
+			for (const DocObject& o : d.objects) crowded = crowded || near(o.x, o.z, keep + 80);
+			for (const DocEnemy& o : d.enemies) crowded = crowded || near(o.x, o.z, keep);
+			for (const DocGuard& o : d.guards) crowded = crowded || near(o.x, o.z, keep);
+			for (const DocShipPart& o : d.story.parts) crowded = crowded || len(o.x - x, o.z - z) < keep || len(-o.x - x, -o.z - z) < keep;
+			for (const DocStoryOnion& o : d.story.onions) crowded = crowded || len(o.x - x, o.z - z) < keep + 60;
+			crowded = crowded || len(d.story.ship.x - x, d.story.ship.z - z) < keep + 120 || len(d.story.captains[0].x - x, d.story.captains[0].z - z) < keep + 60;
+			for (const DocProp& o : d.props) {
+				if (o.asset.rfind("cut:", 0) == 0) crowded = crowded || near(o.x, o.z, half + 180);
+			}
+			if (crowded) continue;
+			DocProp pr;
+			pr.asset   = pc->asset();
+			pr.x       = x;
+			pr.z       = z;
+			pr.y       = p.h - 3;
+			pr.ry      = rnd() * 360.0;
+			pr.scale   = scale;
+			pr.collide = pc->collide;
+			pr.ground  = false;
+			d.props.push_back(pr);
+			placed++;
+		}
+	}
+	/// Objetos del juego del catálogo ("plnt:4", "item:kusa"...) por el campo
+	/// abierto de J1, repetidos en el lado de J2. Sin datos del juego, nada.
+	void gens(std::vector<std::string> keys, int count, double spacing = 160)
+	{
+		if (gTemplateDataDir.empty()) return;
+		int placed = 0;
+		for (int attempt = 0; attempt < count * 60 && placed < count; attempt++) {
+			const double x = lerp(d.minX + 80, -60.0, rnd()), z = lerp(d.minZ + 80, d.maxZ - 80, rnd());
+			const GameGenChoice* c = findGameGen(gTemplateDataDir, keys[std::size_t(rnd() * double(keys.size())) % keys.size()]);
+			if (!c || std::fabs(x) > 1020 || len(x, z) < 200) continue;
+			const Pt p = sample(x, z);
+			if (p.in < 50 || p.wet > -20) continue;
+			bool crowded = false;
+			for (const DocGen& o : d.gens) crowded = crowded || len(o.x - x, o.z - z) < spacing || len(-o.x - x, -o.z - z) < spacing;
+			for (const DocProp& o : d.props) crowded = crowded || len(o.x - x, o.z - z) < 70;
+			for (const DocPiece& o : d.pieces) crowded = crowded || len(o.x - x, o.z - z) < 80;
+			for (const DocPellet& o : d.pellets) crowded = crowded || len(o.x - x, o.z - z) < 80;
+			for (const DocShipPart& o : d.story.parts) crowded = crowded || len(o.x - x, o.z - z) < 80;
+			if (crowded) continue;
+			DocGen g = c->gen;
+			g.x      = x;
+			g.z      = z;
+			g.y      = p.h;
+			g.mirror = d.symmetric;
+			d.gens.push_back(g);
+			placed++;
+		}
+	}
+	/// Ambiente: brillo, niebla y tinte de la luz.
+	void mood(double brightness, double fog, int r = 255, int g = 255, int bl = 255)
+	{
+		d.brightness = brightness;
+		d.fogScale   = fog;
+		d.tint[0]    = r;
+		d.tint[1]    = g;
+		d.tint[2]    = bl;
+	}
+	/// Pinta de roca las pendientes fuertes (ya horneado el terreno).
+	void paintCliffs()
+	{
+		DocTerrain& g    = d.terrain;
+		const float cell = float(d.cell);
+		const std::vector<std::int16_t> h = g.heights;
+		auto at = [&](int x, int z) { return float(h[std::size_t(g.vertexIndex(std::max(0, std::min(g.nx, x)), std::max(0, std::min(g.nz, z))))]); };
+		for (int iz = 0; iz <= g.nz; iz++) {
+			for (int ix = 0; ix <= g.nx; ix++) {
+				const float gx = (at(ix + 1, iz) - at(ix - 1, iz)) / (2 * cell), gz = (at(ix, iz + 1) - at(ix, iz - 1)) / (2 * cell);
+				const double s = std::hypot(gx, gz);
+				const double a = smooth(cliffSlope * 0.7, cliffSlope, s);
+				if (a <= 0) continue;
+				const std::size_t v = std::size_t(g.vertexIndex(ix, iz));
+				for (std::size_t k = 0; k < g.layers.size(); k++) {
+					std::uint8_t& w = g.layers[k][v];
+					w               = std::uint8_t(std::lround(w + ((int(k) == cliffMat ? 255.0 : 0.0) - w) * a));
+				}
+			}
+		}
+	}
 	MapDoc done()
 	{
+		for (std::size_t k = 0; k < d.terrain.palette.size() && cliffMat < 0; k++) {
+			const DocMaterial& m = d.terrain.palette[k];
+			if (m.source == kRock.source && m.index == kRock.index) cliffMat = int(k);
+		}
+		if (cliffMat < 0) cliffMat = mat(kRock);
 		bake();
+		paintCliffs();
 		// Lo que esté en J1 se repite en J2 (mapa espejo).
 		return d;
 	}
@@ -222,6 +375,12 @@ MapDoc meadow()
 	b.enemy("chappy", -450, 560);
 	b.scatter(kFlowers, 26, 110, [](double, double) { return true; });
 	b.scatter(kMeadow, 30, 70, [](double, double) { return true; });
+	// Piezas de los niveles del juego, plantas del juego y ambiente.
+	b.pieces({ "tocon_grande", "tocon_mediano", "tocon_bajo", "raiz_arco", "rama_curva", "lata_tumbada" }, 6);
+	b.pieces({ "ramita", "ramita_hojas", "helecho", "helecho_2" }, 6, false);
+	b.gens({ "plnt:4", "plnt:0", "plnt:2", "plnt:6" }, 12);
+	b.gens({ "item:kusa" }, 3, 300);
+	b.mood(1.05, 1.0, 255, 248, 235);
 	return b.done();
 }
 
@@ -260,6 +419,11 @@ MapDoc river()
 	auto clear = [](double x, double z) { return len(x + 760, z - 560) > 230 && len(x + 640, z + 690) > 190; };
 	b.scatter(kShore, 24, 90, [=](double x, double z) { return std::fabs(x - riverX(z)) < 300 && clear(x, z); });
 	b.scatter(kMeadow, 22, 80, [=](double x, double z) { return std::fabs(x - riverX(z)) > 350 && clear(x, z); });
+	// Piezas de los niveles del juego, plantas del juego y ambiente.
+	b.pieces({ "calavera", "calavera_2", "lata_pequena", "tocon_bajo", "raiz_arco" }, 5);
+	b.pieces({ "helecho", "ramita" }, 4, false);
+	b.gens({ "plnt:7", "plnt:3", "plnt:0" }, 10);
+	b.mood(1.0, 1.2, 240, 250, 255);
 	return b.done();
 }
 
@@ -286,6 +450,11 @@ MapDoc mushrooms()
 	b.enemy("qurione", -600, 200);
 	b.scatter(kShrooms, 40, 80, [](double, double) { return true; });
 	b.scatter({ "objects/weeds/stone1.mod", "objects/weeds/stone2.mod" }, 10, 140, [](double, double) { return true; });
+	// Piezas de los niveles del juego, plantas del juego y ambiente.
+	b.pieces({ "tocon_ancho", "tocon_grande", "raiz_arco", "tronco_y", "rama_curva", "ramas_cruzadas" }, 7);
+	b.pieces({ "ramita_alta", "ramita_hojas", "helecho" }, 6, false);
+	b.gens({ "plnt:10", "plnt:11", "plnt:1" }, 12);
+	b.mood(0.8, 0.6, 220, 230, 255);
 	return b.done();
 }
 
@@ -321,6 +490,11 @@ MapDoc lakes()
 	b.enemy("frog", -200, 700);
 	b.scatter(kShore, 40, 75, [=](double x, double z) { return lake(x, z) > -160; });
 	b.scatter(kMeadow, 14, 90, [=](double x, double z) { return lake(x, z) < -200; });
+	// Piezas de los niveles del juego, plantas del juego y ambiente.
+	b.pieces({ "botella", "jarra", "calavera", "tapa_oxidada" }, 5);
+	b.pieces({ "helecho_2" }, 3, false);
+	b.gens({ "plnt:7", "plnt:3", "plnt:9" }, 12);
+	b.mood(1.0, 1.3, 235, 245, 255);
 	return b.done();
 }
 
@@ -353,6 +527,10 @@ MapDoc volcano()
 	b.enemy("iwagon", -760, 560, 90);
 	b.scatter(kStonesD, 34, 90, [](double, double) { return true; }, 0.5);
 	b.scatter({ "objects/plants/hae.mod" }, 10, 120, [](double x, double z) { return len(x, z) > 650; });
+	// Piezas de los niveles del juego, plantas del juego y ambiente.
+	b.pieces({ "calavera", "calavera_2", "tapa_oxidada", "tuberia" }, 6);
+	b.gens({ "plnt:11" }, 6);
+	b.mood(0.95, 0.8, 255, 225, 200);
 	return b.done();
 }
 
@@ -365,8 +543,10 @@ MapDoc plateaus()
 	auto tier = [=](double x, double z) {
 		// Meseta media (130) y la alta del centro (260), con rampas suaves:
 		// una por jugador a cada nivel (las de J2, en el lado contrario).
-		double h       = 130.0 * smooth(-30, 20, box(x, z, 820, 640));
-		h              = std::max(h, 260.0 * smooth(-30, 20, box(x, z, 360, 300)));
+		// Bordes de las mesetas irregulares (como roca erosionada), iguales en el espejo.
+		const double wob = 55.0 * snoise(x, z, 210, 31), wob2 = 35.0 * snoise(x, z, 140, 37);
+		double h         = 130.0 * smooth(-30, 20, box(x, z, 820 + wob, 640 + wob));
+		h                = std::max(h, 260.0 * smooth(-30, 20, box(x, z, 360 + wob2, 300 + wob2)));
 		auto rampAlong = [](double t, double t0, double t1, double h0, double h1) { return lerp(h0, h1, clamp01((t - t0) / (t1 - t0))); };
 		for (int s = -1; s <= 1; s += 2) {
 			const double X = x * s, Z = z * s; // J1 (s = 1) y su espejo
@@ -396,6 +576,11 @@ MapDoc plateaus()
 	b.enemy("mar", -150, -80);
 	b.scatter(kStonesD, 18, 110, [](double, double) { return true; });
 	b.scatter(kMeadow, 22, 90, [=](double x, double z) { return tier(x, z) < 20; });
+	// Piezas de los niveles del juego, plantas del juego y ambiente.
+	b.pieces({ "lata_abierta", "lata_tumbada", "tuberia", "tocon_bajo", "calavera" }, 6);
+	b.pieces({ "ramita" }, 3, false);
+	b.gens({ "plnt:4", "plnt:5", "plnt:6" }, 10);
+	b.mood(1.1, 1.2, 255, 245, 220);
 	return b.done();
 }
 
@@ -475,14 +660,464 @@ MapDoc fortress()
 	b.scatter(kFlowers, 14, 120, [](double x, double z) { return len(x, z) > 650; });
 	b.scatter(kStonesD, 10, 130, [](double x, double z) { return len(x, z) < 380; });
 	b.scatter(kShore, 14, 90, [](double x, double z) { return len(x, z) > 380 && len(x, z) < 640 && std::fabs(z) > 180; });
+	// Piezas de los niveles del juego, plantas del juego y ambiente.
+	b.pieces({ "pila_piedra", "calavera", "tocon_mediano", "lata_pequena" }, 4);
+	b.pieces({ "helecho", "ramita_hojas" }, 4, false);
+	b.gens({ "plnt:0", "plnt:4" }, 8);
+	b.mood(1.0, 1.0);
+	return b.done();
+}
+
+// ── Formas orgánicas ─────────────────────────────────────────────────────────
+// Para las plantillas inspiradas en las zonas del juego: el suelo ya no es el
+// rectángulo entero, sino claros, pasillos y cámaras unidos (con el borde
+// irregular), con alturas, rampas y cortados. Todo se piensa en la mitad de
+// J1 (x < 0) y se refleja: el mapa es espejo para el VS.
+
+double hash2(int x, int z, unsigned seed)
+{
+	unsigned h = unsigned(x) * 374761393u + unsigned(z) * 668265263u + seed * 2246822519u;
+	h          = (h ^ (h >> 13)) * 1274126177u;
+	h ^= h >> 16;
+	return double(h & 0xFFFFFF) / double(0xFFFFFF);
+}
+
+double vnoise(double x, double z, unsigned seed)
+{
+	const double fx = std::floor(x), fz = std::floor(z);
+	const int ix = int(fx), iz = int(fz);
+	double tx = x - fx, tz = z - fz;
+	tx = tx * tx * (3 - 2 * tx);
+	tz = tz * tz * (3 - 2 * tz);
+	const double a = hash2(ix, iz, seed), b = hash2(ix + 1, iz, seed), c = hash2(ix, iz + 1, seed), d = hash2(ix + 1, iz + 1, seed);
+	return lerp(lerp(a, b, tx), lerp(c, d, tx), tz);
+}
+
+/// Ruido suave de -1 a 1, igual en (x, z) y en (-x, -z) (mapa espejo).
+double snoise(double x, double z, double scale, unsigned seed)
+{
+	auto fbm = [&](double px, double pz) {
+		px /= scale;
+		pz /= scale;
+		return 0.55 * vnoise(px, pz, seed) + 0.3 * vnoise(px * 2.1, pz * 2.1, seed + 7) + 0.15 * vnoise(px * 4.3, pz * 4.3, seed + 13);
+	};
+	return (fbm(x, z) + fbm(-x, -z)) - 1.0;
+}
+
+/// Cuánto dentro de una mancha elíptica (positivo dentro, más o menos en unidades).
+double blob(double x, double z, double cx, double cz, double rx, double rz) { return (1.0 - len((x - cx) / rx, (z - cz) / rz)) * std::min(rx, rz); }
+
+/// Distancia de (x, z) al tramo a-b y en qué parte del tramo cae (0-1).
+double segDist(double x, double z, double ax, double az, double bx, double bz, double* t = nullptr)
+{
+	const double dx = bx - ax, dz = bz - az, l2 = dx * dx + dz * dz;
+	const double k = l2 > 0 ? clamp01(((x - ax) * dx + (z - az) * dz) / l2) : 0.0;
+	if (t) *t = k;
+	return len(x - (ax + dx * k), z - (az + dz * k));
+}
+
+/// Pasillo por una línea quebrada (positivo dentro).
+double path(double x, double z, std::initializer_list<std::pair<double, double>> pts, double r)
+{
+	double best = -1e9;
+	const std::pair<double, double>* prev = nullptr;
+	for (const auto& p : pts) {
+		if (prev) best = std::max(best, r - segDist(x, z, prev->first, prev->second, p.first, p.second));
+		prev = &p;
+	}
+	return best;
+}
+
+/// Rampa de h0 (en a) a h1 (en b), de medio ancho r: su altura, o -1e9 fuera.
+double ramp(double x, double z, double ax, double az, double bx, double bz, double r, double h0, double h1)
+{
+	double t;
+	if (segDist(x, z, ax, az, bx, bz, &t) > r) return -1e9;
+	return lerp(h0, h1, smooth(0, 1, t));
+}
+
+/// La zona de las bases (x < -1060, y su espejo): todo suelo, llano.
+double baseIn(double x) { return std::fabs(x) - 1060.0; }
+
+/// Una función pensada para J1, evaluada en el punto y en su espejo.
+template <typename F> double mirrored(double x, double z, F f) { return std::max(f(x, z), f(-x, -z)); }
+
+/// Prepara la misión (solo y coop): capitanes en la base de J1, nave junto al
+/// cohete, la cebolla roja activa, otras dos enterradas y las piezas.
+void mission(Builder& b, std::initializer_list<std::tuple<const char*, double, double>> parts, std::pair<double, double> yellow,
+             std::pair<double, double> blue, int days)
+{
+	MapDoc& d = b.d;
+	d.modes   = MAPMODE_VS | MAPMODE_SOLO | MAPMODE_COOP;
+	nm::ensureStory(d, true);
+	d.story.onions = { { 1, -1320, 300, false }, { 2, yellow.first, yellow.second, true }, { 0, blue.first, blue.second, true } };
+	d.story.parts.clear();
+	for (const auto& p : parts) d.story.parts.push_back({ std::get<0>(p), std::get<1>(p), std::get<2>(p) });
+	d.story.rules           = DocRules();
+	d.story.rules.objective = "parts";
+	d.story.rules.days      = days;
+	d.story.rules.startPikmin[0] = d.story.rules.startPikmin[2] = 0;
+	d.story.rules.startPikmin[1] = 20;
+}
+
+/// Muretes a los dos lados de una puerta (para que no se pueda rodear).
+void gateWalls(Builder& b, double x, double z, double face, double from = 70, double to = 190)
+{
+	const double a = face * kPi / 180.0, nx = std::cos(a), nz = -std::sin(a);
+	for (int s = -1; s <= 1; s += 2) {
+		DocWall w;
+		w.ax     = x + s * nx * from;
+		w.az     = z + s * nz * from;
+		w.bx     = x + s * nx * to;
+		w.bz     = z + s * nz * to;
+		w.height = 90;
+		b.d.walls.push_back(w);
+	}
+}
+
+// Decoración de borde (donde el suelo se acaba): la «pared» de plantas y rocas.
+auto nearEdge(const Builder& b, double maxIn) { return [&b, maxIn](double x, double z) { return b.sample(x, z).in < maxIn && std::fabs(x) < 1000; }; }
+
+// ── A. Claros del bosque ────────────────────────────────────────────────────
+MapDoc forestGlades()
+{
+	Builder b("Claros del bosque", "stages/chal1.ini");
+	b.d.routeStep = 100; // túneles y senderos estrechos
+	const int forest = b.mat(kForest), dirt = b.mat(kDirt), moss = b.mat(kMoss), lush = b.mat(kLush);
+	// Senderos de J1: de la base a los dos claros y de ahí al claro central.
+	auto trails = [](double x, double z) {
+		return std::max({ path(x, z, { { -1150, 445 }, { -930, 520 }, { -760, 470 } }, 115),
+		                  path(x, z, { { -1150, 0 }, { -920, -60 }, { -800, -300 }, { -720, -470 } }, 110),
+		                  path(x, z, { { -1150, -445 }, { -900, -580 }, { -720, -470 } }, 105),
+		                  path(x, z, { { -760, 470 }, { -470, 400 }, { -260, 190 }, { 0, 0 } }, 110),
+		                  path(x, z, { { -720, -470 }, { -420, -560 }, { -200, -300 }, { 0, 0 } }, 110),
+		                  path(x, z, { { -470, 400 }, { -440, 0 }, { -420, -560 } }, 90) });
+	};
+	auto glades = [](double x, double z) {
+		return std::max({ blob(x, z, -760, 470, 250, 190), blob(x, z, -720, -470, 240, 210), blob(x, z, 0, 0, 430, 300),
+		                  blob(x, z, -430, -770, 140, 120), // el mirador, con su subida
+		                  path(x, z, { { -720, -470 }, { -640, -560 }, { -470, -720 } }, 75) });
+	};
+	b.field = [=](double x, double z, Pt& p) {
+		const double open = mirrored(x, z, [&](double u, double v) { return std::max(glades(u, v), trails(u, v)); });
+		p.in              = std::max(baseIn(x), open + 45.0 * snoise(x, z, 170, 11));
+		// El claro central, más alto; dentro, una charca.
+		double h = 70.0 * smooth(560, 360, len(x, z));
+		// El mirador: arriba del todo, con su rampa desde el claro de abajo.
+		h = std::max(h, mirrored(x, z, [](double u, double v) {
+			return std::max(blob(u, v, -430, -770, 140, 120) > 0 ? 110.0 : -1e9, ramp(u, v, -640, -560, -470, -720, 70, 0, 110));
+		}));
+		const double pond = 135.0 - len(x / 1.25, z);
+		p.wet             = pond;
+		p.h               = h - 22.0 * smooth(-60, 20, pond);
+		const double onTrail = mirrored(x, z, [&](double u, double v) { return smooth(10, 50, trails(u, v)); });
+		p.w[forest]          = 1.0;
+		p.w[dirt]            = onTrail * 1.5;
+		p.w[moss]            = smooth(0, 120, mirrored(x, z, glades)) * 0.9;
+		p.w[lush]            = smooth(-160, -40, pond) * 2.0 + baseZone(x);
+	};
+	b.object("gate_soft", -1015, -515, 90);
+	b.d.bigX    = 0;
+	b.d.bigZ    = -220;
+	b.d.pellets = { { "pr01", -1300, -700 }, { "pb01", -1300, 650 }, { "py05", -760, 520 }, { "pr10", -500, -800 } };
+	b.d.pieces  = { { 0, -700, -500, "" }, { 1, -760, 420, "" }, { 3, -400, -760, "" }, { 2, -300, -80, "" } };
+	b.d.guards  = { { "chappy", -470, -720 } };
+	b.enemy("chappy", -680, -400);
+	b.enemy("collec", -800, 500);
+	b.enemy("kinoko", -250, 200);
+	b.enemy("qurione", -440, -10);
+	mission(b, { { "uf06", -760, 430 }, { "uf08", -700, -520 }, { "uf07", -430, -760 }, { "uf02", 760, -430 }, { "uf03", 0, -230 } }, { 720, 470 }, { 260, 90 }, 2);
+	b.scatter({ "objects/plants/hae.mod", "objects/plants/chidome.mod", "objects/weeds/weed1.mod", "objects/plants/kinokolt.mod" }, 70, 55, nearEdge(b, 70), 0.35);
+	b.scatter(kFlowers, 18, 110, [&](double x, double z) { return b.sample(x, z).in > 120; });
+	b.scatter(kStonesD, 8, 160, [&](double x, double z) { return b.sample(x, z).in > 60; });
+	// Piezas de los niveles del juego, plantas del juego y ambiente.
+	b.pieces({ "tocon_grande", "tocon_mediano", "raiz_arco", "rama_curva", "tronco_y" }, 7);
+	b.pieces({ "ramita_alta", "ramita", "helecho" }, 6, false);
+	b.gens({ "plnt:2", "plnt:5", "plnt:6", "plnt:1" }, 14);
+	b.gens({ "item:kusa" }, 3, 300);
+	b.mood(0.95, 0.9, 245, 255, 235);
+	return b.done();
+}
+
+// ── B. Grutas profundas ─────────────────────────────────────────────────────
+MapDoc deepCaves()
+{
+	Builder b("Grutas profundas", "stages/chal2.ini");
+	b.d.routeStep = 100; // túneles y senderos estrechos
+	const int earth = b.mat(kEarth), sand = b.mat(kSand), rock = b.mat(kRock), dirt = b.mat(kDirt);
+	auto tunnels = [](double x, double z) {
+		return std::max({ path(x, z, { { -1150, 445 }, { -960, 400 }, { -780, 420 } }, 95),
+		                  path(x, z, { { -1150, 0 }, { -980, 150 }, { -780, 420 } }, 90),
+		                  path(x, z, { { -980, 150 }, { -980, -150 }, { -760, -420 } }, 85),
+		                  path(x, z, { { -1150, -445 }, { -940, -520 }, { -760, -420 } }, 95),
+		                  path(x, z, { { -780, 420 }, { -520, 560 }, { -300, 430 }, { -190, 170 } }, 95),
+		                  path(x, z, { { -760, -420 }, { -520, -300 }, { -380, -130 }, { -230, -60 } }, 95),
+		                  path(x, z, { { -520, 560 }, { -260, 720 }, { 60, 700 }, { 200, 500 }, { 150, 230 } }, 80) }); // vuelta larga por el norte
+	};
+	auto chambers = [](double x, double z) {
+		return std::max({ blob(x, z, -780, 420, 200, 170), blob(x, z, -760, -420, 190, 170), blob(x, z, 0, 0, 380, 260),
+		                  blob(x, z, -560, -700, 120, 110) }); // nicho tras una puerta dura
+	};
+	b.field = [=](double x, double z, Pt& p) {
+		const double open = mirrored(x, z, [&](double u, double v) {
+			return std::max({ chambers(u, v), tunnels(u, v), path(u, v, { { -760, -420 }, { -560, -700 } }, 70) });
+		});
+		p.in = std::max(baseIn(x), open + 30.0 * snoise(x, z, 120, 23));
+		// La cámara central, hundida, con su lago.
+		const double down = smooth(520, 290, len(x, z * 1.45));
+		const double lake = (1.0 - len(x / 250.0, z / 140.0)) * 140.0;
+		p.wet             = lake;
+		p.h               = -90.0 * down - 18.0 * smooth(-50, 20, lake);
+		p.w[earth]        = 1.0;
+		p.w[sand]         = smooth(-120, -20, lake) * 2.0 + mirrored(x, z, [&](double u, double v) { return smooth(30, 80, tunnels(u, v)); });
+		p.w[rock]         = smooth(60, 15, p.in) * 1.5 * (1 - baseZone(x));
+		p.w[dirt]         = baseZone(x);
+	};
+	b.object("gate_hard", -660, -560, 145);
+	gateWalls(b, -660, -560, 145);
+	b.d.bigX    = 0;
+	b.d.bigZ    = -190;
+	b.d.pellets = { { "pr05", -1300, -700 }, { "pb05", -1300, 650 }, { "pb10", -560, -710 }, { "py05", -780, 460 } };
+	b.d.pieces  = { { 0, -800, 380, "" }, { 1, -760, -380, "" }, { 4, -120, -40, "" }, { 2, -260, 700, "" } };
+	b.enemy("kogane", -760, 440);
+	b.enemy("napkid", -740, -440);
+	b.enemy("kabekuiA", -400, 470);
+	b.enemy("frog", -220, -160);
+	b.enemy("otama", 60, -60);
+	mission(b, { { "uf06", -800, 400 }, { "uf08", -740, -400 }, { "uf07", -560, -690 }, { "uf02", -260, 710 }, { "uf03", 780, -400 } }, { 760, 420 }, { 250, 120 }, 2);
+	b.scatter(kStonesD, 60, 55, nearEdge(b, 45), 0.5);
+	b.scatter(kShrooms, 24, 80, [&](double x, double z) { return b.sample(x, z).in > 70 && std::fabs(x) < 1000; });
+	// Piezas de los niveles del juego, plantas del juego y ambiente.
+	b.pieces({ "pila_piedra", "botella", "tapa_oxidada", "calavera_2" }, 6);
+	b.gens({ "plnt:10", "plnt:11" }, 8);
+	b.mood(0.7, 0.5, 210, 220, 255);
+	return b.done();
+}
+
+// ── C. Archipiélago del manantial ───────────────────────────────────────────
+MapDoc springIslands()
+{
+	Builder b("Archipiélago del manantial", "stages/chal3.ini");
+	const int moss = b.mat(kMoss), sand = b.mat(kSand), grass = b.mat(kGrass), lush = b.mat(kLush);
+	auto islands = [](double x, double z) {
+		return std::max({ blob(x, z, -700, 430, 200, 170), blob(x, z, -640, -430, 180, 160), blob(x, z, -420, 160, 140, 140),
+		                  blob(x, z, 0, 0, 165, 165), blob(x, z, -230, -620, 120, 100) });
+	};
+	auto causeways = [](double x, double z) {
+		return std::max({ path(x, z, { { -1080, 445 }, { -880, 470 }, { -700, 430 } }, 55),
+		                  path(x, z, { { -1080, -445 }, { -860, -470 }, { -640, -430 } }, 55),
+		                  path(x, z, { { -700, 430 }, { -560, 300 }, { -420, 160 } }, 50) });
+	};
+	b.field = [=](double x, double z, Pt& p) {
+		const double lake = (1.0 - len(x / 1050.0, z / 780.0)) * 600.0 + 30.0 * snoise(x, z, 200, 31);
+		p.in              = std::max(baseIn(x), lake);
+		const double land = mirrored(x, z, [&](double u, double v) { return std::max(islands(u, v), causeways(u, v)); }) + 18.0 * snoise(x, z, 90, 37);
+		p.in              = std::max(p.in, land);
+		p.wet             = std::min(-land, 1020.0 - std::fabs(x));
+		p.h               = -24.0 * smooth(-10, 40, p.wet) + 18.0 * smooth(20, 120, land);
+		p.w[moss]         = 1.0;
+		p.w[sand]         = smooth(60, 0, land) * 2.0;
+		p.w[lush]         = smooth(60, 140, land);
+		p.w[grass]        = baseZone(x) * 2.0;
+	};
+	// Puente de la isla pequeña a la central (o los azules nadando).
+	b.object("bridge", -303, 115, 111);
+	b.d.bigX    = 0;
+	b.d.bigZ    = 0;
+	b.d.pellets = { { "pb05", -1300, -700 }, { "pb10", -1300, 650 }, { "pr05", -700, 470 }, { "py05", -230, -620 } };
+	b.d.pieces  = { { 0, -700, 400, "" }, { 1, -640, -400, "" }, { 4, -260, -420, "" }, { 2, -420, 180, "" } };
+	b.enemy("frow", -660, -470);
+	b.enemy("namazu", -380, -300);
+	b.enemy("otama", -500, 650);
+	b.enemy("frog", -240, -600);
+	mission(b, { { "uf06", -700, 400 }, { "uf08", -640, -400 }, { "uf07", 0, 30 }, { "uf02", -230, -640 }, { "uf03", 420, -160 } }, { 640, 430 }, { -660, -470 }, 3);
+	b.scatter(kShore, 46, 60, [&](double x, double z) { const Pt p = b.sample(x, z); return p.wet < -10 && p.wet > -90 && std::fabs(x) < 1000; });
+	b.scatter(kFlowers, 12, 100, [&](double x, double z) { return b.sample(x, z).wet < -110 && std::fabs(x) < 1000; });
+	// Piezas de los niveles del juego, plantas del juego y ambiente.
+	b.pieces({ "botella", "jarra", "calavera" }, 4);
+	b.pieces({ "helecho", "helecho_2" }, 5, false, 0.6, 0.9);
+	b.gens({ "plnt:7", "plnt:8", "plnt:3" }, 12, 120);
+	b.mood(1.05, 1.4, 235, 248, 255);
+	return b.done();
+}
+
+// ── D. Jardín en terrazas ───────────────────────────────────────────────────
+MapDoc gardenTerraces()
+{
+	Builder b("Jardín en terrazas", "stages/chal4.ini");
+	const int lush = b.mat(kLush), orange = b.mat(kOrange), pebble = b.mat(kPebble), rock = b.mat(kRock);
+	// Anillos: 0 fuera, 80, 160 y 240 en la cima (con el borde ondulado).
+	auto tier = [](double x, double z) {
+		const double r = len(x, z * 1.15) + 25.0 * snoise(x, z, 260, 41);
+		double h       = 80.0 * smooth(720, 690, r) + 80.0 * smooth(470, 440, r) + 80.0 * smooth(240, 210, r);
+		// Rampas de J1 (y su espejo): de fuera hacia dentro, en espiral.
+		h = std::max(h, mirrored(x, z, [](double u, double v) {
+			return std::max({ ramp(u, v, -900, 230, -655, 190, 75, 0, 80), ramp(u, v, -480, -405, -322, -264, 70, 80, 160),
+			                  ramp(u, v, -380, 150, -206, 75, 60, 160, 240) });
+		}));
+		return h;
+	};
+	b.field = [=](double x, double z, Pt& p) {
+		// Contorno ondulado y dos agujeros por lado.
+		const double area  = (1.0 - len(x / 1250.0, z / 840.0)) * 700.0 + 50.0 * snoise(x, z, 180, 43);
+		const double holes = mirrored(x, z, [](double u, double v) { return std::max(110.0 - len(u + 560, v + 20), 80.0 - len(u + 380, v - 560)); });
+		p.in               = std::max(baseIn(x), std::min(area, -holes));
+		p.h                = tier(x, z) * (1 - baseZone(x));
+		const double gx = std::fabs(tier(x + 30, z) - tier(x - 30, z)), gz = std::fabs(tier(x, z + 30) - tier(x, z - 30));
+		const double cliff = smooth(25, 60, std::max(gx, gz));
+		p.w[lush]          = 1.0;
+		p.w[orange]        = smooth(60, 120, p.h) * 0.8;
+		p.w[pebble]        = smooth(200, 230, p.h);
+		p.w[rock]          = cliff * 3.0;
+	};
+	b.object("gate_hard", -330, 128, 114);
+	b.d.bigX    = 0;
+	b.d.bigZ    = 0;
+	b.d.pellets = { { "py05", -1300, -700 }, { "pr05", -1300, 650 }, { "py10", -560, 300 }, { "py20", -300, -120 } };
+	b.d.pieces  = { { 0, -800, -360, "" }, { 1, -520, 360, "" }, { 2, -300, -260, "" } };
+	b.enemy("mar", -560, 160);
+	b.enemy("kabekuiC", -360, -340);
+	b.enemy("palm", -600, -380);
+	b.enemy("beatle", -120, 140, 120);
+	mission(b, { { "uf06", -800, -330 }, { "uf08", -520, 330 }, { "uf07", -300, -240 }, { "uf02", 60, -60 }, { "uf03", 560, -330 } }, { 800, 330 }, { -760, 450 }, 3);
+	b.scatter(kFlowers, 30, 90, [&](double x, double z) { return b.sample(x, z).in > 80 && std::fabs(x) < 1000; });
+	b.scatter(kStonesD, 16, 120, [&](double x, double z) { return b.sample(x, z).in > 50; });
+	// Piezas de los niveles del juego, plantas del juego y ambiente.
+	b.pieces({ "lata_abierta", "lata_tumbada", "tuberia", "tocon_bajo" }, 5);
+	b.pieces({ "helecho_2" }, 3, false);
+	b.gens({ "plnt:4", "plnt:0", "plnt:5" }, 12);
+	b.mood(1.1, 1.1, 255, 240, 225);
+	return b.done();
+}
+
+// ── E. Cráter del impacto ───────────────────────────────────────────────────
+MapDoc impactCrater()
+{
+	Builder b("Cráter del impacto", "stages/chal0.ini");
+	const int grass = b.mat(kGrass), earth = b.mat(kEarth), pebble = b.mat(kPebble), sand = b.mat(kSand);
+	b.field = [=](double x, double z, Pt& p) {
+		const double area   = (1.0 - len(x / 1350.0, z / 720.0)) * 650.0 + 55.0 * snoise(x, z, 190, 51);
+		const double alcove = mirrored(x, z, [](double u, double v) { return std::max(blob(u, v, -460, 820, 170, 120), path(u, v, { { -460, 620 }, { -460, 820 } }, 70)); });
+		p.in                = std::max({ baseIn(x), area, alcove });
+		// Cráter en el centro, con su borde levantado.
+		const double r = len(x, z * 1.1);
+		double h       = -110.0 * smooth(430, 130, r) + 40.0 * std::exp(-std::pow((r - 500.0) / 90.0, 2));
+		// Arroyo por fuera del cráter (en llano) y charca en el fondo.
+		const double brook = mirrored(x, z, [](double u, double v) { return 65.0 - segDist(u, v, -760, -160, -300, -680); }) + 12.0 * snoise(x, z, 80, 53);
+		p.wet              = std::max(brook, 90.0 - r);
+		p.h                = (h - 16.0 * smooth(-30, 20, p.wet)) * (1 - baseZone(x));
+		p.w[grass]         = 1.0;
+		p.w[earth]         = smooth(300, 120, r) * 1.5;
+		p.w[pebble]        = std::exp(-std::pow((r - 500.0) / 70.0, 2)) * 1.2;
+		p.w[sand]          = smooth(-80, -10, brook) * 1.5;
+	};
+	b.object("gate_soft", -460, 690, 0);
+	gateWalls(b, -460, 690, 0);
+	b.object("bridge", -590, -473, 48.5);
+	{
+		DocProp m;
+		m.asset   = "cinemas/demo01/meteor.mod";
+		m.x       = 150;
+		m.z       = -40;
+		m.y       = -100;
+		m.scale   = 0.8;
+		m.collide = true;
+		b.d.props.push_back(m);
+	}
+	b.d.bigX    = 0;
+	b.d.bigZ    = 0;
+	b.d.pellets = { { "pr05", -1300, -700 }, { "pb05", -1300, 650 }, { "py10", -540, 830 }, { "pr10", -200, -40 } };
+	b.d.pieces  = { { 0, -700, 420, "" }, { 1, -420, -360, "" }, { 3, -120, 160, "" }, { 2, -400, 800, "" } };
+	b.d.guards  = { { "chappy", -150, 230 } };
+	b.enemy("chappy", -650, 380);
+	b.enemy("napkid", -650, -600);
+	b.enemy("kinoko", -880, -300);
+	mission(b, { { "uf06", -700, 400 }, { "uf08", -440, -380 }, { "uf07", -400, 800 }, { "uf02", -40, 170 }, { "uf03", 800, -300 } }, { 650, -380 }, { -300, -150 }, 2);
+	b.scatter(kMeadow, 40, 65, [&](double x, double z) { return b.sample(x, z).in < 90 && std::fabs(x) < 1000; }, 0.35);
+	b.scatter(kStonesD, 22, 80, [](double x, double z) { const double r = len(x, z * 1.1); return r > 420 && r < 600; }, 0.5);
+	b.scatter(kFlowers, 14, 110, [&](double x, double z) { return b.sample(x, z).in > 150 && len(x, z) > 650; });
+	// Piezas de los niveles del juego, plantas del juego y ambiente.
+	b.pieces({ "calavera", "calavera_2", "tocon_ancho", "raiz_arco" }, 5);
+	b.pieces({ "ramita", "helecho" }, 4, false);
+	b.gens({ "plnt:2", "plnt:4" }, 10);
+	b.mood(1.0, 1.0, 255, 245, 235);
 	return b.done();
 }
 
 } // namespace
 
+void setTemplateDataDir(const std::string& dataDir) { gTemplateDataDir = dataDir; }
+
+MapDoc impactArena()
+{
+	// La de siempre (bases, muros con sus pasos, charcas, piezas, pastillas y
+	// el guardián en el mismo sitio), con terreno fino, contorno irregular,
+	// acantilados, piezas de los niveles del juego y decoración. Sin objetos
+	// del juego: va dentro del ejecutable.
+	const std::string keep = gTemplateDataDir;
+	gTemplateDataDir.clear();
+	Builder b("Impact Arena", "stages/chal0.ini");
+	b.d.name   = "Impact Arena";
+	const int grass = b.mat(kGrass), moss = b.mat(kMoss), pebble = b.mat(kPebble), sand = b.mat(kSand);
+	auto pond  = [](double x, double z) {
+		// Charca de (0, -640) con su islote, y la del espejo.
+		return mirrored(x, z, [](double u, double v) { return std::min(blob(u, v, 0, -640, 280, 170), len(u, v + 640) - 75.0); });
+	};
+	b.field = [=](double x, double z, Pt& p) {
+		const double w = pond(x, z);
+		p.wet          = w;
+		// Lomas suaves (el centro llano para la pieza grande) y el fondo de la charca.
+		const double hills = 22.0 * std::cos(x / 380.0) * std::cos(z / 300.0) * smooth(300, 520, len(x, z));
+		p.h                = hills * (1.0 - baseZone(x)) - 20.0 * smooth(-30, 25, w);
+		p.w[grass]         = 1.0;
+		p.w[moss]          = smooth(120, 360, std::fabs(z)) * 0.8;
+		p.w[sand]          = smooth(-90, -5, w) * 2.0;
+		p.w[pebble]        = smooth(300, 230, len(x, z)) * 1.2; // el centro, de grava
+	};
+	b.d.walls.clear();
+	auto wall = [&](double ax, double az, double bx, double bz, double thick, double height) {
+		DocWall w;
+		w.ax = ax, w.az = az, w.bx = bx, w.bz = bz, w.thickness = thick, w.height = height;
+		b.d.walls.push_back(w);
+	};
+	wall(-1150, -900, -1150, -560, 40, 150);
+	wall(-1150, -330, -1150, -110, 40, 150);
+	wall(-1150, 110, -1150, 330, 40, 150);
+	wall(-1150, 560, -1150, 900, 40, 150);
+	wall(-725, -230, -575, -230, 110, 150);
+	wall(-725, 230, -575, 230, 110, 150);
+	wall(-325, -470, -175, -470, 110, 150);
+	for (double from : { 20.0, 110.0 }) {
+		DocWall w;
+		w.isArc = true, w.cx = 0, w.cz = 0, w.radius = 260, w.from = from, w.to = from + 50, w.segments = 3, w.thickness = 30, w.height = 100;
+		b.d.walls.push_back(w);
+	}
+	b.d.barrierX = { -1150, 1150 };
+	b.d.passes   = { { -1150, 0 }, { 1150, 0 }, { -1150, -445 }, { -1150, 445 }, { 1150, -445 }, { 1150, 445 } };
+	b.d.pellets  = { { "pr01", -1300, -700 }, { "pb01", -1300, 650 }, { "pr05", -500, 600 }, { "pb05", 180, -640 }, { "py05", 0, -330 } };
+	b.d.pieces   = { { 0, -1000, -720, "" }, { 1, -760, 380, "" }, { 2, -880, 0, "" }, { 3, -440, -360, "" }, { 4, 0, -640, "" } };
+	b.d.guards   = { { "chappy", -330, -440 } };
+	b.d.bigX     = 0;
+	b.d.bigZ     = 0;
+	b.pieces({ "tocon_grande", "tocon_mediano", "tocon_bajo", "raiz_arco", "lata_tumbada", "calavera" }, 6);
+	b.pieces({ "ramita", "ramita_hojas", "helecho", "helecho_2" }, 6, false);
+	b.scatter(kFlowers, 22, 110, [](double, double) { return true; });
+	b.scatter(kMeadow, 26, 70, [](double, double) { return true; });
+	b.scatter(kShore, 12, 70, [=](double x, double z) { return pond(x, z) > -90 && pond(x, z) < -10; });
+	b.mood(1.0, 1.1, 255, 250, 240);
+	MapDoc d         = b.done();
+	gTemplateDataDir = keep;
+	return d;
+}
+
 const std::vector<TemplateInfo>& mapTemplates()
 {
 	static const std::vector<TemplateInfo> list = {
+		{ "glades", "Claros del bosque", "Senderos entre claros, un mirador en alto y una charca. Listo para VS, solo y coop.", forestGlades },
+		{ "caves", "Grutas profundas", "Túneles y cámaras, un lago subterráneo y un rincón tras una puerta de piedra.", deepCaves },
+		{ "islands", "Archipiélago del manantial", "Islas en un gran lago: calzadas, un puente al centro y mucho para los azules.", springIslands },
+		{ "terraces", "Jardín en terrazas", "Cuatro alturas en anillos con rampas en espiral, agujeros y la cima tras una puerta.", gardenTerraces },
+		{ "crater", "Cráter del impacto", "Un cráter con su charca, un arroyo con puente y un rincón escondido.", impactCrater },
 		{ "meadow", "Prado tranquilo", "Sencillo: colinas suaves, flores y lo justo para jugar.", meadow },
 		{ "river", "Río y puentes", "Un río que solo cruzan los azules o los puentes que se construyen.", river },
 		{ "mushrooms", "Bosque de setas", "Colinas oscuras con Puffstools, Breadbugs y setas.", mushrooms },

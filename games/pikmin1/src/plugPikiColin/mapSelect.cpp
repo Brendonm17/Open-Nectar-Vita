@@ -22,6 +22,10 @@
 #endif
 #if defined(PIKI_PC_PORT)
 #include "pc_speedrun.h"
+#include "mods/pc_campaign.h"
+#include "mods/pc_mission.h"
+#include "mods/pc_vs_arena.h"
+#include "settings/pc_settings.h"
 #endif
 
 /// Size of the message heap (102 kb).
@@ -196,6 +200,14 @@ public:
 		// decide if we need to set up a world map screen or challenge mode map select screen
 		mapWindow    = nullptr;
 		selectWindow = nullptr;
+#if defined(PIKI_PC_PORT)
+		// Campaña: el mapa de zonas del paquete (pc_campaign_map_*) en lugar del
+		// mapa del mundo o del selector del desafío.
+		mCampaignMap = pc_mission_pending() && pc_campaign_active();
+		if (mCampaignMap) {
+			pc_campaign_map_open();
+		} else
+#endif
 		if (!gameflow.mIsChallengeMode) {
 			// story mode = world map
 			mapWindow = new zen::DrawWorldMap;
@@ -275,6 +287,33 @@ public:
 					mNextSectionsFlag = PACK_NEXT_ONEPLAYER(ONEPLAYER_CardSelect);
 					mSectionState     = Exit;
 					gsys->setFade(0.0f);
+				}
+#endif
+#if defined(PIKI_PC_PORT)
+				// Campaña: zona elegida (ya preparada) o vuelta al título.
+				if (mCampaignMap && mSectionState == Active) {
+					const int result = pc_campaign_map_result();
+					if (result == PC_DEVASSIGN_OK) {
+						FOREACH_NODE(StageInfo, flowCont.mStageList.mChild, stage)
+						{
+							// Como en el VS: el StageInfo de Impact Site y la arena.
+							if (stage->mChalStageID == CHALSTAGE_Practice) {
+								flowCont.mCurrentStage = stage;
+								sprintf(flowCont.mCurrStageFilePath, "%s", PC_VS_ARENA_STAGE);
+								sprintf(flowCont.mDoorStageFilePath, "%s", PC_VS_ARENA_STAGE);
+								break;
+							}
+						}
+						gameflow.mWorldClock.setTime(pc_mission_start_hour(gameflow.mParameters->mStartHour()));
+						mNextSectionsFlag = PACK_NEXT_ONEPLAYER(ONEPLAYER_NewPikiGame);
+						mSectionState     = Exit;
+						gsys->setFade(0.0f);
+					} else if (result == PC_DEVASSIGN_CANCELLED) {
+						pc_mission_set_pending(false);
+						pc_campaign_close();
+						mSectionState = Exit;
+						gsys->setFade(0.0f);
+					}
 				}
 #endif
 				// process challenge mode if we've made a decision
@@ -370,6 +409,9 @@ public:
 		if (mapWindow) {
 			mapWindow->draw(gfx);
 		}
+#if defined(PIKI_PC_PORT)
+		if (mCampaignMap) pc_campaign_map_draw();
+#endif
 
 		// draw debug menu over the top
 		Matrix4f orthoMtxDebug;
@@ -412,6 +454,9 @@ public:
 	Font* mConsFont;          ///< _34, console font (for debug menu).
 	Font* mBigFont;           ///< _38, big font (for regular text).
 	Camera mCamera;           ///< _3C, dedicated camera - seemingly unused.
+#if defined(PIKI_PC_PORT)
+	bool mCampaignMap = false; ///< campaña: el mapa de zonas en lugar del del mundo
+#endif
 };
 
 /**
@@ -441,6 +486,12 @@ MapSelectSection::MapSelectSection()
 	add(new MapSelectSetupSection);
 	gsys->endLoading();
 
+#if defined(PIKI_PC_PORT)
+	if (pc_mission_pending() && pc_campaign_active()) {
+		// campaña: la música del mapa del mundo
+		Jac_SceneSetup(SCENE_WorldMap, 0);
+	} else
+#endif
 	if (gameflow.mIsChallengeMode) {
 		// play challenge mode select music
 		Jac_SceneSetup(SCENE_ChalSelect, 0);

@@ -15,6 +15,7 @@ namespace nectar {
 struct GenParam {
 	std::uint32_t id = 0;
 	std::vector<std::uint8_t> bytes;
+	std::size_t offset = 0; ///< dónde están `bytes` dentro de Generator::raw (para cambiarlos)
 	std::int32_t asInt() const;
 	float asFloat() const;
 };

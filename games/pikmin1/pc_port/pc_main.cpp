@@ -58,6 +58,8 @@ __declspec(dllexport) int           AmdPowerXpressRequestHighPerformance = 1;
 #include "settings/pc_settings.h"
 #include "mods/pc_hd_model_convert.h"
 #include "mods/pc_vs_map.h"
+#include "mods/pc_mission.h"
+#include "mods/pc_campaign.h"
 #include "pc_vs.h"
 #include "settings/pc_settings_p2d.h"
 #include "netplay/pc_netplay_det.h"
@@ -137,6 +139,26 @@ int main(int argc, char* argv[])
         if (std::strcmp(argv[i], "--vs-map") == 0 && i + 1 < argc) {
             pc_vs_map_select_file(argv[++i]);
             pc_vs_direct_request();
+        }
+        // Editor de mapas: "Probar" en solo o coop (--mission-players 2).
+        if (std::strcmp(argv[i], "--mission-map") == 0 && i + 1 < argc) {
+            const char* path = argv[++i];
+            int players      = 1;
+            for (int k = 1; k + 1 < argc; k++) {
+                if (std::strcmp(argv[k], "--mission-players") == 0) players = std::atoi(argv[k + 1]);
+            }
+            pc_mission_select_file(path, players);
+            pc_mission_direct_request();
+        }
+        // Editor de mapas: "Probar" una campaña desde una zona.
+        if (std::strcmp(argv[i], "--campaign") == 0 && i + 1 < argc) {
+            const char* dir = argv[++i];
+            std::string zone, state;
+            for (int k = 1; k + 1 < argc; k++) {
+                if (std::strcmp(argv[k], "--zone") == 0) zone = argv[k + 1];
+                if (std::strcmp(argv[k], "--campaign-state") == 0) state = argv[k + 1];
+            }
+            pc_campaign_direct_request(dir, zone, state);
         }
         // Straight into a new two-captain story run (--coop-captains=<p1>,<p2>
         // picks the captains).
