@@ -233,6 +233,11 @@ struct PcMenuExtend {
 	/// Los huecos ocultos en el .blo no ocupan sitio (Options: "Language" no
 	/// existe en esta versión y dejaba un hueco entre Sound y Rumble).
 	bool compactHidden;
+	/// Alto máximo de la lista (de la primera fila a la última, 0 = sin
+	/// límite): si no cabe con `spacing`, el paso se reduce y, si entonces las
+	/// letras no caben en el paso, se encogen. Así un menú con más opciones
+	/// nunca se solapa.
+	int maxListHeight;
 };
 #endif
 

@@ -22,19 +22,7 @@
 #include "settings/pc_settings.h"
 #include "settings/pc_glass_menu.h"
 #include "settings/pc_settings_rows.h"
-#include "netplay/pc_online_menu.h"
 
-// Local/online choice for Co-op and VS: only netplay builds with the online
-// transport define it (pc_online_menu.cpp); elsewhere they go straight on.
-bool pc_online_menu_available(void);
-void pc_online_menu_open(bool vs);
-bool pc_online_menu_active(void);
-int pc_online_menu_update(Controller* input);
-
-namespace {
-int sPcOnlineAction = -1; // 2 Co-op / 3 VS while the local/online choice is open
-bool pc_online_choice_open() { return pc_online_menu_active != nullptr && pc_online_menu_active(); }
-} // namespace
 #endif
 
 /**
@@ -80,15 +68,14 @@ void zen::ogScrTitleMgr::setGamePrefs()
 zen::ogScrTitleMgr::ogScrTitleMgr()
 {
 #if defined(PIKI_PC_PORT)
-	// Randomizer, Speedrun, Co-op, VS, Custom Maps y Exit como opciones del menú
-	// principal: seis huecos extra clonados del último. Se compactan para no
-	// pisar el logo ni el copyright. Advanced Options vive dentro de Options.
-	const PcMenuExtend extNoChallenge   = { 6, 24, -72, 'yoko', 40 };
-	const PcMenuExtend extWithChallenge = { 6, 21, -84, 'yoko', 40 };
-	mMenuNoChallenge   = new DrawMenu("screen/blo/m_select.blo", false, false, &extNoChallenge);
-	mMenuWithChallenge = new DrawMenu("screen/blo/m_selec2.blo", false, false, &extWithChallenge);
-	pcInsertCoopItem(mMenuNoChallenge);
-	pcInsertCoopItem(mMenuWithChallenge);
+	// Start / Play Together / Extra Modes / Options / Exit: tres huecos más
+	// clonados del último. Co-op y VS van en Play Together; Challenge Mode,
+	// Speedrun, Randomizer y Custom Maps en Extra Modes (pcSetupMainMenus).
+	// maxListHeight: aunque se añadan opciones, nunca se pisan.
+	const PcMenuExtend extMain = { 3, 30, -50, 'yoko', 40, false, 150 };
+	mMenuNoChallenge   = new DrawMenu("screen/blo/m_select.blo", false, false, &extMain);
+	mMenuWithChallenge = mMenuNoChallenge; // Challenge Mode va en Extra Modes
+	pcSetupMainMenus();
 	pcSetupAdvancedMenu();
 #else
 	mMenuNoChallenge   = new DrawMenu("screen/blo/m_select.blo", false, false);
@@ -116,6 +103,12 @@ zen::ogScrTitleMgr::ogScrTitleMgr()
 	pic->setAlpha(0);
 	pic = static_cast<P2DPicture*>(mMenuWithChallenge->getScreenPtr()->search('back', true));
 	pic->setAlpha(0);
+#if defined(PIKI_PC_PORT)
+	for (DrawMenu* sub : { mPcPlayMenu, mPcExtraMenu[0], mPcExtraMenu[1] }) {
+		pic = static_cast<P2DPicture*>(sub->getScreenPtr()->search('back', true));
+		pic->setAlpha(0);
+	}
+#endif
 	pic = static_cast<P2DPicture*>(mOptionsMenu->getScreenPtr()->search('back', true));
 	pic->setAlpha(0);
 	pic = static_cast<P2DPicture*>(mSoundMenu->getScreenPtr()->search('back', true));
@@ -172,47 +165,135 @@ zen::ogScrTitleMgr::ogScrTitleMgr()
 }
 
 #if defined(PIKI_PC_PORT)
-// Tras clonar seis huecos, los textos quedan: Start / Co-op / VS / Custom Maps /
-// Options / Speedrun / Randomizer [/ Challenge Mode] / Exit (en ambos pares
-// he/hm: normal y resaltado).
-void zen::ogScrTitleMgr::pcInsertCoopItem(DrawMenu* menu)
+namespace {
+// Pone los textos de las filas de un menú (normal he%02d y resaltado
+// hm%02d). nullptr deja el que trae el .blo.
+void pcLabelRows(zen::DrawMenu* menu, char* const* labels, int count)
 {
-	static char sExitLabel[]       = "Exit";
-	static char sRandomizerLabel[] = "Randomizer";
-	static char sSpeedrunLabel[]  = "Speedrun";
-	static char sCoopLabel[]      = "Co-op";
-	static char sVsLabel[]        = "VS";
-	static char sCustomLabel[]    = "Custom Maps";
 	static immut char* kFamilies[] = { "he%02d", "hm%02d" };
 	char buf[8];
-	for (int f = 0; f < 2; f++) {
-		int n = 0;
-		sprintf(buf, kFamilies[f], 0);
-		while (menu->getScreenPtr()->search(P2DPaneLibrary::makeTag(buf), false)) {
-			sprintf(buf, kFamilies[f], ++n);
-		}
-		if (n < 8) {
-			continue;
-		}
-		P2DTextBox* box[9];
-		for (int i = 0; i < n && i < 9; i++) {
+	for (int f = 0; f < 2; f++)
+		for (int i = 0; i < count; i++) {
 			sprintf(buf, kFamilies[f], i);
-			box[i] = static_cast<P2DTextBox*>(menu->getScreenPtr()->search(P2DPaneLibrary::makeTag(buf), true));
+			P2DPane* pane = menu->getScreenPtr()->search(zen::P2DPaneLibrary::makeTag(buf), false);
+			if (pane && labels[i]) static_cast<P2DTextBox*>(pane)->setString(labels[i]);
 		}
-		// Originales: 0 Start, 1 Options[, 2 Challenge]. Las cajas quedan
-		// (todas centradas en la misma X); solo viaja el texto. Orden PC:
-		// Start / Co-op / VS / Custom Maps / Options / Speedrun / Randomizer /
-		// [Challenge Mode] / Exit.
-		char* optionsText   = box[1]->getString();
-		char* challengeText = n >= 9 ? box[2]->getString() : nullptr;
-		box[1]->setString(sCoopLabel);
-		box[2]->setString(sVsLabel);
-		box[3]->setString(sCustomLabel);
-		box[4]->setString(optionsText);
-		box[5]->setString(sSpeedrunLabel);
-		box[6]->setString(sRandomizerLabel);
-		if (challengeText) box[7]->setString(challengeText);
-		box[n - 1]->setString(sExitLabel);
+}
+
+char* pcRowText(zen::DrawMenu* menu, int row)
+{
+	char buf[8];
+	sprintf(buf, "he%02d", row);
+	P2DPane* pane = menu->getScreenPtr()->search(zen::P2DPaneLibrary::makeTag(buf), false);
+	return pane ? static_cast<P2DTextBox*>(pane)->getString() : nullptr;
+}
+} // namespace
+
+// Menú principal con cinco filas y dos submenús con el mismo panel:
+//   Start / Play Together / Extra Modes / Options / Exit
+//   Play Together: Co-op / VS
+//   Extra Modes:   [Challenge Mode /] Speedrun / Randomizer / Custom Maps
+void zen::ogScrTitleMgr::pcSetupMainMenus()
+{
+	static char sPlayLabel[]       = "Play Together";
+	static char sExtraLabel[]      = "Extra Modes";
+	static char sExitLabel[]       = "Exit";
+	static char sCoopLabel[]       = "Co-op";
+	static char sVsLabel[]         = "VS";
+	static char sSpeedrunLabel[]   = "Speedrun";
+	static char sRandomizerLabel[] = "Randomizer";
+	static char sCustomLabel[]     = "Custom Maps";
+
+	// Principal: Start y Options son los del .blo (traducidos en PAL).
+	char* main[5] = { nullptr, sPlayLabel, sExtraLabel, pcRowText(mMenuNoChallenge, 1), sExitLabel };
+	pcLabelRows(mMenuNoChallenge, main, 5);
+
+	mPcPlayMenu = new DrawMenu("screen/blo/m_select.blo", false, false);
+	char* play[2] = { sCoopLabel, sVsLabel };
+	pcLabelRows(mPcPlayMenu, play, 2);
+
+	// Extra Modes: m_select (2 filas) o m_selec2 (3, con Challenge Mode) y un
+	// hueco más.
+	const PcMenuExtend extExtra = { 1, 30, -30, 'yoko', 40, false, 120 };
+	mPcExtraMenu[0]  = new DrawMenu("screen/blo/m_select.blo", false, false, &extExtra);
+	char* extra0[3] = { sSpeedrunLabel, sRandomizerLabel, sCustomLabel };
+	pcLabelRows(mPcExtraMenu[0], extra0, 3);
+	mPcExtraMenu[1]  = new DrawMenu("screen/blo/m_selec2.blo", false, false, &extExtra);
+	char* extra1[4] = { pcRowText(mPcExtraMenu[1], 2), sSpeedrunLabel, sRandomizerLabel, sCustomLabel };
+	pcLabelRows(mPcExtraMenu[1], extra1, 4);
+}
+
+// Lo que hace cada opción, con los números de siempre: 0 Start, 1 Speedrun,
+// 2 Co-op, 3 VS, 4 Options, 5 Challenge Mode, 6 Randomizer, 7 Exit y 8
+// Custom Maps. true si sale del título (mStatus ya dice adónde).
+bool zen::ogScrTitleMgr::pcRunAction(int action)
+{
+	if (action < 0) return false;
+	if (action != 4) {
+		// Cualquier salida del título decide de nuevo: el Randomizer solo
+		// vale si es lo elegido, y la partida en curso ya no es ninguna.
+		pc_randomizer_clear_active();
+		pc_randomizer_set_menu_pending(action == 6);
+		pc_mission_set_pending(action == 8);
+	}
+	switch (action) {
+	case 8:
+		// Custom Maps: un jugador, sin partida guardada. Sale por el camino
+		// del modo desafío, como el VS; CardSelect abre el selector.
+		pc_vs_set_pending(false);
+		pc_speedrun_set_active(false);
+		pc_coop_set_pending(false);
+		pc_coop_set_chosen_at_title(true);
+		mPendingExitStatus = STATUS_ExitToChallengeMode;
+		mStatus            = STATUS_Exiting;
+		return true;
+	case 6:
+		// Randomizer: un jugador, Olimar o Louie, partidas propias del modo.
+		// CardSelect abre primero la explicación del modo.
+		pc_vs_set_pending(false);
+		pc_speedrun_set_active(false);
+		pc_coop_set_pending(false);
+		pc_coop_set_chosen_at_title(true);
+		mPendingExitStatus = STATUS_ExitToStoryMode;
+		mStatus            = STATUS_Exiting;
+		return true;
+	case 7: pc_window_request_close(); return true;
+	case 0:
+	case 1:
+	case 2:
+		// Speedrun es Start en vanilla: un jugador, Olimar, partida nueva; solo
+		// si es lo elegido (cualquier otra salida vuelve a los ajustes).
+		pc_vs_set_pending(false);
+		pc_speedrun_set_active(action == 1);
+		pc_coop_set_pending(action == 2);
+		pc_coop_set_chosen_at_title(true);
+		mPendingExitStatus = STATUS_ExitToStoryMode;
+		mStatus            = STATUS_Exiting;
+		return true;
+	case 3:
+		// VS: dos capitanes, sin partida guardada. Sale por el camino del modo
+		// desafío (no toca la tarjeta) y CardSelect lo lleva directo al mapa
+		// tras elegir mandos y capitanes.
+		pc_speedrun_set_active(false);
+		pc_coop_set_pending(true);
+		pc_vs_set_pending(true);
+		pc_coop_set_chosen_at_title(true);
+		mPendingExitStatus = STATUS_ExitToChallengeMode;
+		mStatus            = STATUS_Exiting;
+		return true;
+	case 4:
+		mCurrentMenuID = MENU_Options;
+		mOptionsMenu->start(0);
+		return false;
+	case 5:
+		// 1P o cooperativo se elige luego, en CardSelect.
+		pc_vs_set_pending(false);
+		pc_coop_set_pending(false);
+		pc_speedrun_set_active(false);
+		mPendingExitStatus = STATUS_ExitToChallengeMode;
+		mStatus            = STATUS_Exiting;
+		return true;
+	default: return false;
 	}
 }
 
@@ -305,6 +386,9 @@ void zen::ogScrTitleMgr::start(bool hasChallenge)
 	} else {
 		mMainMenu = mMenuNoChallenge;
 	}
+#if defined(PIKI_PC_PORT)
+	mPcHasChallenge = hasChallenge;
+#endif
 
 	SeSystem::playSysSe(ogEnumFix(YMENU_SELECT2, SE_PIKI_ATTACK_VOICE));
 
@@ -353,9 +437,6 @@ zen::ogScrTitleMgr::TitleStatus zen::ogScrTitleMgr::update(Controller* input)
 	}
 
 	mNoInputTimer += gsys->getFrameTime();
-#if defined(PIKI_PC_PORT)
-	if (pc_online_choice_open()) mNoInputTimer = 0.0f;
-#endif
 	if (mNoInputTimer >= 60.0f) {
 		input->updateCont(KBBTN_B);
 		mMainMenu->update(input);
@@ -365,125 +446,22 @@ zen::ogScrTitleMgr::TitleStatus zen::ogScrTitleMgr::update(Controller* input)
 	case MENU_MainMenu:
 	{
 #if defined(PIKI_PC_PORT)
-		int forced = -1;
-		if (pc_online_choice_open()) {
-			const int r = pc_online_menu_update(input);
-			if (r == PC_ONLINE_MENU_CANCEL) {
-				mMainMenu->start(sPcOnlineAction == 3 ? 2 : 1); // back on the row
-				sPcOnlineAction = -1;
-			}
-			if (r != PC_ONLINE_MENU_LOCAL) {
-				break;
-			}
-			forced          = sPcOnlineAction;
-			sPcOnlineAction = -1;
-		}
-		if (forced < 0) {
-			mMainMenu->update(input);
-		}
-		int flag0         = forced < 0 ? mMainMenu->getStatusFlag() : 0;
-		mCurrentSelection = forced < 0 ? mMainMenu->getSelectMenu() : -1;
-#else
 		mMainMenu->update(input);
 		int flag0         = mMainMenu->getStatusFlag();
 		mCurrentSelection = mMainMenu->getSelectMenu();
-#endif
 		if (flag0 != 0) {
 			break;
 		}
-#if defined(PIKI_PC_PORT)
-		// Orden en pantalla: Start / Co-op / VS / Custom Maps / Options /
-		// Speedrun / Randomizer / [Challenge Mode] / Exit. Abajo se trabaja con
-		// el orden interno de siempre (0 Start, 1 Speedrun, 2 Co-op, 3 VS, 4
-		// Options, 5 Challenge Mode) más 6 Randomizer, 7 Exit y 8 Custom Maps.
-		static const int kPcRowToAction[8]          = { 0, 2, 3, 8, 4, 1, 6, 7 };
-		static const int kPcChallengeRowToAction[9] = { 0, 2, 3, 8, 4, 1, 6, 5, 7 };
-		const bool hasChallenge = mMainMenu == mMenuWithChallenge;
-		const int rowCount      = hasChallenge ? 9 : 8;
-		if (mCurrentSelection >= 0 && mCurrentSelection < rowCount) {
-			mCurrentSelection = hasChallenge ? kPcChallengeRowToAction[mCurrentSelection]
-			                                 : kPcRowToAction[mCurrentSelection];
-		}
-		if (forced >= 0) {
-			mCurrentSelection = forced;
-		} else if ((mCurrentSelection == 2 || mCurrentSelection == 3) && pc_online_menu_available != nullptr
-		           && pc_online_menu_available()) {
-			// Co-op / VS: local or online first.
-			sPcOnlineAction = mCurrentSelection;
-			pc_online_menu_open(mCurrentSelection == 3);
+		// 0 Start, 1 Play Together, 2 Extra Modes, 3 Options, 4 Exit.
+		if (mCurrentSelection == 1 || mCurrentSelection == 2) {
+			mCurrentMenuID = mCurrentSelection == 1 ? MENU_PlayTogether : MENU_ExtraModes;
+			(mCurrentSelection == 1 ? mPcPlayMenu : pcExtraMenu())->start(0);
 			break;
 		}
-		if (mCurrentSelection >= 0 && mCurrentSelection != 4) {
-			// Cualquier salida del título decide de nuevo: el Randomizer solo
-			// vale si es lo elegido, y la partida en curso ya no es ninguna.
-			pc_randomizer_clear_active();
-			pc_randomizer_set_menu_pending(mCurrentSelection == 6);
-			pc_mission_set_pending(mCurrentSelection == 8);
-		}
-		if (mCurrentSelection == 8) {
-			// Custom Maps: un jugador, sin partida guardada. Sale por el camino
-			// del modo desafío, como el VS; CardSelect abre el selector.
-			pc_vs_set_pending(false);
-			pc_speedrun_set_active(false);
-			pc_coop_set_pending(false);
-			pc_coop_set_chosen_at_title(true);
-			mPendingExitStatus = STATUS_ExitToChallengeMode;
-			mStatus            = STATUS_Exiting;
-			return mStatus;
-		}
-		if (mCurrentSelection == 6) {
-			// Randomizer: un jugador, Olimar o Louie, partidas propias del modo.
-			// CardSelect abre primero la explicación del modo.
-			pc_vs_set_pending(false);
-			pc_speedrun_set_active(false);
-			pc_coop_set_pending(false);
-			pc_coop_set_chosen_at_title(true);
-			mPendingExitStatus = STATUS_ExitToStoryMode;
-			mStatus            = STATUS_Exiting;
-			return mStatus;
-		}
-		if (mCurrentSelection == 7) {
-			pc_window_request_close();
-			return mStatus;
-		}
-		if (mCurrentSelection >= 0 && mCurrentSelection <= 3) {
-			pc_vs_set_pending(false);
-			// Speedrun solo si es lo elegido: cualquier otra salida vuelve a
-			// los ajustes del jugador.
-			pc_speedrun_set_active(mCurrentSelection == 1);
-		}
-		if (mCurrentSelection >= 0 && mCurrentSelection <= 2) {
-			// Speedrun es Start en vanilla: un jugador, Olimar, partida nueva.
-			pc_coop_set_pending(mCurrentSelection == 2);
-			pc_coop_set_chosen_at_title(true);
-			mPendingExitStatus = STATUS_ExitToStoryMode;
-			mStatus            = STATUS_Exiting;
-			return mStatus;
-		}
-		if (mCurrentSelection == 3) {
-			// VS: dos capitanes, sin partida guardada. Sale por el camino del
-			// modo desafío (no toca la tarjeta) y CardSelect lo lleva directo
-			// al mapa tras elegir mandos y capitanes.
-			pc_coop_set_pending(true);
-			pc_vs_set_pending(true);
-			pc_coop_set_chosen_at_title(true);
-			mPendingExitStatus = STATUS_ExitToChallengeMode;
-			mStatus            = STATUS_Exiting;
-			return mStatus;
-		}
-		if (mCurrentSelection == 4) {
-			mCurrentMenuID = MENU_Options;
-			mOptionsMenu->start(0);
-			break;
-		}
-		if (mCurrentSelection == 5) {
-			// 1P o cooperativo se elige luego, en CardSelect.
-			pc_vs_set_pending(false);
-			pc_coop_set_pending(false);
-			pc_speedrun_set_active(false);
-			mPendingExitStatus = STATUS_ExitToChallengeMode;
-			mStatus            = STATUS_Exiting;
-			return mStatus;
+		static const int kMainToAction[5] = { 0, -1, -1, 4, 7 };
+		if (mCurrentSelection >= 0 && mCurrentSelection < 5) {
+			if (pcRunAction(kMainToAction[mCurrentSelection])) return mStatus;
+			if (mCurrentMenuID != MENU_MainMenu) break; // Options
 		}
 #else
 		if (mCurrentSelection == 0) {
@@ -513,6 +491,39 @@ zen::ogScrTitleMgr::TitleStatus zen::ogScrTitleMgr::update(Controller* input)
 		break;
 	}
 #if defined(PIKI_PC_PORT)
+	case MENU_PlayTogether:
+	case MENU_ExtraModes:
+	{
+		DrawMenu* menu = mCurrentMenuID == MENU_PlayTogether ? mPcPlayMenu : pcExtraMenu();
+		menu->update(input);
+		const int flag    = menu->getStatusFlag();
+		mCurrentSelection = menu->getSelectMenu();
+		if (flag != 0) {
+			break;
+		}
+		// Play Together: 2 Co-op, 3 VS. Extra Modes: [5 Challenge Mode,] 1
+		// Speedrun, 6 Randomizer, 8 Custom Maps.
+		static const int kPlay[2]  = { 2, 3 };
+		static const int kExtra[4] = { 5, 1, 6, 8 };
+		int action                 = -1;
+		if (mCurrentMenuID == MENU_PlayTogether) {
+			if (mCurrentSelection >= 0 && mCurrentSelection < 2) action = kPlay[mCurrentSelection];
+		} else {
+			const int first = mPcHasChallenge ? 0 : 1;
+			if (mCurrentSelection >= 0 && mCurrentSelection + first < 4) action = kExtra[mCurrentSelection + first];
+		}
+		if (action >= 0) {
+			if (pcRunAction(action)) return mStatus;
+			break;
+		}
+		if (menu->checkSelectMenuCancel()) {
+			// De vuelta al principal, con su fila marcada.
+			menu->setCancelSelectMenuNo(-1);
+			mMainMenu->start(mCurrentMenuID == MENU_PlayTogether ? 1 : 2);
+			mCurrentMenuID = MENU_MainMenu;
+		}
+		break;
+	}
 	case MENU_Advanced:
 	{
 		// Mientras una lista está abierta la entrada la consume pc_settings.
@@ -878,6 +889,16 @@ void zen::ogScrTitleMgr::draw(Graphics& gfx)
 			break;
 		}
 #if defined(PIKI_PC_PORT)
+		case MENU_PlayTogether:
+		{
+			mPcPlayMenu->draw(gfx);
+			break;
+		}
+		case MENU_ExtraModes:
+		{
+			pcExtraMenu()->draw(gfx);
+			break;
+		}
 		case MENU_Advanced:
 		{
 			// Con una lista abierta el panel de grupos se esconde (la lista

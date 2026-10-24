@@ -29,6 +29,8 @@ public:
 		MENU_Language = 4,
 #if defined(PIKI_PC_PORT)
 		MENU_Advanced = 5, ///< Advanced Options (ajustes del port) con el panel de option.blo
+		MENU_PlayTogether = 6, ///< Co-op / VS
+		MENU_ExtraModes   = 7, ///< [Challenge Mode] / Speedrun / Randomizer / Custom Maps
 #endif
 	};
 
@@ -49,7 +51,12 @@ public:
 	TitleStatus update(Controller*);
 	void start(bool);
 #if defined(PIKI_PC_PORT)
-	void pcInsertCoopItem(DrawMenu* menu);
+	void pcSetupMainMenus();
+	bool pcRunAction(int action);
+	DrawMenu* pcExtraMenu() { return mPcExtraMenu[mPcHasChallenge ? 1 : 0]; }
+	DrawMenu* mPcPlayMenu      = nullptr; ///< Play Together: Co-op / VS
+	DrawMenu* mPcExtraMenu[2]  = {};      ///< Extra Modes sin / con Challenge Mode
+	bool mPcHasChallenge       = false;
 	void pcInsertAdvancedItem(DrawMenu* menu);
 	DrawMenu* mAdvancedMenu = nullptr; ///< option.blo reetiquetado: Display / Save / Back
 	bool mPcAchievementsOpen = false; ///< Options > Achievements abierto en el menú de cristal

@@ -280,6 +280,7 @@ void zen::DrawMenu::pcExtendMenu(immut PcMenuExtend& ext)
 			if (P2DPane* pane = mScreen.search(P2DPaneLibrary::makeTag(buf), false)) P2DPaneLibrary::changeParent(pane, &mScreen);
 		}
 	int listGrow = 0;
+	int rowStep  = 0; // el paso que se ha usado (para las letras, abajo)
 	for (int f = 0; f < 4; f++) {
 		sprintf(buf, kFamilies[f], 0);
 		P2DPane* first = mScreen.search(P2DPaneLibrary::makeTag(buf), false);
@@ -288,8 +289,11 @@ void zen::DrawMenu::pcExtendMenu(immut PcMenuExtend& ext)
 		if (!first || !last) {
 			continue;
 		}
-		const int dy      = (last->getPosV() - first->getPosV()) / (n - 1);
-		const int spacing = ext.spacing > 0 ? ext.spacing : dy;
+		const int dy = (last->getPosV() - first->getPosV()) / (n - 1);
+		int spacing  = ext.spacing > 0 ? ext.spacing : dy;
+		// Red de seguridad: la lista entera cabe en maxListHeight.
+		if (ext.maxListHeight > 0 && total > 1 && spacing * (total - 1) > ext.maxListHeight) spacing = ext.maxListHeight / (total - 1);
+		rowStep = spacing;
 		for (int k = 1; k <= ext.extraItems; k++) {
 			sprintf(buf, kFamilies[f], n - 1 + k);
 			pcClonePane(last, P2DPaneLibrary::makeTag(buf));
@@ -318,6 +322,20 @@ void zen::DrawMenu::pcExtendMenu(immut PcMenuExtend& ext)
 		if (f == 0) {
 			listGrow = spacing * (row - 1) - dy * (n - 1);
 		}
+	}
+	// Letras más altas que el paso: se pisarían. Se encogen lo justo (las dos
+	// familias de texto, normal y resaltada, igual).
+	if (rowStep > 0) {
+		for (int f = 0; f < 2; f++)
+			for (int i = 0; i < total; i++) {
+				sprintf(buf, kFamilies[f], i);
+				P2DPane* pane = mScreen.search(P2DPaneLibrary::makeTag(buf), false);
+				if (!pane || pane->getTypeID() != PANETYPE_TextBox) continue;
+				P2DTextBox* text = static_cast<P2DTextBox*>(pane);
+				const int h      = text->pcGetFontHeight();
+				const int fit    = rowStep * 92 / 100;
+				if (h > fit && h > 0) text->pcSetFontSize(s16(text->pcGetFontWidth() * fit / h), s16(fit));
+			}
 	}
 	// Cristal del panel: imágenes sin tag bajo panelParentTag; el resto de
 	// hijos (placa/texto del título) solo acompañan al desplazamiento.

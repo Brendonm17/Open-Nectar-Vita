@@ -26,6 +26,7 @@ public:
 		mFontHeight = h;
 	}
 	s16 pcGetFontHeight() { return mFontHeight; }
+	s16 pcGetFontWidth() { return mFontWidth; }
 #endif
 
 	virtual void loadResource(); // _08
