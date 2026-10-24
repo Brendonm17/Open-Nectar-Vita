@@ -107,7 +107,7 @@ Parsed parseName(const std::string& name)
 	};
 	// El hueso raíz de Blender ("Armature") no es un brazo.
 	if (has(j, "armature") || j == "root" || j == "rootbone") return p;
-	if (any({ "antenna", "antena", "happa", "ahoge" })) p.kind = B_ANTENNA;
+	if (any({ "antenna", "antena", "happa", "ahoge", "stem", "tallo", "sprout" })) p.kind = B_ANTENNA;
 	else if (any({ "thumb", "index", "middle", "ring", "pinky", "little", "finger", "\xe6\x8c\x87" })) p.kind = B_HAND; // 指
 	else if (any({ "hand", "wrist", "palm", "\xe6\x89\x8b" })) p.kind = B_HAND;                                       // 手
 	else if (any({ "forearm", "lowerarm", "elbow", "\xe3\x81\xb2\xe3\x81\x98" })) p.kind = B_LOWERARM;                 // ひじ
@@ -125,6 +125,29 @@ Parsed parseName(const std::string& name)
 		p.kind = B_SPINE; // 上半身, 下半身
 	if (p.kind == B_HIPS || p.kind == B_SPINE || p.kind == B_NECK || p.kind == B_HEAD) p.side = 0;
 	return p;
+}
+
+// Huesos de un model.nhm del creador (las articulaciones de Olimar): se
+// reconocen tal cual, con sus pivotes propios.
+bool parsePackBone(const std::string& name, Parsed& p)
+{
+	static const struct {
+		const char* name;
+		BoneKind kind;
+		int side;
+	} kBones[] = {
+		{ "kosinull", B_HIPS, 0 },      { "legcentre", B_HIPS, 0 },    { "sebonjnt", B_SPINE, 0 },   { "headjnt", B_NECK, 0 },
+		{ "happajnt1", B_ANTENNA, 0 }, { "happajnt2", B_ANTENNA, 0 }, { "happajnt3", B_ANTENNA, 0 }, { "rhandjnt", B_UPPERARM, -1 },
+		{ "lhandjnt", B_UPPERARM, 1 }, { "rlegjnt", B_UPPERLEG, -1 }, { "llegjnt", B_UPPERLEG, 1 },
+	};
+	for (const auto& b : kBones) {
+		if (name == b.name) {
+			p.kind = b.kind;
+			p.side = b.side;
+			return true;
+		}
+	}
+	return false;
 }
 
 bool isArm(BoneKind k) { return k == B_UPPERARM || k == B_LOWERARM || k == B_HAND; }
@@ -186,6 +209,7 @@ const char* markerName(int marker)
 	case M_LHIP: return L("Pierna izq.", "L hip");
 	case M_RFOOT: return L("Pie der.", "R foot");
 	case M_LFOOT: return L("Pie izq.", "L foot");
+	case M_STEMTOP: return L("Punta del tallo", "Stem tip");
 	default: return "?";
 	}
 }
@@ -207,6 +231,7 @@ int markerMirror(int marker)
 
 Mat34 fitTransform(const ImpModel& model, const OlimarRig& olimar, const FitSettings& fit)
 {
+	if (fit.keepPlacement) return translation({ 0, fit.offsetY, fit.offsetZ }) * uniformScale(std::max(fit.scale, 0.05f));
 	const Mat34 r = orientation(model, fit);
 	if (model.verts.empty()) return r;
 	Vec3 mn = r.point(model.verts[0].p), mx = mn;
@@ -229,7 +254,8 @@ std::vector<BoneInfo> classifyBones(const ImpModel& model, const Mat34& fit)
 	std::vector<char> known(model.bones.size(), 0);
 	for (std::size_t i = 0; i < model.bones.size(); ++i) {
 		const ImpBone& b = model.bones[i];
-		Parsed p         = b.humanoid.empty() ? parseName(b.name) : parseHumanoid(b.humanoid);
+		Parsed p;
+		if (!parsePackBone(b.name, p)) p = b.humanoid.empty() ? parseName(b.name) : parseHumanoid(b.humanoid);
 		if (p.kind == B_NONE && !b.humanoid.empty()) p = parseName(b.name);
 		out[i].kind = p.kind;
 		out[i].side = p.side;
@@ -365,6 +391,12 @@ std::array<Vec3, M_COUNT> estimateMarkers(const ImpModel& model, const OlimarRig
 	m[M_RHIP]      = { -legX, crotch, legZ };
 	m[M_LFOOT]     = { legX, mn.y + H * 0.04f, legZ };
 	m[M_RFOOT]     = { -legX, mn.y + H * 0.04f, legZ };
+	// Punta del tallo: el del Pikmin de referencia, a la escala del modelo y
+	// saliendo de la coronilla.
+	{
+		const float k     = H / std::max(olimar.bodyTop - olimar.min.y, 1e-3f);
+		m[M_STEMTOP]      = m[M_HEADTOP] + (olimar.pivot(J_ANT3) - olimar.pivot(J_ANT1)) * k;
+	}
 
 	// Con esqueleto: las articulaciones de verdad.
 	if (model.skinned && fit.useSkeleton) {
@@ -387,6 +419,12 @@ std::array<Vec3, M_COUNT> estimateMarkers(const ImpModel& model, const OlimarRig
 			else if (b.kind == B_HAND && pk != B_HAND) put(left ? M_LHAND : M_RHAND, i);
 			else if (isLeg(b.kind) && b.kind != B_FOOT && !isLeg(pk)) put(left ? M_LHIP : M_RHIP, i);
 			else if (b.kind == B_FOOT && pk != B_FOOT) put(left ? M_LFOOT : M_RFOOT, i);
+			else if (b.kind == B_ANTENNA && fit.pikmin) {
+				// La punta: el último hueso del tallo (se queda el más alto).
+				const Vec3 h = F.point(model.bones[i].head);
+				if (!set[M_STEMTOP] || h.y > m[M_STEMTOP].y) m[M_STEMTOP] = h;
+				set[M_STEMTOP] = true;
+			}
 		}
 		if (!set[M_NECK])
 			for (std::size_t i = 0; i < info.size(); ++i)
@@ -400,6 +438,11 @@ std::array<Vec3, M_COUNT> estimateMarkers(const ImpModel& model, const OlimarRig
 
 void autoFit(const ImpModel& model, const OlimarRig& olimar, FitSettings& fit)
 {
+	if (fit.keepPlacement) {
+		fit.scale = 1.0f, fit.offsetY = fit.offsetZ = 0, fit.quarter = 0, fit.lyingDown = false, fit.markersCustom = false;
+		fit.markers = estimateMarkers(model, olimar, fit);
+		return;
+	}
 	fit.scale         = 1.0f;
 	fit.quarter       = 0;
 	fit.lyingDown     = false;
@@ -511,6 +554,10 @@ RigResult buildRig(const ImpModel& model, const OlimarRig& olimar, const FitSett
 		{ J_RARM, mk[M_RSHOULDER], armR, H * 0.035f },
 		{ J_LLEG, mk[M_LHIP], mk[M_LFOOT] - Vec3 { 0, H * 0.06f, 0 }, legR },
 		{ J_RLEG, mk[M_RHIP], mk[M_RFOOT] - Vec3 { 0, H * 0.06f, 0 }, legR },
+		// Pikmin: el tallo, de la coronilla a la punta, en tres trozos.
+		{ fit.pikmin ? J_ANT1 : -1, mk[M_HEADTOP], mk[M_HEADTOP] + (mk[M_STEMTOP] - mk[M_HEADTOP]) * 0.33f, H * 0.015f },
+		{ fit.pikmin ? J_ANT2 : -1, mk[M_HEADTOP] + (mk[M_STEMTOP] - mk[M_HEADTOP]) * 0.33f, mk[M_HEADTOP] + (mk[M_STEMTOP] - mk[M_HEADTOP]) * 0.66f, H * 0.015f },
+		{ fit.pikmin ? J_ANT3 : -1, mk[M_HEADTOP] + (mk[M_STEMTOP] - mk[M_HEADTOP]) * 0.66f, mk[M_STEMTOP], H * 0.015f },
 	};
 	const float hipTop = std::max(mk[M_LHIP].y, mk[M_RHIP].y) + H * 0.04f;
 	for (std::size_t i = 0; i < n; ++i) {
@@ -520,6 +567,7 @@ RigResult buildRig(const ImpModel& model, const OlimarRig& olimar, const FitSett
 		float best[2] = { 0, 0 };
 		int bj[2]     = { J_SPINE, J_SPINE };
 		for (const Seg& s : segs) {
+			if (s.joint < 0) continue;
 			bool allowed = true;
 			if (s.joint == J_LARM || s.joint == J_RARM) {
 				const float side = s.joint == J_LARM ? 1.0f : -1.0f;
@@ -529,6 +577,8 @@ RigResult buildRig(const ImpModel& model, const OlimarRig& olimar, const FitSett
 				allowed          = p.y < hipTop && side * p.x > -H * 0.02f;
 			} else if (s.joint == J_HEAD) {
 				allowed = p.y > mk[M_NECK].y - H * 0.04f;
+			} else if (s.joint == J_ANT1 || s.joint == J_ANT2 || s.joint == J_ANT3) {
+				allowed = p.y > mk[M_HEADTOP].y - H * 0.05f; // solo lo que sale por encima de la cabeza
 			}
 			if (!allowed) continue;
 			const float d = std::max(segmentDistance(p, s.a, s.b) - s.radius, 0.0f) + H * 0.01f;
@@ -681,13 +731,65 @@ RigResult buildRig(const ImpModel& model, const OlimarRig& olimar, const FitSett
 	r.pivots[J_ROOT] = r.pivots[J_SPINE] = r.pivots[J_LEGS] = mk[M_PELVIS];
 	r.pivots[J_HEAD]  = mk[M_NECK];
 	r.pivots[J_FACE]  = mk[M_NECK] + (olimar.pivot(J_FACE) - olimar.pivot(J_HEAD)) * k;
-	r.pivots[J_ANT1]  = mk[M_NECK] + (olimar.pivot(J_ANT1) - olimar.pivot(J_HEAD)) * k;
-	r.pivots[J_ANT2]  = r.pivots[J_ANT1] + (olimar.pivot(J_ANT2) - olimar.pivot(J_ANT1)) * k;
-	r.pivots[J_ANT3]  = r.pivots[J_ANT2] + (olimar.pivot(J_ANT3) - olimar.pivot(J_ANT2)) * k;
+	if (fit.pikmin) {
+		// El tallo sale de la coronilla y acaba en la punta marcada; el codo
+		// del medio, como en el Pikmin original, girado y escalado a su sitio.
+		const Vec3 base = mk[M_HEADTOP], tip = mk[M_STEMTOP];
+		const Vec3 o4 = olimar.pivot(J_ANT1), o5 = olimar.pivot(J_ANT2), o6 = olimar.pivot(J_ANT3);
+		const float s = length(tip - base) / std::max(length(o6 - o4), 1e-4f);
+		r.pivots[J_ANT1] = base;
+		r.pivots[J_ANT2] = base + rotationBetween(o6 - o4, tip - base).dir(o5 - o4) * s;
+		r.pivots[J_ANT3] = tip;
+	} else {
+		r.pivots[J_ANT1] = mk[M_NECK] + (olimar.pivot(J_ANT1) - olimar.pivot(J_HEAD)) * k;
+		r.pivots[J_ANT2] = r.pivots[J_ANT1] + (olimar.pivot(J_ANT2) - olimar.pivot(J_ANT1)) * k;
+		r.pivots[J_ANT3] = r.pivots[J_ANT2] + (olimar.pivot(J_ANT3) - olimar.pivot(J_ANT2)) * k;
+	}
 	r.pivots[J_RARM]  = mk[M_RSHOULDER];
 	r.pivots[J_LARM]  = mk[M_LSHOULDER];
 	r.pivots[J_RLEG]  = mk[M_RHIP];
 	r.pivots[J_LLEG]  = mk[M_LHIP];
+
+	// Pikmin sin tallo propio: el del original, llevado a los pivotes nuevos
+	// (cada vértice con sus pesos, como lo movería el juego).
+	if (fit.pikmin && fit.addStem && fit.stemMaterial >= 0) {
+		bool hasStem = false;
+		for (const SkinVertex& v : r.verts)
+			for (int i = 0; i < 4 && !hasStem; ++i) hasStem = v.weight[i] > 0.3f && (v.joint[i] == J_ANT1 || v.joint[i] == J_ANT2 || v.joint[i] == J_ANT3);
+		if (!hasStem) {
+			std::array<Mat34, kJoints> move;
+			for (int j = 0; j < kJoints; ++j) {
+				Mat34 own = olimar.bind[std::size_t(j)];
+				setTranslation(own, r.pivots[std::size_t(j)]);
+				move[std::size_t(j)] = own * inverse(olimar.bind[std::size_t(j)]);
+			}
+			auto stemWeight = [](const SkinVertex& v) {
+				float w = 0;
+				for (int i = 0; i < 4; ++i)
+					if (v.joint[i] == J_ANT1 || v.joint[i] == J_ANT2 || v.joint[i] == J_ANT3) w += v.weight[i];
+				return w;
+			};
+			for (std::size_t t = 0; t + 2 < olimar.verts.size(); t += 3) {
+				if (stemWeight(olimar.verts[t]) < 0.5f || stemWeight(olimar.verts[t + 1]) < 0.5f || stemWeight(olimar.verts[t + 2]) < 0.5f) continue;
+				for (int k3 = 0; k3 < 3; ++k3) {
+					SkinVertex v = olimar.verts[t + std::size_t(k3)];
+					Vec3 p, n;
+					for (int i = 0; i < 4; ++i) {
+						if (v.weight[i] <= 0) continue;
+						if (v.joint[i] == J_FACE) v.joint[i] = J_HEAD;
+						p += move[std::size_t(v.joint[i])].point(v.p) * v.weight[i];
+						n += move[std::size_t(v.joint[i])].dir(v.n) * v.weight[i];
+					}
+					v.p = p;
+					v.n = normalize(n);
+					r.verts.push_back(v);
+					r.unbent.push_back(v.p);
+				}
+				r.triMaterial.push_back(fit.stemMaterial);
+				++r.stemTriangles;
+			}
+		}
+	}
 
 	r.min = r.max = r.verts[0].p;
 	for (const SkinVertex& v : r.verts) {

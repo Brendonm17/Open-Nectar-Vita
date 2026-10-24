@@ -6,6 +6,9 @@
 #include "lang.h"
 #include "obj_import.h"
 
+#include <cctype>
+#include <filesystem>
+
 namespace mm {
 
 bool importObjModel(const std::string& path, ImpModel& out, std::string& error)
@@ -14,6 +17,19 @@ bool importObjModel(const std::string& path, ImpModel& out, std::string& error)
 	nm::ObjInfo info;
 	if (!nm::readObj(path, 1.0f, in, info, error)) return false;
 	out.format = "OBJ";
+	// El lector no dice qué ha abierto: el .obj y lo que hay a su lado que
+	// pueda ser suyo (.mtl e imágenes).
+	{
+		namespace fs = std::filesystem;
+		out.files.push_back(path);
+		std::error_code ec;
+		for (const fs::directory_entry& e : fs::directory_iterator(fs::u8path(path).parent_path(), ec)) {
+			if (!e.is_regular_file(ec) || e.path() == fs::u8path(path)) continue;
+			std::string ext = e.path().extension().u8string();
+			for (char& c : ext) c = char(std::tolower(static_cast<unsigned char>(c)));
+			if (ext == ".mtl" || ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".tga" || ext == ".bmp") out.files.push_back(e.path().u8string());
+		}
+	}
 	for (const nectar::MeshModMaterial& m : in.materials) {
 		ImpMaterial mat;
 		mat.name    = "material" + std::to_string(out.materials.size());

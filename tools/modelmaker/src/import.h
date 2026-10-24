@@ -38,6 +38,9 @@ struct ImpModel {
 	bool skinned     = false;
 	bool facesMinusZ = false; ///< VRM 0.x mira hacia -Z
 	std::string warnings;     ///< una por línea
+	/// Todos los archivos leídos (el modelo, sus .bin, texturas, .mtl...): se
+	/// copian al proyecto para volver a abrirlo aunque se borre el original.
+	std::vector<std::string> files;
 
 	std::size_t triangles() const { return verts.size() / 3; }
 };
@@ -48,5 +51,7 @@ bool importModel(const std::string& path, ImpModel& out, std::string& error);
 bool importGltf(const std::string& path, ImpModel& out, std::string& error);
 bool importFbx(const std::string& path, ImpModel& out, std::string& error);
 bool importObjModel(const std::string& path, ImpModel& out, std::string& error);
+/// Un pack ya hecho (model.nhm): para volver a editar un personaje sin proyecto.
+bool importNhm(const std::string& path, ImpModel& out, std::string& error);
 
 } // namespace mm

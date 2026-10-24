@@ -297,6 +297,9 @@ void pc_settings_record_original_look(int original);
 /// Modelo HD de esa fila del selector (0 Olimar, 1 Louie, 2 Louie HD,
 /// 3 Pikmin, 4 Bulborb, 5 Dwarf Bulborb): 0 = apagado, se usa el original.
 int pc_settings_get_hd_model_enabled(int row);
+/// Modelo de Pikmin propio elegido para ese color (PikiColor: 0 azul, 1 rojo,
+/// 2 amarillo): id de Load/Pikmin, o "" para el del juego.
+const char* pc_settings_get_pikmin_model(int color);
 
 /// Idioma elegido en las opciones del juego (PAL): lo guarda como ajuste del
 /// port, en el orden del sistema (0 en, 1 de, 2 fr, 3 es, 4 it).

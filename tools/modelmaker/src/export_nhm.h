@@ -41,6 +41,7 @@ struct ExportResult {
 
 struct ExportOptions {
 	int textureMax = 1024;
+	bool pikmin    = false; ///< hasta 100 en pantalla: presupuesto de triángulos mucho menor
 	std::vector<char> noTint; ///< por material: no lo tiñe el color del J2 en cooperativo
 };
 

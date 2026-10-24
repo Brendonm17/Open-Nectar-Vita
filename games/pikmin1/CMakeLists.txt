@@ -337,6 +337,7 @@ set(PC_PORT_SOURCES
     pc_port/mods/pc_mission.cpp
     pc_port/mods/pc_campaign.cpp
     pc_port/mods/pc_characters.cpp
+    pc_port/mods/pc_pikmin_models.cpp
     # Mapas VS: formato y compilador compartidos con el editor de mapas.
     ${NECTAR_LIBS_DIR}/nectar_mapcore/src/map_json.cpp
     ${NECTAR_LIBS_DIR}/nectar_mapcore/src/i18n.cpp

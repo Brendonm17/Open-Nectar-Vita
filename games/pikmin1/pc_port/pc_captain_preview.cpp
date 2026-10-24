@@ -16,6 +16,7 @@
 #include "gl/pc_gfx.h"
 #include "mods/pc_hd_models.h"
 #include "pc_coop.h"
+#include "mods/pc_pikmin_models.h"
 
 #include <chrono>
 #include <cmath>
@@ -246,6 +247,12 @@ void pc_captain_preview_draw(int captain, int x, int y, int w, int h, int virtW,
 		drawn = pc_hd_model_draw_custom(gfx, m->shape, pc_captain_custom_model(captain), white);
 	} else if (p2Model >= 0) {
 		drawn = pc_hd_model_draw_skinned(gfx, m->shape, (PcHdModelId)p2Model, white);
+	} else if (color >= 0 && pc_pikmin_model_path(color)) {
+		// Modelo propio de ese color (Opciones > Gráficos), como en partida.
+		const Colour& c    = Piki::pikiColors[color];
+		const GXColor tint = pc_pikmin_model_tinted(color) ? GXColor { c.r, c.g, c.b, 255 } : white;
+		drawn              = pc_hd_model_draw_custom(gfx, m->shape, pc_pikmin_model_path(color), tint);
+		if (!drawn) m->shape->mMaterialList->setColour(Piki::pikiColors[color]);
 	} else if (color >= 0) {
 		// La textura del Pikmin es gris: la pinta el color de su especie.
 		m->shape->mMaterialList->setColour(Piki::pikiColors[color]);
@@ -258,7 +265,10 @@ void pc_captain_preview_draw(int captain, int x, int y, int w, int h, int virtW,
 	if (pc_captain_is_pikmin(captain) && captain != PC_CAPTAIN_PUFFMIN) {
 		if (!sLeaf) sLeaf = loadPreviewShape("pikis/happas/leaf.mod");
 		if (sLeaf) {
-			gfx.useMatrix(m->shape->getAnimMatrix(6), 0);
+			// Con un modelo propio, en la punta de su tallo.
+			Matrix4f tip;
+			const char* custom = color >= 0 ? pc_pikmin_model_path(color) : nullptr;
+			gfx.useMatrix(custom && pc_hd_model_custom_joint(m->shape, custom, 6, tip) ? tip : m->shape->getAnimMatrix(6), 0);
 			sLeaf->drawshape(gfx, sCam, nullptr);
 		}
 	}

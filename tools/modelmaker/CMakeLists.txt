@@ -71,6 +71,7 @@ add_executable(nectar_modelmaker
     src/import_gltf.cpp
     src/import_obj.cpp
     src/import_fbx.cpp
+    src/import_nhm.cpp
     # FBX: ufbx (MIT, third_party/ufbx/LICENSE).
     third_party/ufbx/ufbx.c
     src/rig.cpp

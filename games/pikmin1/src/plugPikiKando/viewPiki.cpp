@@ -11,6 +11,7 @@
 #include "PikiMgr.h"
 #if defined(PIKI_PC_PORT)
 #include "mods/pc_hd_models.h"
+#include "mods/pc_pikmin_models.h"
 #include "netplay/pc_netplay_policy.h"
 #include "netplay/pc_netplay_present.h"
 #include "timing/pc_anim_timing.h"
@@ -525,6 +526,9 @@ void ViewPiki::demoDraw(Graphics& gfx, immut Matrix4f* mtx)
 		if (amount > hdWhiten) hdWhiten = amount;
 	}
 	const GXColor hdHappaTint = { 255, 255, 255, 255 };
+	const int customColor     = (mColor == Blue || mColor == Red || mColor == Yellow) ? mColor : Red;
+	const char* customPath    = (mColor == Blue || mColor == Red || mColor == Yellow) ? pc_pikmin_model_path(mColor) : nullptr;
+	const bool customTinted   = customPath && pc_pikmin_model_tinted(mColor);
 	// The presentation pass submits only what the local frustum sees.
 	const bool submit = simSide || gfx.mCamera->isPointVisible(mSRT.t, getSize() * 4.0f);
 #endif
@@ -535,7 +539,11 @@ void ViewPiki::demoDraw(Graphics& gfx, immut Matrix4f* mtx)
 	if (aiCullable()) {
 #endif
 #if defined(PIKI_PC_PORT)
-		if (!pc_hd_model_draw_skinned(gfx, mPikiShape->mShape, hdPikiModel(), hdTint, static_cast<u8>(hdWhiten)))
+		// Modelo propio de su color (Load/Pikmin, elegido en Opciones); si no,
+		// el HD y si no, el original.
+		const GXColor customTint = { Piki::pikiColors[customColor].r, Piki::pikiColors[customColor].g, Piki::pikiColors[customColor].b, 255 };
+		if (!(customPath && pc_hd_model_draw_custom(gfx, mPikiShape->mShape, customPath, customTinted ? customTint : hdTint, static_cast<u8>(hdWhiten)))
+		    && !pc_hd_model_draw_skinned(gfx, mPikiShape->mShape, hdPikiModel(), hdTint, static_cast<u8>(hdWhiten)))
 #endif
 			mPikiShape->mShape->drawshape(gfx, *gfx.mCamera, nullptr);
 	}
@@ -549,14 +557,23 @@ void ViewPiki::demoDraw(Graphics& gfx, immut Matrix4f* mtx)
 #else
 	if (aiCullable() && AIPerf::optLevel < 3 && mHappaModel) {
 #endif
+#if defined(PIKI_PC_PORT)
+		// Con un modelo propio, la hoja va en la punta de su tallo.
+		Matrix4f customLeaf;
+		const Matrix4f& leafMtx = customPath && pc_hd_model_custom_joint(mPikiShape->mShape, customPath, 6, customLeaf)
+		                            ? customLeaf
+		                            : mPikiShape->mShape->getAnimMatrix(6);
+		gfx.useMatrix(leafMtx, 0);
+#else
 		gfx.useMatrix(mPikiShape->mShape->getAnimMatrix(6), 0);
+#endif
 #if defined(PIKI_PC_PORT)
 		// VS: la hoja/flor de los Pikmin de J2 va teñida de violeta; el cuerpo
 		// conserva su color para que se sepa qué tipo de Pikmin es.
 		const GXColor vsP2Tint = { 190, 70, 255, 255 };
 		const bool vsP2        = pc_vs_active() && mPlayerId == 1;
 		if (vsP2) pc_gfx_set_mat_color_tint(vsP2Tint);
-		if (!pc_hd_model_draw_rigid(gfx, mPikiShape->mShape->getAnimMatrix(6), hdHappaModel(), vsP2 ? vsP2Tint : hdHappaTint))
+		if (!pc_hd_model_draw_rigid(gfx, leafMtx, hdHappaModel(), vsP2 ? vsP2Tint : hdHappaTint))
 #endif
 			mHappaModel->drawshape(gfx, *gfx.mCamera, nullptr);
 #if defined(PIKI_PC_PORT)

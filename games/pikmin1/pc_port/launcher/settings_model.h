@@ -37,6 +37,14 @@ struct HdModel {
     bool enabled = true; // false = el juego usa el original aunque esté instalado
 };
 
+// Modelo de Pikmin propio de un color (Load/Pikmin, del creador de modelos).
+struct PikminModelChoice {
+    std::string color;    // "red", "yellow", "blue" (lo que espera --pikmin-model)
+    std::string name;     // "Red Pikmin"
+    std::string selected; // id elegido; "" = el del juego
+    std::vector<std::pair<std::string, std::string>> options; // (id, nombre), el primero ("", "Game")
+};
+
 // Todo lo que el juego cuenta de sus ajustes en una respuesta.
 struct SettingsSnapshot {
     // True cuando el juego pide que el launcher reproduzca exactamente su F1,
@@ -46,6 +54,7 @@ struct SettingsSnapshot {
     std::vector<std::string> texturePacks; // instalados en Load/Textures
     std::string activePack;                // "" = ninguno
     std::vector<HdModel> hdModels;
+    std::vector<PikminModelChoice> pikminModels;
     std::string message;                   // resultado de instalar un pack o modelo
     bool messageIsError = false;
 };

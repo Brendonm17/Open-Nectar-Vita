@@ -51,10 +51,22 @@ struct OlimarRig {
 	Vec3 min, max;
 	float bodyTop = 13; ///< lo más alto sin la antena
 
-	bool load(const std::string& dataDir, std::string& error);
+	/// `mod`: el modelo de referencia (pikis/nv3Model.mod para Olimar,
+	/// pikis/redModel.mod para los Pikmin: los tres colores comparten rig).
+	bool load(const std::string& dataDir, const std::string& mod, std::string& error);
 	/// Centro de lo que pesa en `joint` (para saber hacia dónde va un brazo).
 	Vec3 jointCentroid(int joint) const;
 	Vec3 pivot(int joint) const { return translationOf(bind[std::size_t(joint)]); }
+};
+
+/// Hoja, capullo o flor (pikis/happas/*.mod): el juego la dibuja aparte, en el
+/// espacio de la articulación 6 (la punta del tallo).
+struct LeafModel {
+	std::vector<SkinVertex> verts; ///< en el espacio de la articulación
+	std::vector<int> triMaterial;
+	std::vector<nectar::Image> materialTex;
+	std::vector<nectar::Rgba8> materialColour;
+	bool load(const std::string& path, std::string& error);
 };
 
 struct AnimParam {

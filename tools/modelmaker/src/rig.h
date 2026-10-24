@@ -27,6 +27,7 @@ enum Marker : int {
 	M_LHIP,
 	M_RFOOT,
 	M_LFOOT,
+	M_STEMTOP, ///< Pikmin: donde el juego pone la hoja (articulación 6)
 	M_COUNT
 };
 const char* markerName(int marker);
@@ -43,6 +44,10 @@ struct FitSettings {
 	bool straightenLegs = false;
 	bool symmetry       = true;
 	bool markersCustom  = false; ///< el usuario los ha movido: no recalcular
+	bool pikmin         = false; ///< rig de un Pikmin: tallo (4-6) con su punta para la hoja
+	bool keepPlacement  = false; ///< ya está en su sitio (un model.nhm que se vuelve a editar)
+	bool addStem        = true;  ///< Pikmin: añadir el tallo original si el modelo no trae
+	int stemMaterial    = -1;    ///< material (del modelo) con la textura del tallo original
 	std::array<Vec3, M_COUNT> markers {}; ///< en el espacio de Olimar, antes de enderezar
 	int textureMax = 1024;
 };
@@ -80,6 +85,7 @@ struct RigResult {
 	bool fromSkeleton   = false;
 	float mappedShare   = 0; ///< parte del peso que va por huesos reconocidos
 	int autoVertices    = 0; ///< vértices con pesos automáticos
+	int stemTriangles   = 0; ///< del tallo original añadido
 	std::vector<BoneInfo> bones;
 	std::string skeletonNote;
 };

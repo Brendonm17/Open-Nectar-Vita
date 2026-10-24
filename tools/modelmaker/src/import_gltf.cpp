@@ -116,6 +116,13 @@ Mat34 nodeLocal(const json& node)
 struct Gltf {
 	json doc;
 	fs::path dir;
+	std::vector<std::string>* files = nullptr;
+	bool readExternal(const fs::path& p, std::vector<std::uint8_t>& out)
+	{
+		if (!readAll(p, out)) return false;
+		if (files) files->push_back(p.u8string());
+		return true;
+	}
 	std::vector<std::vector<std::uint8_t>> buffers;
 	std::string warnings;
 
@@ -136,7 +143,7 @@ struct Gltf {
 				if (uri.rfind("data:", 0) == 0) {
 					const std::size_t comma = uri.find(',');
 					data                    = base64(comma == std::string::npos ? "" : uri.substr(comma + 1));
-				} else if (!readAll(dir / fs::u8path(uriDecode(uri)), data)) {
+				} else if (!readExternal(dir / fs::u8path(uriDecode(uri)), data)) {
 					error = std::string(L("falta el archivo de datos: ", "missing buffer file: ")) + uri;
 					return false;
 				}
@@ -231,7 +238,7 @@ struct Gltf {
 			if (uri.rfind("data:", 0) == 0) {
 				const std::size_t comma = uri.find(',');
 				bytes                   = base64(comma == std::string::npos ? "" : uri.substr(comma + 1));
-			} else if (!readAll(dir / fs::u8path(uriDecode(uri)), bytes)) {
+			} else if (!readExternal(dir / fs::u8path(uriDecode(uri)), bytes)) {
 				warn(std::string(L("falta la textura: ", "missing texture: ")) + uri);
 				return img;
 			}
@@ -255,7 +262,9 @@ struct Gltf {
 bool importGltf(const std::string& path, ImpModel& out, std::string& error)
 {
 	Gltf g;
-	g.dir = fs::u8path(path).parent_path();
+	g.dir   = fs::u8path(path).parent_path();
+	g.files = &out.files;
+	out.files.push_back(path);
 	std::vector<std::uint8_t> file, bin;
 	if (!readAll(fs::u8path(path), file)) {
 		error = L("no se puede leer el archivo", "cannot read the file");
@@ -567,6 +576,7 @@ bool importModel(const std::string& path, ImpModel& out, std::string& error)
 	if (ext == ".gltf" || ext == ".glb" || ext == ".vrm") return importGltf(path, out, error);
 	if (ext == ".obj") return importObjModel(path, out, error);
 	if (ext == ".fbx") return importFbx(path, out, error);
+	if (ext == ".nhm") return importNhm(path, out, error);
 	if (ext == ".dae" || ext == ".blend" || ext == ".pmx" || ext == ".3ds") {
 		error = L("DAE/BLEND/PMX: ábrelo en Blender y usa Archivo > Exportar > glTF 2.0 (.glb)", "DAE/BLEND/PMX: open it in Blender and use File > Export > glTF 2.0 (.glb)");
 		return false;

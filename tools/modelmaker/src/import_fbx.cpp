@@ -42,7 +42,7 @@ std::string str(const ufbx_string& s) { return std::string(s.data, s.length); }
 
 // La textura: dentro del FBX, en su ruta absoluta, en la relativa o junto al
 // archivo (lo normal cuando se descarga de Mixamo o Sketchfab).
-nectar::Image loadTexture(const ufbx_texture* tex, const fs::path& dir, std::string& warnings)
+nectar::Image loadTexture(const ufbx_texture* tex, const fs::path& dir, std::string& warnings, std::vector<std::string>& files)
 {
 	if (!tex) return {};
 	if (tex->content.size) return decode(static_cast<const unsigned char*>(tex->content.data), tex->content.size);
@@ -64,7 +64,10 @@ nectar::Image loadTexture(const ufbx_texture* tex, const fs::path& dir, std::str
 		std::ifstream f(p, std::ios::binary);
 		std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(f)), {});
 		nectar::Image img = decode(bytes.data(), bytes.size());
-		if (!img.empty()) return img;
+		if (!img.empty()) {
+			files.push_back(p.u8string());
+			return img;
+		}
 	}
 	const std::string shown = !name.empty() ? name : !rel.empty() ? rel : abs;
 	const std::string w     = std::string(L("falta la textura: ", "missing texture: ")) + fs::u8path(shown).filename().u8string();
@@ -88,6 +91,7 @@ bool importFbx(const std::string& path, ImpModel& out, std::string& error)
 	}
 	const fs::path dir = fs::u8path(path).parent_path();
 	out.format         = "FBX";
+	out.files.push_back(path);
 
 	// Huesos: los que mueven alguna piel y los nodos "bone" (con sus padres
 	// de esqueleto), en el orden de la escena (los padres antes).
@@ -130,7 +134,7 @@ bool importFbx(const std::string& path, ImpModel& out, std::string& error)
 		if (base.has_value)
 			for (int k = 0; k < 3; ++k) mat.color[k] = float(base.value_vec4.v[k]);
 		const ufbx_texture* tex = m->pbr.base_color.texture ? m->pbr.base_color.texture : m->fbx.diffuse_color.texture;
-		mat.texture             = loadTexture(tex, dir, out.warnings);
+		mat.texture             = loadTexture(tex, dir, out.warnings, out.files);
 		// Muchos exportadores dejan el color base en negro o gris si hay textura.
 		if (!mat.texture.empty()) mat.color[0] = mat.color[1] = mat.color[2] = 1.0f;
 		const ufbx_material_map& opacity = m->pbr.opacity;

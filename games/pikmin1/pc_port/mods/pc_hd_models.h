@@ -44,6 +44,11 @@ bool pc_hd_model_draw_skinned(Graphics& gfx, BaseShape* shape, PcHdModelId id, G
 // pc_characters.cpp) on Olimar's skeleton. Loaded on first use and kept.
 bool pc_hd_model_draw_custom(Graphics& gfx, BaseShape* shape, const char* path, GXColor tint, u8 whiten = 0);
 
+// Camera-space matrix of `joint` with a custom pack's own joint positions
+// (the stem tip, joint 6, is where the game draws a Pikmin's leaf). false
+// when the pack is missing or keeps the engine's joints.
+bool pc_hd_model_custom_joint(BaseShape* shape, const char* path, int joint, Matrix4f& out);
+
 // Draws a rigid HD mesh placed with `mtx` (camera-relative, as returned by
 // BaseShape::getAnimMatrix). Returns true only when it replaced the draw.
 bool pc_hd_model_draw_rigid(Graphics& gfx, const Matrix4f& mtx, PcHdModelId id, GXColor tint, u8 whiten = 0);

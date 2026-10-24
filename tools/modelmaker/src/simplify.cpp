@@ -130,6 +130,66 @@ std::size_t simplifyModel(ImpModel& model, std::size_t targetTris)
 
 	std::size_t alive = triCount;
 	std::vector<std::uint32_t> around;
+	// ¿Comparten algún triángulo vivo?
+	auto neighbours = [&](std::uint32_t a, std::uint32_t b) {
+		for (std::uint32_t t : vt[a]) {
+			if (!triAlive[t]) continue;
+			for (int k = 0; k < 3; ++k)
+				if (tris[std::size_t(t) * 3 + std::size_t(k)] == b) return true;
+		}
+		return false;
+	};
+	// Ningún triángulo se da la vuelta ni se queda sin área.
+	auto flipOk = [&](std::uint32_t from, std::uint32_t to) {
+		for (std::uint32_t t : vt[from]) {
+			if (!triAlive[t]) continue;
+			const std::uint32_t* v = &tris[std::size_t(t) * 3];
+			if (v[0] == to || v[1] == to || v[2] == to) continue;
+			Vec3 p[3], np[3];
+			for (int k = 0; k < 3; ++k) {
+				p[k]  = verts[v[k]].p;
+				np[k] = v[k] == from ? verts[to].p : p[k];
+			}
+			const Vec3 n0 = cross(p[1] - p[0], p[2] - p[0]), n1 = cross(np[1] - np[0], np[2] - np[0]);
+			const float l0 = length(n0), l1 = length(n1);
+			if (l1 <= l0 * 1e-3f || dot(n0, n1) < 0.3f * l0 * l1) return false;
+		}
+		return true;
+	};
+	// `from` pasa a ser `to`.
+	auto collapse = [&](std::uint32_t from, std::uint32_t to) {
+		for (std::uint32_t t : vt[from]) {
+			if (!triAlive[t]) continue;
+			std::uint32_t* v = &tris[std::size_t(t) * 3];
+			if (v[0] == to || v[1] == to || v[2] == to) {
+				triAlive[t] = 0;
+				--alive;
+				continue;
+			}
+			for (int k = 0; k < 3; ++k)
+				if (v[k] == from) v[k] = to;
+			vt[to].push_back(t);
+		}
+		vAlive[from] = 0;
+		q[to].add(q[from]);
+	};
+	// Vecinos de `to`: costes nuevos (solo cambian sus aristas).
+	auto refresh = [&](std::uint32_t to) {
+		around.clear();
+		auto& list = vt[to];
+		list.erase(std::remove_if(list.begin(), list.end(), [&](std::uint32_t t) { return !triAlive[t]; }), list.end());
+		for (std::uint32_t t : list)
+			for (int k = 0; k < 3; ++k) around.push_back(tris[std::size_t(t) * 3 + std::size_t(k)]);
+		std::sort(around.begin(), around.end());
+		around.erase(std::unique(around.begin(), around.end()), around.end());
+		for (std::uint32_t u : around) {
+			if (u == to) continue;
+			push(u, to);
+			push(to, u);
+		}
+	};
+
+	// Primera pasada: el interior de cada trozo de textura.
 	while (alive > targetTris && !heap.empty()) {
 		const Collapse c = heap.top();
 		heap.pop();
@@ -140,61 +200,78 @@ std::size_t simplifyModel(ImpModel& model, std::size_t targetTris)
 			heap.push({ now, c.from, c.to });
 			continue;
 		}
-		// Siguen siendo vecinos.
-		bool neighbours = false;
-		for (std::uint32_t t : vt[c.from]) {
+		if (!neighbours(c.from, c.to) || !flipOk(c.from, c.to)) continue;
+		collapse(c.from, c.to);
+		refresh(c.to);
+	}
+
+	// Segunda pasada, si aún sobran (muchas costuras, como los de Mixamo o
+	// Meshy): también las costuras, moviendo a la vez las copias de cada lado
+	// para que no se abra una grieta ni se estropee la textura.
+	if (alive > targetTris) {
+		std::unordered_map<std::uint64_t, std::vector<std::uint32_t>> twins;
+		auto posKey = [&](std::uint32_t v) {
+			std::uint32_t b[3];
+			std::memcpy(b, &verts[v].p, sizeof(b));
+			return hashBytes(b, sizeof(b));
+		};
+		for (std::uint32_t v = 0; v < vn; ++v)
+			if (vAlive[v]) twins[posKey(v)].push_back(v);
+		const std::vector<char> wasBorder = locked; // bordes y costuras de la primera pasada
+		std::fill(locked.begin(), locked.end(), 0);
+		heap = {};
+		for (std::size_t t = 0; t < triCount; ++t) {
 			if (!triAlive[t]) continue;
-			for (int k = 0; k < 3; ++k)
-				if (tris[std::size_t(t) * 3 + std::size_t(k)] == c.to) neighbours = true;
-		}
-		if (!neighbours) continue;
-		// Ningún triángulo se da la vuelta ni se queda sin área.
-		bool ok = true;
-		for (std::uint32_t t : vt[c.from]) {
-			if (!triAlive[t]) continue;
-			const std::uint32_t* v = &tris[std::size_t(t) * 3];
-			if (v[0] == c.to || v[1] == c.to || v[2] == c.to) continue;
-			Vec3 p[3], np[3];
-			for (int k = 0; k < 3; ++k) {
-				p[k]  = verts[v[k]].p;
-				np[k] = v[k] == c.from ? verts[c.to].p : p[k];
+			for (int e = 0; e < 3; ++e) {
+				const std::uint32_t a = tris[t * 3 + std::size_t(e)], b = tris[t * 3 + std::size_t((e + 1) % 3)];
+				push(a, b);
+				push(b, a);
 			}
-			const Vec3 n0 = cross(p[1] - p[0], p[2] - p[0]), n1 = cross(np[1] - np[0], np[2] - np[0]);
-			const float l0 = length(n0), l1 = length(n1);
-			if (l1 <= l0 * 1e-3f || dot(n0, n1) < 0.3f * l0 * l1) {
-				ok = false;
-				break;
-			}
 		}
-		if (!ok) continue;
-		// Colapso: `from` pasa a ser `to`.
-		for (std::uint32_t t : vt[c.from]) {
-			if (!triAlive[t]) continue;
-			std::uint32_t* v = &tris[std::size_t(t) * 3];
-			if (v[0] == c.to || v[1] == c.to || v[2] == c.to) {
-				triAlive[t] = 0;
-				--alive;
+		std::vector<std::pair<std::uint32_t, std::uint32_t>> pairs;
+		while (alive > targetTris && !heap.empty()) {
+			const Collapse c = heap.top();
+			heap.pop();
+			if (!vAlive[c.from] || !vAlive[c.to]) continue;
+			const double now = cost(c.from, c.to);
+			if (now > c.cost * 1.0001 + 1e-12) {
+				heap.push({ now, c.from, c.to });
 				continue;
 			}
-			for (int k = 0; k < 3; ++k)
-				if (v[k] == c.from) v[k] = c.to;
-			vt[c.to].push_back(t);
-		}
-		vAlive[c.from] = 0;
-		q[c.to].add(q[c.from]);
-		// Vecinos de `to`: costes nuevos.
-		around.clear();
-		auto& list = vt[c.to];
-		list.erase(std::remove_if(list.begin(), list.end(), [&](std::uint32_t t) { return !triAlive[t]; }), list.end());
-		for (std::uint32_t t : list)
-			for (int k = 0; k < 3; ++k) around.push_back(tris[std::size_t(t) * 3 + std::size_t(k)]);
-		std::sort(around.begin(), around.end());
-		around.erase(std::unique(around.begin(), around.end()), around.end());
-		// Solo cambian las aristas de `to` (las demás cuádricas siguen igual).
-		for (std::uint32_t u : around) {
-			if (u == c.to) continue;
-			push(u, c.to);
-			push(c.to, u);
+			if (!neighbours(c.from, c.to)) continue;
+			// Cada copia de `from` necesita una copia de `to` a su lado.
+			const std::vector<std::uint32_t>& fromTwins = twins[posKey(c.from)];
+			const std::vector<std::uint32_t>& toTwins   = twins[posKey(c.to)];
+			pairs.clear();
+			bool ok = true;
+			for (std::uint32_t f : fromTwins) {
+				if (!vAlive[f]) continue;
+				std::uint32_t partner = UINT32_MAX;
+				for (std::uint32_t t : toTwins)
+					if (vAlive[t] && neighbours(f, t)) {
+						partner = t;
+						break;
+					}
+				if (partner == UINT32_MAX || !flipOk(f, partner)) {
+					ok = false;
+					break;
+				}
+				pairs.push_back({ f, partner });
+			}
+			// Un borde abierto (sin copias) solo se mueve por el propio borde,
+			// hacia otro vértice del borde: así no se encoge el agujero.
+			if (ok && fromTwins.size() == 1 && wasBorder[c.from]) {
+				int shared = 0;
+				for (std::uint32_t t : vt[c.from])
+					if (triAlive[t]) {
+						const std::uint32_t* v = &tris[std::size_t(t) * 3];
+						shared += v[0] == c.to || v[1] == c.to || v[2] == c.to;
+					}
+				ok = shared == 1 && wasBorder[c.to];
+			}
+			if (!ok || pairs.empty()) continue;
+			for (const auto& [f, t] : pairs) collapse(f, t);
+			for (const auto& [f, t] : pairs) refresh(t);
 		}
 	}
 

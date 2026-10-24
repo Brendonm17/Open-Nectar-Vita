@@ -219,7 +219,20 @@ ExportResult buildParts(const ImpModel& model, const RigResult& rig, const Olima
 	}
 
 	// Semáforo.
-	if (int(res.parts.size()) > kMaxParts) {
+	if (opt.pikmin && int(res.parts.size()) <= kMaxParts) {
+		// Puede haber 100 a la vez (el original tiene unos 300 triángulos).
+		if (tris > 12000)
+			res.checks.push_back({ Check::Bad, std::to_string(tris) + L(" triángulos: demasiado para 100 Pikmin. Baja el número en el paso 1 (Aplicar).",
+			                                                           " triangles: too many for 100 Pikmin. Lower the count in step 1 (Apply).") });
+		else if (tris > 5000)
+			res.checks.push_back({ Check::Warn, std::to_string(tris) + L(" triángulos: con muchos Pikmin irá lento (mejor menos de 2.000).",
+			                                                            " triangles: slow with many Pikmin (under 2,000 is best).") });
+		else if (tris > 2000)
+			res.checks.push_back({ Check::Warn, std::to_string(tris) + L(" triángulos: bien en PC; en Android mejor menos de 2.000.",
+			                                                            " triangles: fine on PC; under 2,000 is best on Android.") });
+		else
+			res.checks.push_back({ Check::Ok, std::to_string(tris) + L(" triángulos: perfecto para 100 Pikmin.", " triangles: perfect for 100 Pikmin.") });
+	} else if (int(res.parts.size()) > kMaxParts) {
 		res.checks.push_back({ Check::Bad, L("Demasiados triángulos: el juego admite unos 170.000. Simplifica el modelo (Blender: Decimate).",
 		                                     "Too many triangles: the game takes about 170,000. Simplify the model (Blender: Decimate).") });
 	} else if (tris > 60000) {

@@ -1457,8 +1457,11 @@ int main(int argc, char** argv)
                             nectar::CharacterInfo info;
                             std::string error;
                             if (nectar::installCharacterPack(hubState.games[0].directory, pack.u8string(), info, error))
-                                platform::showMessage("Character installed",
-                                                      "\"" + info.name + "\" is in the captain selector of Pikmin.", false);
+                                platform::showMessage(info.isPikmin() ? "Pikmin model installed" : "Character installed",
+                                                      info.isPikmin()
+                                                          ? "\"" + info.name + "\" is installed. Pick it in Settings > HD Models > Pikmin models, or in the game's Options > Graphics."
+                                                          : "\"" + info.name + "\" is in the captain selector of Pikmin.",
+                                                      false);
                             else
                                 platform::showMessage("Could not install the character", error, true);
                         }

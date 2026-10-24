@@ -468,7 +468,7 @@ Affine affineInverse(const Affine& a)
 // engine's bind offsets, so the arms swing from the character's own
 // shoulders. The pack's inverse binds give its bind positions; their
 // rotation is always the engine's.
-void retargetSkin(const Model& model, BaseShape* shape, std::vector<float>& matrices)
+void retargetSkin(const Model& model, BaseShape* shape, std::vector<float>& matrices, std::vector<Affine>* animOut = nullptr)
 {
 	const int count = shape->mJointCount;
 	std::vector<Affine> bind(count), packBind(count), packAnim(count);
@@ -494,6 +494,7 @@ void retargetSkin(const Model& model, BaseShape* shape, std::vector<float>& matr
 		for (int row = 0; row < 3; ++row) local.m[row][3] += packLocal.m[row][3] - bindLocal.m[row][3];
 		packAnim[j] = affineMul(packAnim[parent], local);
 	}
+	if (animOut) *animOut = packAnim;
 	for (size_t i = 0; i < model.bones.size(); ++i) {
 		const int idx     = model.bones[i].shapeIndex;
 		const Affine skin = affineMul(packAnim[idx], affineInverse(packBind[idx]));
@@ -563,6 +564,21 @@ bool pc_hd_model_draw_custom(Graphics& gfx, BaseShape* shape, const char* path, 
 	Model& model = sCustomModels[path];
 	if (!model.attempted) loadModel(model, fs::u8path(path));
 	return drawSkinned(gfx, shape, finishPrepare(model), kCustomEntry, tint, whiten);
+}
+
+bool pc_hd_model_custom_joint(BaseShape* shape, const char* path, int joint, Matrix4f& out)
+{
+	if (!path || !*path || !shape || !shape->mAnimMatrices || joint < 0 || joint >= shape->mJointCount) return false;
+	Model& model = sCustomModels[path];
+	if (!model.attempted) loadModel(model, fs::u8path(path));
+	if (!model.ready || !(model.flags & kModelFlagRetarget) || !resolveBones(model, kCustomEntry, shape)) return false;
+	std::vector<float> matrices(model.bones.size() * 12);
+	std::vector<Affine> anim;
+	retargetSkin(model, shape, matrices, &anim);
+	out.makeIdentity();
+	for (int row = 0; row < 3; ++row)
+		for (int col = 0; col < 4; ++col) out.mMtx[row][col] = anim[joint].m[row][col];
+	return true;
 }
 
 bool pc_hd_model_draw_rigid(Graphics& gfx, const Matrix4f& mtx, PcHdModelId id, GXColor tint, u8 whiten)

@@ -74,6 +74,14 @@ bool parseSettingsDump(const std::string& output, SettingsSnapshot& snapshot, st
             snapshot.hdModels.push_back({ m.integer("row", 0), m.str("name"), m.flag("installed", false), m.flag("enabled", true) });
         }
     }
+    if (const Json* models = root.get("pikminModels"); models && models->type == Json::Type::Array) {
+        for (const Json& m : models->items) {
+            PikminModelChoice choice { m.str("color"), m.str("name"), m.str("selected"), {} };
+            if (const Json* options = m.get("options"); options && options->type == Json::Type::Array)
+                for (const Json& o : options->items) choice.options.push_back({ o.str("id"), o.str("name") });
+            snapshot.pikminModels.push_back(std::move(choice));
+        }
+    }
     snapshot.message = root.str("message");
     snapshot.messageIsError = root.flag("messageError", false);
     return true;

@@ -17,6 +17,7 @@
 #include "settings/pc_glass_menu.h"
 #include "GlobalGameOptions.h"
 #include "mods/pc_hd_models.h"
+#include "mods/pc_pikmin_models.h"
 #include "mods/pc_hd_model_convert.h"
 #include "pc_file_dialog.h"
 #include "settings/pc_settings_p2d.h"
@@ -254,6 +255,9 @@ struct PcConfig {
     // (Olimar, Louie, Louie HD, Pikmin, Bulborb, Dwarf Bulborb). Apagado =
     // se dibuja el original aunque esté instalado. Se aplica reiniciando.
     int hdModelsDisabled = 0;
+    // Modelos de Pikmin propios (Load/Pikmin) por color (PikiColor: azul,
+    // rojo, amarillo): id del pack, vacío = el del juego.
+    std::string pikminModel[3];
 
     void applyDefaults() {
         windowWidth = 1280;
@@ -342,6 +346,7 @@ struct PcConfig {
         texturePack.clear();
         texturePackEnabled = 0;
         hdModelsDisabled = 0;
+        for (std::string& m : pikminModel) m.clear();
         for (int i = 0; i < PC_KEY_ACT_COUNT; i++) {
             keyboardBindings[i] = kDefaultKeyBindings[i];
             keyboardBindings2[i] = pc_window_default_key_binding2(i);
@@ -1259,6 +1264,9 @@ void saveConfig() {
     out << "texturePack = " << sConfig.texturePack << "\n";
     out << "texturePackEnabled = " << sConfig.texturePackEnabled << "\n";
     out << "hdModelsDisabled = " << sConfig.hdModelsDisabled << "\n";
+    out << "pikminModelBlue = " << sConfig.pikminModel[Blue] << "\n";
+    out << "pikminModelRed = " << sConfig.pikminModel[Red] << "\n";
+    out << "pikminModelYellow = " << sConfig.pikminModel[Yellow] << "\n";
     out << "controlMode = " << sConfig.controlMode << "\n";
     out << "mouseSensitivity = " << sConfig.mouseSensitivity << "\n";
     out << "gyroEnabled = " << sConfig.gyroEnabled << "\n";
@@ -1578,6 +1586,13 @@ void loadConfig() {
         }
         else if (key == "hdModelsDisabled") {
             sConfig.hdModelsDisabled = atoi(val.c_str()) & 0x3F;
+        }
+        else if (key == "pikminModelBlue" || key == "pikminModelRed" || key == "pikminModelYellow") {
+            // Nombre de una carpeta de Load/Pikmin: solo letras, números y guiones.
+            bool safe = val.size() <= 64;
+            for (char c : val) safe = safe && (isalnum((unsigned char)c) || c == '-');
+            const int color = key == "pikminModelBlue" ? Blue : key == "pikminModelRed" ? Red : Yellow;
+            sConfig.pikminModel[color] = safe ? val : std::string();
         }
         else if (key == "texturePackEnabled") {
             sConfig.texturePackEnabled = atoi(val.c_str()) ? 1 : 0;
@@ -2055,6 +2070,7 @@ void pollMenuInput() {
     }
 
     auto openMenu = [] {
+        pc_pikmin_models_refresh(); // modelos instalados con el juego abierto
         sPending = sConfig;
         sPending.controlMode = pc_window_get_control_mode();
         sMenuOpen = true;
@@ -2672,6 +2688,21 @@ void graphicsRowChange(int row, bool left, bool right, bool ok) {
             sInTexturePacksSubmenu = true;
             sTexturePacksSelection = 0;
         }
+        return;
+    }
+    // Modelos de Pikmin: el del juego y los de Load/Pikmin para ese color.
+    if (row >= 14 && row <= 16) {
+        const int color = row == 14 ? Red : row == 15 ? Yellow : Blue;
+        const int count = pc_pikmin_models_count(color);
+        int at          = -1; // -1 = el del juego
+        for (int k = 0; k < count; k++)
+            if (sPending.pikminModel[color] == pc_pikmin_models_id(color, k)) at = k;
+        at = left ? (at + 1 + count) % (count + 1) - 1 : (at + 2) % (count + 1) - 1;
+        sPending.pikminModel[color] = at < 0 ? std::string() : std::string(pc_pikmin_models_id(color, at));
+        // Se ve al momento (no mientras F1 sondea la lista de opciones).
+        if (!sProbing) sConfig.pikminModel[color] = sPending.pikminModel[color];
+        (void)right;
+        (void)ok;
         return;
     }
     if (row == 11) {
@@ -8647,6 +8678,10 @@ void pc_settings_store_language(unsigned char osLanguage) {
     saveConfig();
 }
 
+const char* pc_settings_get_pikmin_model(int color) {
+    return (color >= 0 && color < 3) ? sConfig.pikminModel[color].c_str() : "";
+}
+
 int pc_settings_get_hd_model_enabled(int row) {
     return row < 0 || row >= 6 || !(sConfig.hdModelsDisabled & (1 << row));
 }
@@ -8816,6 +8851,14 @@ void graphicsRowValue(int i, char* value, size_t n) {
         break;
     }
     case 12: snprintf(value, n, "%s", sPending.perPixelLighting ? "Smooth" : "Original"); break;
+    case 14:
+    case 15:
+    case 16: {
+        const int color = i == 14 ? Red : i == 15 ? Yellow : Blue;
+        const char* name = pc_pikmin_models_name_of(color, sPending.pikminModel[color].c_str());
+        snprintf(value, n, "%s", *name ? name : "Game");
+        break;
+    }
     case 13: {
         const char* names[4] = { "Off (original)", "Soft", "Normal", "Strong" };
         snprintf(value, n, "%s", names[(sPending.shadows >= 0 && sPending.shadows <= 3) ? sPending.shadows : 0]);
@@ -8985,6 +9028,9 @@ const GroupRow kGraphicsRows[] = {
     { SRC_GFX, 9, "Saturation", "Colour strength. 1.00 is neutral, 0.00 is black and white." },
     { SRC_GFX, 10, "Texture Packs", "Replacement textures made by the community. Install one from its zip or switch between them. Changes need a restart." },
     { SRC_GFX, 11, "HD Models", "High-detail character models. Install each one from its zip, then turn it On or Off." },
+    { SRC_GFX, 14, "Red Pikmin", "Model for the red Pikmin: the game's, or one made with the Model Maker (Load/Pikmin). The leaf, bud and flower stay the game's." },
+    { SRC_GFX, 15, "Yellow Pikmin", "Model for the yellow Pikmin: the game's, or one made with the Model Maker (Load/Pikmin). The leaf, bud and flower stay the game's." },
+    { SRC_GFX, 16, "Blue Pikmin", "Model for the blue Pikmin: the game's, or one made with the Model Maker (Load/Pikmin). The leaf, bud and flower stay the game's." },
 };
 
 const GroupRow kControlsRows[] = {
@@ -9178,6 +9224,7 @@ const GroupSection kSections[] = {
     { PC_SET_GROUP_GRAPHICS, 4, "POST-PROCESSING" },
     { PC_SET_GROUP_GRAPHICS, 8, "COLOUR" },
     { PC_SET_GROUP_GRAPHICS, 12, "CONTENT" },
+    { PC_SET_GROUP_GRAPHICS, 14, "PIKMIN MODELS" },
     { PC_SET_GROUP_CONTROLS, 0, "BINDINGS" },
     { PC_SET_GROUP_CONTROLS, 2, "SCHEME" },
     { PC_SET_GROUP_CONTROLS, 5, "ACTIONS" },
@@ -9597,6 +9644,7 @@ void pc_settings_restart_prompt_answer(bool restart) {
 }
 
 void pc_settings_rows_begin(void) {
+    pc_pikmin_models_refresh();
     sPending = sConfig;
     sPending.controlMode = pc_window_get_control_mode();
     sVideoConfirmActive = false;
@@ -9686,6 +9734,8 @@ void pc_settings_touch_drag(float dy) { sTouchDragY += dy; }
 //   --texpack-activate NOMBRE       activa ese pack ("" = ninguno)
 //   --hdmodel-install FILA ZIP      convierte e instala un modelo HD
 //   --hdmodel-enable FILA 0|1       usar o no ese modelo HD instalado
+//   --pikmin-model COLOR ID         modelo de Pikmin de ese color (red, yellow,
+//                                   blue) de Load/Pikmin; ID "" = el del juego
 // Trabaja sobre pikmin_settings.conf del directorio actual, como el juego.
 namespace {
 
@@ -9771,6 +9821,32 @@ void headlessDump(const std::string& message = std::string(), bool messageIsErro
     }
     out += "]";
 
+    // Modelos de Pikmin propios: el elegido de cada color y los que hay.
+    out += ",\"pikminModels\":[";
+    pc_pikmin_models_refresh();
+    const int kOrder[3] = { Red, Yellow, Blue };
+    const char* kNames[3] = { "Red Pikmin", "Yellow Pikmin", "Blue Pikmin" };
+    for (int k = 0; k < 3; k++) {
+        const int color = kOrder[k];
+        if (k) out += ',';
+        out += "{\"color\":";
+        jsonString(out, pc_pikmin_models_colour_key(color));
+        out += ",\"name\":";
+        jsonString(out, kNames[k]);
+        out += ",\"selected\":";
+        jsonString(out, sConfig.pikminModel[color].c_str());
+        out += ",\"options\":[{\"id\":\"\",\"name\":\"Game\"}";
+        for (int m = 0; m < pc_pikmin_models_count(color); m++) {
+            out += ",{\"id\":";
+            jsonString(out, pc_pikmin_models_id(color, m));
+            out += ",\"name\":";
+            jsonString(out, pc_pikmin_models_name(color, m));
+            out += '}';
+        }
+        out += "]}";
+    }
+    out += "]";
+
     out += ",\"message\":";
     jsonString(out, message.c_str());
     out += ",\"messageError\":";
@@ -9787,7 +9863,8 @@ int pc_settings_cli(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--settings-dump") || !strcmp(argv[i], "--settings-set") || !strcmp(argv[i], "--settings-reset")
             || !strcmp(argv[i], "--texpack-install") || !strcmp(argv[i], "--texpack-activate")
-            || !strcmp(argv[i], "--hdmodel-install") || !strcmp(argv[i], "--hdmodel-enable")) {
+            || !strcmp(argv[i], "--hdmodel-install") || !strcmp(argv[i], "--hdmodel-enable")
+            || !strcmp(argv[i], "--pikmin-model")) {
             at = i;
             break;
         }
@@ -9826,6 +9903,21 @@ int pc_settings_cli(int argc, char** argv) {
         }
         sPending = sConfig;
         saveConfig();
+    } else if (!strcmp(argv[at], "--pikmin-model") && at + 2 < argc) {
+        const int color = pc_pikmin_models_colour_from_key(argv[at + 1]);
+        pc_pikmin_models_refresh();
+        bool known = !argv[at + 2][0];
+        for (int m = 0; color >= 0 && m < pc_pikmin_models_count(color); m++)
+            known = known || !strcmp(pc_pikmin_models_id(color, m), argv[at + 2]);
+        if (color < 0 || !known) {
+            message = "That Pikmin model is not installed for that colour.";
+            messageIsError = true;
+            result = 1;
+        } else {
+            sConfig.pikminModel[color] = argv[at + 2];
+            sPending = sConfig;
+            saveConfig();
+        }
     } else if (!strcmp(argv[at], "--hdmodel-install") && at + 2 < argc) {
         char msg[192] = {};
         const int written = pc_hd_models_convert_file(argv[at + 2], atoi(argv[at + 1]), msg, sizeof(msg));

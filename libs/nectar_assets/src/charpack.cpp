@@ -91,6 +91,7 @@ std::string infoJson(const CharacterInfo& info)
 	j["id"]       = info.id;
 	j["name"]     = info.name;
 	j["author"]   = info.author;
+	j["target"]   = info.target;
 	j["skeleton"] = info.skeleton;
 	return j.dump(1);
 }
@@ -103,6 +104,7 @@ bool parseInfo(const std::string& text, CharacterInfo& info, std::string& error)
 		info.id       = j.value("id", "");
 		info.name     = j.value("name", "");
 		info.author   = j.value("author", "");
+		info.target   = j.value("target", kTargetCaptain);
 		info.skeleton = j.value("skeleton", "olimar");
 	} catch (const std::exception& e) {
 		error = std::string("character.json: ") + e.what();
@@ -112,8 +114,14 @@ bool parseInfo(const std::string& text, CharacterInfo& info, std::string& error)
 		error = "character.json: format " + std::to_string(info.format) + " is newer than this version";
 		return false;
 	}
-	if (info.skeleton != "olimar") {
-		error = "character.json: unsupported skeleton '" + info.skeleton + "'";
+	const bool pikmin = info.target == kTargetPikminRed || info.target == kTargetPikminYellow || info.target == kTargetPikminBlue
+	                 || info.target == kTargetPikminAll;
+	if (info.target != kTargetCaptain && !pikmin) {
+		error = "character.json: unknown target '" + info.target + "'";
+		return false;
+	}
+	if (info.skeleton != (pikmin ? "pikmin" : "olimar")) {
+		error = "character.json: skeleton '" + info.skeleton + "' does not match '" + info.target + "'";
 		return false;
 	}
 	if (info.name.empty()) info.name = "Custom";
@@ -179,6 +187,13 @@ bool writeCharacterPack(const std::string& path, const CharacterFiles& files, st
 	std::vector<Entry> entries = { { "character.json", reinterpret_cast<const std::uint8_t*>(meta.data()), meta.size() },
 		                           { "model.nhm", files.nhm.data(), files.nhm.size() } };
 	if (!files.portrait.empty()) entries.push_back({ "portrait.png", files.portrait.data(), files.portrait.size() });
+	std::vector<std::string> projectNames;
+	projectNames.reserve(files.project.size());
+	for (const auto& [path, data] : files.project) {
+		if (!safeProjectPath(path)) continue;
+		projectNames.push_back("project/" + path);
+		entries.push_back({ projectNames.back().c_str(), data.data(), data.size() });
+	}
 
 	// Zip sin comprimir (el .nhm ya es binario; así se lee sin zlib).
 	std::vector<std::uint8_t> out, central;
@@ -243,10 +258,15 @@ bool readCharacterPack(const std::string& path, CharacterFiles& files, std::stri
 		if (at + 46 + nameLen > d.size()) break;
 		std::string name(reinterpret_cast<const char*>(&d[at + 46]), nameLen);
 		at += 46 + nameLen + extraLen + commentLen;
+		// El proyecto (para volver a editarlo) va bajo project/.
+		std::string projectPath;
+		const std::size_t proj = name.rfind("project/");
+		if (proj != std::string::npos && (proj == 0 || name[proj - 1] == '/')) projectPath = name.substr(proj + 8);
 		// Dentro de una carpeta si alguien lo volvió a comprimir a mano.
 		const std::size_t slash = name.find_last_of('/');
-		if (slash != std::string::npos) name = name.substr(slash + 1);
-		if (name != "character.json" && name != "model.nhm" && name != "portrait.png") continue;
+		if (projectPath.empty() && slash != std::string::npos) name = name.substr(slash + 1);
+		if (!projectPath.empty() && (!safeProjectPath(projectPath) || projectPath.back() == '/')) continue;
+		if (projectPath.empty() && name != "character.json" && name != "model.nhm" && name != "portrait.png") continue;
 		if (get32(d, local) != 0x04034b50 || usize > kMaxEntry) {
 			error = "damaged character pack";
 			return false;
@@ -276,7 +296,8 @@ bool readCharacterPack(const std::string& path, CharacterFiles& files, std::stri
 			error = "damaged character pack (" + name + ")";
 			return false;
 		}
-		if (name == "character.json") meta.assign(data.begin(), data.end());
+		if (!projectPath.empty()) files.project.push_back({ projectPath, std::move(data) });
+		else if (name == "character.json") meta.assign(data.begin(), data.end());
 		else if (name == "model.nhm") files.nhm = std::move(data);
 		else files.portrait = std::move(data);
 	}
@@ -290,13 +311,14 @@ bool readCharacterPack(const std::string& path, CharacterFiles& files, std::stri
 }
 
 std::string charactersDir(const std::string& gameDir) { return (fs::u8path(gameDir) / "Load" / "Characters").u8string(); }
+std::string pikminModelsDir(const std::string& gameDir) { return (fs::u8path(gameDir) / "Load" / "Pikmin").u8string(); }
 
 bool installCharacter(const std::string& gameDir, const CharacterFiles& files, std::string& installedDir, std::string& error)
 {
 	if (!validNhm(files.nhm, error)) return false;
 	CharacterInfo info = files.info;
 	if (!safeId(info.id)) info.id = characterId(info.name, files.nhm);
-	const fs::path dir = fs::u8path(charactersDir(gameDir)) / info.id;
+	const fs::path dir = fs::u8path(info.isPikmin() ? pikminModelsDir(gameDir) : charactersDir(gameDir)) / info.id;
 	std::error_code ec;
 	fs::create_directories(dir, ec);
 	if (ec) {
@@ -307,10 +329,48 @@ bool installCharacter(const std::string& gameDir, const CharacterFiles& files, s
 	if (!writeFile(dir / "model.nhm", files.nhm, error)) return false;
 	if (!files.portrait.empty() && !writeFile(dir / "portrait.png", files.portrait, error)) return false;
 	if (files.portrait.empty()) fs::remove(dir / "portrait.png", ec);
+	// El proyecto entero de nuevo (o fuera, si este no trae).
+	fs::remove_all(dir / "project", ec);
+	for (const auto& [path, data] : files.project) {
+		if (!safeProjectPath(path)) continue;
+		const fs::path target = dir / "project" / fs::u8path(path);
+		fs::create_directories(target.parent_path(), ec);
+		if (!writeFile(target, data, error)) return false;
+	}
 	// El json el último: sin él el juego no ve la carpeta.
 	if (!writeFile(dir / "character.json", std::vector<std::uint8_t>(meta.begin(), meta.end()), error)) return false;
 	installedDir = dir.u8string();
 	return true;
+}
+
+bool safeProjectPath(const std::string& path)
+{
+	if (path.empty() || path.size() > 240 || path[0] == '/' || path.find('\\') != std::string::npos || path.find(':') != std::string::npos) return false;
+	std::size_t at = 0;
+	while (at <= path.size()) {
+		const std::size_t next = path.find('/', at);
+		const std::string part = path.substr(at, next == std::string::npos ? std::string::npos : next - at);
+		if (part == ".." || part == ".") return false;
+		if (next == std::string::npos) break;
+		at = next + 1;
+	}
+	return true;
+}
+
+bool readProjectFolder(const std::string& characterDir, std::vector<std::pair<std::string, std::vector<std::uint8_t>>>& out)
+{
+	out.clear();
+	const fs::path root = fs::u8path(characterDir) / "project";
+	std::error_code ec;
+	if (!fs::is_directory(root, ec)) return false;
+	for (fs::recursive_directory_iterator it(root, ec), end; it != end && !ec; it.increment(ec)) {
+		if (!it->is_regular_file(ec)) continue;
+		std::string rel = fs::relative(it->path(), root, ec).generic_u8string();
+		if (ec || !safeProjectPath(rel)) continue;
+		std::vector<std::uint8_t> data;
+		if (readFile(it->path(), data)) out.push_back({ rel, std::move(data) });
+	}
+	return !out.empty();
 }
 
 bool installCharacterPack(const std::string& gameDir, const std::string& packPath, CharacterInfo& info, std::string& error)
@@ -324,17 +384,19 @@ bool installCharacterPack(const std::string& gameDir, const std::string& packPat
 	return true;
 }
 
-std::vector<CharacterInfo> listCharacters(const std::string& gameDir)
+namespace {
+
+std::vector<CharacterInfo> listIn(const std::string& root, bool pikmin)
 {
 	std::vector<CharacterInfo> out;
 	std::error_code ec;
-	for (const fs::directory_entry& e : fs::directory_iterator(fs::u8path(charactersDir(gameDir)), ec)) {
+	for (const fs::directory_entry& e : fs::directory_iterator(fs::u8path(root), ec)) {
 		if (!e.is_directory(ec)) continue;
 		std::vector<std::uint8_t> meta;
 		if (!readFile(e.path() / "character.json", meta) || !fs::is_regular_file(e.path() / "model.nhm", ec)) continue;
 		CharacterInfo info;
 		std::string error;
-		if (!parseInfo(std::string(meta.begin(), meta.end()), info, error)) continue;
+		if (!parseInfo(std::string(meta.begin(), meta.end()), info, error) || info.isPikmin() != pikmin) continue;
 		info.id  = e.path().filename().u8string();
 		info.dir = e.path().u8string();
 		out.push_back(info);
@@ -343,6 +405,11 @@ std::vector<CharacterInfo> listCharacters(const std::string& gameDir)
 	return out;
 }
 
+} // namespace
+
+std::vector<CharacterInfo> listCharacters(const std::string& gameDir) { return listIn(charactersDir(gameDir), false); }
+std::vector<CharacterInfo> listPikminModels(const std::string& gameDir) { return listIn(pikminModelsDir(gameDir), true); }
+
 bool removeCharacter(const std::string& gameDir, const std::string& id, std::string& error)
 {
 	if (!safeId(id)) {
@@ -350,7 +417,10 @@ bool removeCharacter(const std::string& gameDir, const std::string& id, std::str
 		return false;
 	}
 	std::error_code ec;
-	fs::remove_all(fs::u8path(charactersDir(gameDir)) / id, ec);
+	for (const std::string& root : { charactersDir(gameDir), pikminModelsDir(gameDir) }) {
+		fs::remove_all(fs::u8path(root) / id, ec);
+		if (ec) break;
+	}
 	if (ec) {
 		error = ec.message();
 		return false;

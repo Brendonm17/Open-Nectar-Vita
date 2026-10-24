@@ -114,7 +114,11 @@ bool App::init(const std::string& openPath, std::string& error)
 		loadModel(openPath, false);
 	} else if (gameReady_) {
 		std::string source;
-		if (loadProject(source)) loadModel(source, true);
+		int target = T_CAPTAIN;
+		if (loadProject(source, target)) {
+			setTarget(target);
+			loadModel(source, true);
+		}
 	}
 	return true;
 }
@@ -131,13 +135,21 @@ bool App::setupGame(std::string& error)
 		error = L("No encuentro el juego. Elige la carpeta donde está instalado Pikmin.", "Can't find the game. Choose the folder where Pikmin is installed.");
 		return false;
 	}
-	OlimarRig rig;
-	if (!rig.load(assets + "/dataDir", error)) return false;
 	std::vector<Anim> anims;
 	if (!loadAnimBundle(assets + "/dataDir/pikis/bluModel.anm", anims, error)) return false;
-	olimar_    = std::move(rig);
 	anims_     = std::move(anims);
 	assetsDir_ = assets;
+	if (!loadReference(error)) return false;
+	// Hoja, capullo y flor, para ver dónde los pondrá el juego.
+	static const char* const kLeaves[3] = { "leaf", "bud", "flower" };
+	for (int i = 0; i < 3; ++i) {
+		std::string ignored;
+		leaves_[i].load(assets + "/dataDir/pikis/happas/" + kLeaves[i] + ".mod", ignored);
+		for (GLuint t : leafTex_[i])
+			if (t) glDeleteTextures(1, &t);
+		leafTex_[i].clear();
+		for (const nectar::Image& img : leaves_[i].materialTex) leafTex_[i].push_back(uploadTexture(img, false));
+	}
 	if (cfg_.assetsDir != assets) {
 		cfg_.assetsDir = assets;
 		cfg_.save();
@@ -149,14 +161,82 @@ bool App::setupGame(std::string& error)
 	for (std::size_t i = 0; i < anims_.size(); ++i)
 		if (std::find(animOrder_.begin(), animOrder_.end(), int(i)) == animOrder_.end()) animOrder_.push_back(int(i));
 
-	for (GLuint t : olimarTex_)
-		if (t) glDeleteTextures(1, &t);
-	olimarTex_.clear();
-	for (const nectar::Image& img : olimar_.materialTex) olimarTex_.push_back(uploadTexture(img, true));
 	gameReady_ = true;
 	refreshInstalled();
 	resetCamera();
 	return true;
+}
+
+// El modelo del juego que se reemplaza: Olimar o un Pikmin (los tres colores
+// comparten esqueleto y pose; se usa el rojo).
+bool App::loadReference(std::string& error)
+{
+	OlimarRig rig;
+	if (!rig.load(assetsDir_ + "/dataDir", isPikmin() ? "pikis/redModel.mod" : "pikis/nv3Model.mod", error)) return false;
+	olimar_ = std::move(rig);
+	for (GLuint t : olimarTex_)
+		if (t) glDeleteTextures(1, &t);
+	olimarTex_.clear();
+	for (const nectar::Image& img : olimar_.materialTex) olimarTex_.push_back(uploadTexture(img, true));
+	return true;
+}
+
+// El color con el que el juego pinta a cada Pikmin (Piki::pikiColors); los
+// tres a la vez se ven de rojo aquí y el juego tiñe cada uno del suyo.
+void App::speciesColour(float out[3]) const
+{
+	static const float kColours[5][3] = { { 1, 1, 1 }, { 1.0f, 0.12f, 0.0f }, { 1.0f, 0.82f, 0.0f }, { 0.0f, 0.2f, 1.0f }, { 1.0f, 0.12f, 0.0f } };
+	for (int i = 0; i < 3; ++i) out[i] = kColours[target_][i];
+}
+
+// Material liso para el tallo original (el del juego no tiene textura: se tiñe
+// del color del Pikmin). Va el último, detrás de los del modelo.
+static const char* const kStemMaterial = "stem (Pikmin)";
+void App::ensureStemMaterial()
+{
+	if (!model_.materials.empty() && model_.materials.back().name == kStemMaterial) model_.materials.pop_back();
+	fit_.stemMaterial = -1;
+	if (isPikmin()) {
+		ImpMaterial stem;
+		stem.name = kStemMaterial;
+		float c[3];
+		speciesColour(c);
+		// Para los tres colores, blanco: el juego lo tiñe.
+		for (int i = 0; i < 3; ++i) stem.color[i] = target_ == T_ALL ? 1.0f : c[i];
+		fit_.stemMaterial = int(model_.materials.size());
+		model_.materials.push_back(stem);
+	}
+	exportOpt_.noTint.resize(model_.materials.size(), 0);
+	exportOpt_.pikmin = isPikmin();
+}
+
+void App::setTarget(int target)
+{
+	if (target == target_ || !gameReady_) {
+		target_ = target;
+		return;
+	}
+	const bool wasPikmin = isPikmin();
+	target_              = target;
+	std::string error;
+	if (!loadReference(error)) say(error, true);
+	fit_.pikmin = isPikmin();
+	// Presupuesto de triángulos: un capitán o hasta 100 Pikmin a la vez.
+	if (wasPikmin != isPikmin()) targetTris_ = isPikmin() ? 1500 : 30000;
+	refreshInstalled();
+	if (!hasModel_) {
+		resetCamera();
+		return;
+	}
+	ensureStemMaterial();
+	autoFit(model_, olimar_, fit_);
+	if (std::size_t(targetTris_) < model_.triangles() || source_.triangles() > model_.triangles()) {
+		resimplify(); // termina en finishLoad, que vuelve a montar todo
+	} else {
+		uploadTextures();
+		rebuild();
+	}
+	resetCamera();
 }
 
 std::string App::customDir() const { return (fs::path(cfg_.gameDir()) / "Load" / "Models" / "Custom").string(); }
@@ -186,12 +266,13 @@ void App::loadModel(const std::string& path, bool restoreProject)
 	working_           = true;
 	workDone_          = false;
 	const std::size_t target = std::size_t(targetTris_);
-	worker_ = std::thread([this, path, target] {
+	const std::size_t limit  = isPikmin() ? 3000 : kAutoSimplify;
+	worker_ = std::thread([this, path, target, limit] {
 		ImpModel m;
 		std::string error;
 		if (importModel(path, m, error)) {
 			pendingSource_ = m;
-			if (m.triangles() > kAutoSimplify) simplifyModel(m, target);
+			if (m.triangles() > limit) simplifyModel(m, target);
 		}
 		pending_      = std::move(m);
 		pendingError_ = error;
@@ -228,6 +309,7 @@ void App::finishLoad()
 	if (pendingResimplify_) {
 		// Misma colocación y puntos: solo cambia la malla.
 		model_ = std::move(pending_);
+		ensureStemMaterial();
 		uploadTextures();
 		rebuild();
 		say(std::to_string(model_.triangles()) + L(" triángulos.", " triangles."));
@@ -242,14 +324,24 @@ void App::finishLoad()
 	std::snprintf(charName_, sizeof(charName_), "%s", fs::u8path(path).stem().u8string().c_str());
 	fit_                 = FitSettings();
 	fit_.useSkeleton     = model_.skinned;
-	autoFit(model_, olimar_, fit_);
+	fit_.pikmin          = isPikmin();
+	fit_.keepPlacement   = model_.format == "NHM";
 	exportOpt_.noTint.assign(model_.materials.size(), 0);
+	ensureStemMaterial();
+	autoFit(model_, olimar_, fit_);
 	exportOpt_.textureMax = 1024;
 	if (restoreProject) {
-		// Los ajustes guardados con el proyecto.
-		std::ifstream f(fs::u8path(projectPath()));
+		// Los ajustes guardados con el proyecto (el de un personaje que se
+		// vuelve a editar, o el de la última sesión).
+		std::string text = restoreJson_;
+		if (text.empty()) {
+			std::ifstream f(fs::u8path(projectPath()));
+			text.assign(std::istreambuf_iterator<char>(f), {});
+		}
+		restoreJson_.clear();
 		try {
-			const json j = json::parse(f);
+			const json j = json::parse(text);
+			targetTris_         = j.value("targetTris", targetTris_);
 			fit_.scale          = j.value("scale", 1.0f);
 			fit_.quarter        = j.value("quarter", 0);
 			fit_.lyingDown      = j.value("lyingDown", false);
@@ -260,6 +352,7 @@ void App::finishLoad()
 			fit_.straightenLegs = j.value("straightenLegs", false);
 			fit_.symmetry       = j.value("symmetry", true);
 			fit_.markersCustom  = j.value("markersCustom", false);
+			fit_.addStem        = j.value("addStem", true);
 			exportOpt_.textureMax = j.value("textureMax", 1024);
 			std::snprintf(charName_, sizeof(charName_), "%s", j.value("charName", std::string(charName_)).c_str());
 			std::snprintf(charAuthor_, sizeof(charAuthor_), "%s", j.value("charAuthor", std::string()).c_str());
@@ -274,7 +367,18 @@ void App::finishLoad()
 			for (std::size_t i = 0; i < nt.size() && i < exportOpt_.noTint.size(); ++i) exportOpt_.noTint[i] = char(nt[i] != 0);
 		} catch (const std::exception&) {
 		}
-		say(L("Seguimos con tu modelo de la última vez.", "Picking up your model from last time."));
+		if (editingId_.empty() && !editingOlimar_) say(L("Seguimos con tu modelo de la última vez.", "Picking up your model from last time."));
+		else say(std::string(L("Editando \"", "Editing \"")) + editingName_ + L("\": al instalar se reemplaza.", "\": installing replaces it."));
+	} else if (model_.format == "NHM") {
+		// Sin proyecto: el pack tal cual, ya colocado y con sus pivotes; los
+		// brazos ya van como los de Olimar.
+		fit_.keepPlacement  = true;
+		fit_.straightenArms = false;
+		fit_.addStem        = false;
+		fit_.markers        = estimateMarkers(model_, olimar_, fit_);
+		say(std::string(L("Editando \"", "Editing \"")) + editingName_
+		    + L("\" desde el modelo guardado (no tenía el original): se pueden retocar los puntos y la colocación.",
+		        "\" from the saved model (it had no original): the dots and placement can be adjusted."));
 	} else {
 		say(std::string(L("Listo: ", "Loaded: ")) + fs::u8path(path).filename().u8string());
 	}
@@ -297,15 +401,16 @@ void App::uploadTextures()
 		bool repeat = true;
 		modelTex_.push_back(m.texture.empty() ? 0 : uploadTexture(m.texture, repeat));
 	}
-	order_.clear();
-	for (std::size_t t = 0; t < model_.triMaterial.size(); ++t) order_.push_back(t);
-	std::stable_sort(order_.begin(), order_.end(), [&](std::size_t a, std::size_t b) { return model_.triMaterial[a] < model_.triMaterial[b]; });
 }
 
 void App::rebuild()
 {
 	if (!hasModel_) return;
 	rig_          = buildRig(model_, olimar_, fit_);
+	// Triángulos por material (los del modelo y, en un Pikmin, el tallo añadido).
+	order_.clear();
+	for (std::size_t t = 0; t < rig_.triMaterial.size(); ++t) order_.push_back(t);
+	std::stable_sort(order_.begin(), order_.end(), [&](std::size_t a, std::size_t b) { return rig_.triMaterial[a] < rig_.triMaterial[b]; });
 	rigDirty_     = false;
 	exportDirty_  = true;
 	lastRebuild_  = ImGui::GetTime();
@@ -345,7 +450,13 @@ void App::fillMeshes()
 				olimarMesh_.ranges.push_back(r);
 				lastMat = mat;
 			}
-			const nectar::Rgba8 mc = std::size_t(mat) < olimar_.materialColour.size() ? olimar_.materialColour[std::size_t(mat)] : nectar::Rgba8 {};
+			nectar::Rgba8 mc = std::size_t(mat) < olimar_.materialColour.size() ? olimar_.materialColour[std::size_t(mat)] : nectar::Rgba8 {};
+			if (isPikmin()) {
+				// Los Pikmin del juego son grises: los pinta el color de su especie.
+				float sc[3];
+				speciesColour(sc);
+				mc.r = std::uint8_t(mc.r * sc[0]), mc.g = std::uint8_t(mc.g * sc[1]), mc.b = std::uint8_t(mc.b * sc[2]);
+			}
 			for (int k = 0; k < 3; ++k) {
 				const SkinVertex& v = olimar_.verts[t * 3 + std::size_t(k)];
 				Vec3 p, n;
@@ -367,15 +478,60 @@ void App::fillMeshes()
 		olimarMesh_.upload();
 	}
 
+	// Hoja de los Pikmin: en la articulación 6 de la referencia y, con los
+	// pivotes propios, en la punta del tallo del modelo.
+	leafMesh_.data.clear();
+	leafMesh_.ranges.clear();
+	const float white[3] = { 1, 1, 1 };
+	if (isPikmin() && olimarMode_ != 0) appendLeaf(leafMesh_, world[J_ANT3], offset, white);
+
 	// El modelo: en reposo sin enderezar (para colocar los puntos) o animado
 	// como en el juego.
 	if (!hasModel_ || rig_.verts.empty()) {
 		modelMesh_.data.clear();
 		modelMesh_.ranges.clear();
+		leafMesh_.upload();
 		return;
 	}
 	if (animated) retargetSkin(olimar_, rig_.pivots, world, skin);
 	fillModelMesh(modelMesh_, animated ? &skin : nullptr, !animated, showWeights_);
+	if (isPikmin()) {
+		Mat34 tip = olimar_.bind[J_ANT3];
+		setTranslation(tip, rig_.pivots[J_ANT3]);
+		if (animated) tip = skin[J_ANT3] * tip;
+		appendLeaf(leafMesh_, tip, 0.0f, white);
+	}
+	leafMesh_.upload();
+}
+
+void App::appendLeaf(DynamicMesh& mesh, const Mat34& world, float offsetX, const float tint[3])
+{
+	const int kind        = std::clamp(leafKind_, 0, 2);
+	const LeafModel& leaf = leaves_[kind];
+	int lastMat           = -2;
+	for (std::size_t t = 0; t < leaf.triMaterial.size(); ++t) {
+		const int mat = leaf.triMaterial[t];
+		if (mat != lastMat || mesh.ranges.empty()) {
+			DynamicMesh::Range r;
+			r.first   = int(mesh.data.size());
+			r.texture = mat >= 0 && std::size_t(mat) < leafTex_[kind].size() ? leafTex_[kind][std::size_t(mat)] : 0;
+			mesh.ranges.push_back(r);
+			lastMat = mat;
+		}
+		const nectar::Rgba8 mc = mat >= 0 && std::size_t(mat) < leaf.materialColour.size() ? leaf.materialColour[std::size_t(mat)] : nectar::Rgba8 {};
+		for (int k = 0; k < 3; ++k) {
+			const SkinVertex& v = leaf.verts[t * 3 + std::size_t(k)];
+			const Vec3 p = world.point(v.p), n = normalize(world.dir(v.n));
+			GpuVertex g {};
+			g.p[0] = p.x + offsetX, g.p[1] = p.y, g.p[2] = p.z;
+			g.n[0] = n.x, g.n[1] = n.y, g.n[2] = n.z;
+			g.uv[0] = v.uv.x, g.uv[1] = v.uv.y;
+			g.c[0] = v.col[0] * mc.r / 255.0f * tint[0], g.c[1] = v.col[1] * mc.g / 255.0f * tint[1], g.c[2] = v.col[2] * mc.b / 255.0f * tint[2];
+			g.c[3] = 1;
+			mesh.data.push_back(g);
+		}
+		mesh.ranges.back().count = int(mesh.data.size()) - mesh.ranges.back().first;
+	}
 }
 
 // `skin` nulo: en reposo (enderezado o, con `unbent`, como se importó).
@@ -386,7 +542,7 @@ void App::fillModelMesh(DynamicMesh& mesh, const std::vector<Mat34>* skin, bool 
 	int lastMat = -2;
 	for (std::size_t t : order_) {
 		if (t * 3 + 2 >= rig_.verts.size()) continue;
-		const int mat         = model_.triMaterial[t];
+		const int mat         = rig_.triMaterial[t];
 		const ImpMaterial& im = model_.materials[std::size_t(mat)];
 		if (mat != lastMat) {
 			DynamicMesh::Range r;
@@ -523,13 +679,41 @@ void App::drawPanel(float width, float height)
 	hint(L("Tu propio Olimar: abre un modelo 3D y el creador lo pone sobre su esqueleto.", "Your own Olimar: open a 3D model and it is fitted onto his skeleton."));
 
 	// 1 · Modelo.
+	// ¿A quién reemplaza? Olimar (o un personaje propio) o los Pikmin.
+	{
+		ImGui::TextUnformatted(L("¿Qué quieres cambiar?", "What do you want to replace?"));
+		const char* targets[] = { L("Olimar / un capitán", "Olimar / a captain"), L("Pikmin rojos", "Red Pikmin"), L("Pikmin amarillos", "Yellow Pikmin"),
+			                      L("Pikmin azules", "Blue Pikmin"), L("Los tres Pikmin (se tiñe)", "All three Pikmin (tinted)") };
+		int t = target_;
+		ImGui::SetNextItemWidth(-1);
+		ImGui::BeginDisabled(working_);
+		if (ImGui::Combo("##target", &t, targets, 5)) setTarget(t);
+		ImGui::EndDisabled();
+		if (target_ == T_ALL)
+			hint(L("Un solo modelo para los tres: hazlo claro o gris, el juego lo pinta de rojo, amarillo o azul.",
+			       "One model for all three: make it light or grey, the game paints it red, yellow or blue."));
+		else if (isPikmin())
+			hint(L("Solo cambia el cuerpo: la hoja, el capullo y la flor los sigue poniendo el juego en la punta del tallo.",
+			       "Only the body changes: the game still puts the leaf, bud and flower on the tip of the stem."));
+	}
+
 	stepHeader(1, L("Tu modelo", "Your model"));
 	if (bigButton(L("Abrir modelo 3D…", "Open 3D model…"), -1, 46)) {
 		const fs::path p = pikmin::launcher::platform::askForFile(L("Abrir modelo", "Open model"), L("Modelo 3D", "3D model"), "*.glb *.gltf *.vrm *.fbx *.obj");
-		if (!p.empty()) loadModel(p.u8string(), false);
+		if (!p.empty()) {
+			editingId_.clear();
+			editingOlimar_ = false;
+			loadModel(p.u8string(), false);
+		}
 	}
 	hint(L("O arrástralo a la ventana. Valen .glb, .gltf, .vrm (VRoid), .fbx (Mixamo) y .obj.",
 	       "Or drop it on the window. Works with .glb, .gltf, .vrm (VRoid), .fbx (Mixamo) and .obj."));
+	drawCreations();
+	if (!editingId_.empty() || editingOlimar_) {
+		ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(150, 220, 120, 255));
+		ImGui::TextWrapped(L("Editando: %s", "Editing: %s"), editingName_.c_str());
+		ImGui::PopStyleColor();
+	}
 	if (hasModel_) {
 		ImGui::Text("%s  ·  %s", fs::u8path(model_.path).filename().u8string().c_str(), model_.format.c_str());
 		ImGui::Text(L("%zu triángulos, %zu materiales, %zu huesos", "%zu triangles, %zu materials, %zu bones"), model_.triangles(), model_.materials.size(),
@@ -557,7 +741,7 @@ void App::drawPanel(float width, float height)
 	}
 	float pct = fit_.scale * 100.0f;
 	ImGui::SetNextItemWidth(-1);
-	if (ImGui::SliderFloat("##scale", &pct, 30.0f, 300.0f, L("Tamaño %.0f%% de Olimar", "Size %.0f%% of Olimar"))) {
+	if (ImGui::SliderFloat("##scale", &pct, 30.0f, 300.0f, isPikmin() ? L("Tamaño %.0f%% del Pikmin", "Size %.0f%% of a Pikmin") : L("Tamaño %.0f%% de Olimar", "Size %.0f%% of Olimar"))) {
 		const float old = fit_.scale;
 		fit_.scale      = pct / 100.0f;
 		// Los puntos crecen con el modelo (desde el suelo).
@@ -635,6 +819,12 @@ void App::drawPanel(float width, float height)
 	ImGui::SameLine();
 	if (ImGui::Checkbox(L("Piernas", "Legs"), &fit_.straightenLegs)) rigDirty_ = true;
 	ImGui::Checkbox(L("Ver pesos (colores)", "Show weights (colours)"), &showWeights_);
+	if (isPikmin()) {
+		if (ImGui::Checkbox(L("Añadir el tallo del Pikmin si el modelo no trae", "Add the Pikmin's stem if the model has none"), &fit_.addStem)) rigDirty_ = true;
+		if (rig_.stemTriangles)
+			hint(L("Tallo original añadido: va de la coronilla a la punta del tallo (puntos amarillos).",
+			       "Original stem added: it goes from the head top to the stem tip (yellow dots)."));
+	}
 
 	// 4 · Animaciones.
 	stepHeader(4, L("Animaciones", "Animations"));
@@ -656,7 +846,14 @@ void App::drawPanel(float width, float height)
 	ImGui::SameLine();
 	ImGui::SetNextItemWidth(-1);
 	ImGui::SliderFloat("##speed", &speed_, 0.1f, 2.0f, L("Velocidad %.1fx", "Speed %.1fx"));
-	const char* modes[] = { L("Olimar: oculto", "Olimar: hidden"), L("Olimar: al lado", "Olimar: beside"), L("Olimar: encima", "Olimar: overlaid") };
+	if (isPikmin()) {
+		const char* leaves[] = { L("En la punta: hoja", "On the tip: leaf"), L("En la punta: capullo", "On the tip: bud"), L("En la punta: flor", "On the tip: flower") };
+		ImGui::SetNextItemWidth(-1);
+		ImGui::Combo("##leaf", &leafKind_, leaves, 3);
+	}
+	const char* modes[] = { isPikmin() ? L("Pikmin original: oculto", "Original Pikmin: hidden") : L("Olimar: oculto", "Olimar: hidden"),
+		                    isPikmin() ? L("Pikmin original: al lado", "Original Pikmin: beside") : L("Olimar: al lado", "Olimar: beside"),
+		                    isPikmin() ? L("Pikmin original: encima", "Original Pikmin: overlaid") : L("Olimar: encima", "Olimar: overlaid") };
 	ImGui::SetNextItemWidth(-1);
 	if (ImGui::Combo("##olimar", &olimarMode_, modes, 3)) resetCamera();
 	ImGui::Checkbox(L("Ver esqueleto", "Show skeleton"), &showSkeleton_);
@@ -693,15 +890,18 @@ void App::drawPanel(float width, float height)
 		}
 		ImGui::TreePop();
 	}
-	ImGui::BeginDisabled(exportDirty_ || !export_.ok());
-	if (bigButton(L("Guardar mi Olimar", "Save my Olimar"), -1, 46)) save();
-	if (bigButton(L("Guardar y jugar", "Save and play"))) {
-		if (save()) playInGame();
-	}
-	ImGui::EndDisabled();
-	std::error_code ec;
-	if (fs::exists(fs::u8path(packPath()), ec)) {
-		if (ImGui::Button(L("Quitar mi modelo (volver al Olimar normal)", "Remove my model (back to normal Olimar)"), ImVec2(-1, 0))) removeCustom();
+	// Olimar: se reemplaza a él mismo. Los Pikmin se guardan como pack (abajo).
+	if (!isPikmin()) {
+		ImGui::BeginDisabled(exportDirty_ || !export_.ok());
+		if (bigButton(L("Guardar mi Olimar", "Save my Olimar"), -1, 46)) save();
+		if (bigButton(L("Guardar y jugar", "Save and play"))) {
+			if (save()) playInGame();
+		}
+		ImGui::EndDisabled();
+		std::error_code ec;
+		if (fs::exists(fs::u8path(packPath()), ec)) {
+			if (ImGui::Button(L("Quitar mi modelo (volver al Olimar normal)", "Remove my model (back to normal Olimar)"), ImVec2(-1, 0))) removeCustom();
+		}
 	}
 	drawCharacters();
 	if (!status_.empty()) {
@@ -778,6 +978,7 @@ void App::drawView(float x, float width, float height)
 		view_.drawLines(grid, gridColour);
 		if (olimarMode_ == 1 || (olimarMode_ == 2 && !hasModel_)) view_.drawMesh(olimarMesh_, true);
 		view_.drawMesh(modelMesh_, !showWeights_);
+		if (isPikmin()) view_.drawMesh(leafMesh_, true);
 		if (olimarMode_ == 2 && hasModel_) view_.drawMesh(olimarMesh_, true, 0.35f);
 		view_.end();
 	}
@@ -857,8 +1058,9 @@ void App::drawOverlay(const std::vector<Mat34>& skin)
         // Animado: cada punto con la articulación que lo mueve.
         int joint = J_SPINE;
         switch (marker) {
-        case M_NECK:
-        case M_HEADTOP: joint = J_HEAD; break;
+        case M_NECK: joint = J_HEAD; break;
+        case M_HEADTOP: joint = isPikmin() ? J_ANT1 : J_HEAD; break;
+        case M_STEMTOP: joint = J_ANT3; break;
         case M_RSHOULDER:
         case M_RHAND: joint = J_RARM; break;
         case M_LSHOULDER:
@@ -879,9 +1081,16 @@ void App::drawOverlay(const std::vector<Mat34>& skin)
 		ImVec2 a, c;
 		if (project(pos(b[0]), a) && project(pos(b[1]), c)) dl->AddLine(a, c, IM_COL32(255, 235, 140, 200), 2.5f);
 	}
+	// El tallo del Pikmin, hasta donde va la hoja.
+	if (isPikmin()) {
+		ImVec2 a, c;
+		if (project(pos(M_HEADTOP), a) && project(pos(M_STEMTOP), c)) dl->AddLine(a, c, IM_COL32(150, 230, 110, 220), 2.5f);
+	}
+	// Solo los Pikmin tienen punta del tallo.
+	const int markers = isPikmin() ? M_COUNT : M_STEMTOP;
 	const ImVec2 mouse = ImGui::GetIO().MousePos;
 	float best         = 12.0f * 12.0f;
-	for (int i = 0; i < M_COUNT; ++i) {
+	for (int i = 0; i < markers; ++i) {
 		ImVec2 s;
 		if (!project(pos(i), s)) continue;
 		if (edit) {
@@ -892,12 +1101,13 @@ void App::drawOverlay(const std::vector<Mat34>& skin)
 			}
 		}
 	}
-	for (int i = 0; i < M_COUNT; ++i) {
+	for (int i = 0; i < markers; ++i) {
 		ImVec2 s;
 		if (!project(pos(i), s)) continue;
 		const bool hot   = i == hoverMarker_ || i == dragMarker_;
 		const float r    = edit ? (hot ? 9.0f : 7.0f) : 4.0f;
-		const ImU32 fill = i == M_PELVIS || i == M_NECK || i == M_HEADTOP ? IM_COL32(250, 210, 80, 255)
+		const ImU32 fill = i == M_STEMTOP ? IM_COL32(150, 230, 110, 255)
+		                 : i == M_PELVIS || i == M_NECK || i == M_HEADTOP ? IM_COL32(250, 210, 80, 255)
 		                 : (i == M_LSHOULDER || i == M_LHAND || i == M_LHIP || i == M_LFOOT) ? IM_COL32(240, 100, 80, 255)
 		                                                                                      : IM_COL32(90, 150, 245, 255);
 		dl->AddCircleFilled(s, r, fill);
@@ -910,14 +1120,20 @@ void App::dropFile(const std::string& path)
 {
 	std::string ext = fs::u8path(path).extension().u8string();
 	for (char& c : ext) c = char(std::tolower(static_cast<unsigned char>(c)));
-	if (ext == nectar::kCharacterExtension) installPack(path);
-	else loadModel(path, false);
+	if (ext == nectar::kCharacterExtension) {
+		installPack(path);
+		return;
+	}
+	editingId_.clear();
+	editingOlimar_ = false;
+	loadModel(path, false);
 }
 
-void App::saveProject() const
+json App::projectJson(const std::string& source) const
 {
 	json j;
-	j["source"]         = model_.path;
+	j["source"]         = source;
+	j["targetTris"]     = targetTris_;
 	j["scale"]          = fit_.scale;
 	j["quarter"]        = fit_.quarter;
 	j["lyingDown"]      = fit_.lyingDown;
@@ -931,23 +1147,178 @@ void App::saveProject() const
 	j["textureMax"]     = exportOpt_.textureMax;
 	j["charName"]       = std::string(charName_);
 	j["charAuthor"]     = std::string(charAuthor_);
+	j["target"]         = target_;
+	j["addStem"]        = fit_.addStem;
 	json markers        = json::array();
 	for (const Vec3& m : fit_.markers) markers.push_back({ m.x, m.y, m.z });
 	j["markers"] = markers;
 	std::vector<int> nt;
 	for (char c : exportOpt_.noTint) nt.push_back(c ? 1 : 0);
 	j["noTint"] = nt;
-	std::ofstream f(fs::u8path(projectPath()));
-	f << j.dump(1);
+	return j;
 }
 
-bool App::loadProject(std::string& source)
+// La sesión: para seguir donde se quedó al volver a abrir el creador.
+void App::saveProject() const
+{
+	std::error_code ec;
+	fs::create_directories(fs::u8path(customDir()), ec);
+	std::ofstream f(fs::u8path(projectPath()));
+	f << projectJson(model_.path).dump(1);
+}
+
+void App::projectFiles(std::vector<std::pair<std::string, std::vector<std::uint8_t>>>& out) const
+{
+	out.clear();
+	const fs::path base = fs::u8path(model_.path).parent_path();
+	std::string mainRel;
+	std::size_t total = 0;
+	std::vector<std::string> seen;
+	for (const std::string& file : source_.files.empty() ? model_.files : source_.files) {
+		const fs::path p = fs::u8path(file);
+		std::error_code ec;
+		// Dentro de la carpeta del modelo, con su ruta (los .gltf y .mtl las
+		// nombran así); fuera, al lado del modelo (los FBX las buscan ahí).
+		std::string rel = fs::relative(p, base, ec).generic_u8string();
+		if (ec || rel.empty() || rel.rfind("..", 0) == 0 || !nectar::safeProjectPath(rel)) rel = p.filename().u8string();
+		rel = "source/" + rel;
+		if (std::find(seen.begin(), seen.end(), rel) != seen.end()) continue;
+		std::ifstream f(p, std::ios::binary);
+		std::vector<std::uint8_t> data((std::istreambuf_iterator<char>(f)), {});
+		if (data.empty() || !nectar::safeProjectPath(rel)) continue;
+		total += data.size();
+		if (total > 200u * 1024u * 1024u) break; // un original enorme: el pack se queda sin él
+		if (file == model_.path) mainRel = rel;
+		seen.push_back(rel);
+		out.push_back({ rel, std::move(data) });
+	}
+	const std::string text = projectJson(mainRel).dump(1);
+	out.push_back({ "project.json", std::vector<std::uint8_t>(text.begin(), text.end()) });
+}
+
+// Vuelve a abrir un personaje (o Mi Olimar) para editarlo: con su proyecto,
+// el modelo original y los ajustes; sin él, su model.nhm.
+void App::editCreation(const std::string& dir, const nectar::CharacterInfo& info, bool olimar)
+{
+	if (working_) return;
+	const fs::path root = fs::u8path(dir);
+	std::ifstream f(root / "project" / "project.json");
+	std::string text((std::istreambuf_iterator<char>(f)), {});
+	int target = T_CAPTAIN;
+	if (info.target == nectar::kTargetPikminRed) target = T_RED;
+	else if (info.target == nectar::kTargetPikminYellow) target = T_YELLOW;
+	else if (info.target == nectar::kTargetPikminBlue) target = T_BLUE;
+	else if (info.target == nectar::kTargetPikminAll) target = T_ALL;
+	std::string source;
+	try {
+		if (!text.empty()) source = json::parse(text).value("source", "");
+	} catch (const std::exception&) {
+		text.clear();
+	}
+	std::error_code ec;
+	const fs::path sourcePath = root / "project" / fs::u8path(source);
+	// Mi Olimar guardado antes de que hubiera proyecto: la ruta de la sesión.
+	if (olimar && source.empty()) {
+		std::ifstream old(fs::u8path(projectPath()));
+		std::string oldText((std::istreambuf_iterator<char>(old)), {});
+		try {
+			const std::string abs = oldText.empty() ? std::string() : json::parse(oldText).value("source", "");
+			std::error_code oc;
+			if (!abs.empty() && fs::is_regular_file(fs::u8path(abs), oc)) {
+				editingOlimar_ = true;
+				editingId_.clear();
+				editingName_ = info.name;
+				hasModel_    = false;
+				setTarget(T_CAPTAIN);
+				restoreJson_ = oldText;
+				loadModel(abs, true);
+				return;
+			}
+		} catch (const std::exception&) {
+		}
+	}
+	editingId_     = olimar ? std::string() : info.id;
+	editingOlimar_ = olimar;
+	editingName_   = info.name;
+	// Se abre otro: el de ahora deja de contar (y cambiar de objetivo no
+	// tiene que simplificarlo).
+	hasModel_ = false;
+	setTarget(target);
+	try {
+		if (!text.empty()) targetTris_ = json::parse(text).value("targetTris", targetTris_);
+	} catch (const std::exception&) {
+	}
+	if (!source.empty() && nectar::safeProjectPath(source) && fs::is_regular_file(sourcePath, ec)) {
+		restoreJson_ = text;
+		loadModel(sourcePath.u8string(), true);
+	} else {
+		restoreJson_.clear();
+		loadModel((root / (olimar ? "olimar.nhm" : "model.nhm")).u8string(), false);
+	}
+	std::snprintf(charName_, sizeof(charName_), "%s", info.name.c_str());
+	std::snprintf(charAuthor_, sizeof(charAuthor_), "%s", info.author.c_str());
+}
+
+// Un .nectarchar que no está instalado: su proyecto va a una carpeta de
+// trabajo y se edita desde ahí (instalarlo después lo copia al juego).
+void App::openPackForEdit(const std::string& path)
+{
+	nectar::CharacterFiles files;
+	std::string error;
+	if (!nectar::readCharacterPack(path, files, error)) {
+		say(std::string(L("No se pudo abrir: ", "Could not open: ")) + error, true);
+		return;
+	}
+	const fs::path work = fs::u8path(nm::Config::directory()) / "modelmaker_edit" / files.info.id;
+	std::error_code ec;
+	fs::remove_all(work, ec);
+	fs::create_directories(work, ec);
+	auto write = [&](const fs::path& p, const std::vector<std::uint8_t>& data) {
+		fs::create_directories(p.parent_path(), ec);
+		std::ofstream o(p, std::ios::binary);
+		o.write(reinterpret_cast<const char*>(data.data()), std::streamsize(data.size()));
+	};
+	write(work / "model.nhm", files.nhm);
+	for (const auto& [rel, data] : files.project)
+		if (nectar::safeProjectPath(rel)) write(work / "project" / fs::u8path(rel), data);
+	editCreation(work.u8string(), files.info, false);
+}
+
+void App::drawCreations()
+{
+	if (!gameReady_) return;
+	std::error_code ec;
+	const bool olimar = fs::exists(fs::u8path(packPath()), ec);
+	if (!ImGui::TreeNode(L("Abrir uno ya creado", "Open one you made"))) return;
+	hint(L("Para retocarlo: se abre con su modelo original y sus ajustes.", "To touch it up: it opens with its original model and settings."));
+	if (olimar && ImGui::Button(L("Mi Olimar", "My Olimar"), ImVec2(-1, 0))) {
+		nectar::CharacterInfo info;
+		info.name = L("Mi Olimar", "My Olimar");
+		editCreation(customDir(), info, true);
+	}
+	for (const nectar::CharacterInfo& c : creations_) {
+		ImGui::PushID(c.dir.c_str());
+		std::string label = c.name;
+		if (c.isPikmin()) label += std::string("  (Pikmin)");
+		if (ImGui::Button(label.c_str(), ImVec2(-1, 0))) editCreation(c.dir, c, false);
+		ImGui::PopID();
+	}
+	if (!olimar && creations_.empty()) hint(L("Todavía no hay ninguno instalado.", "None installed yet."));
+	if (ImGui::Button(L("Abrir un .nectarchar para editar…", "Open a .nectarchar to edit…"), ImVec2(-1, 0))) {
+		const fs::path p = pikmin::launcher::platform::askForFile(L("Abrir personaje", "Open character"), L("Personaje", "Character"), "*.nectarchar");
+		if (!p.empty()) openPackForEdit(p.u8string());
+	}
+	ImGui::TreePop();
+}
+
+bool App::loadProject(std::string& source, int& target)
 {
 	std::ifstream f(fs::u8path(projectPath()));
 	if (!f) return false;
 	try {
 		const json j = json::parse(f);
 		source       = j.value("source", "");
+		target       = std::clamp(j.value("target", 0), 0, 4);
 	} catch (const std::exception&) {
 		return false;
 	}
@@ -967,6 +1338,20 @@ bool App::save()
 		return false;
 	}
 	saveProject();
+	// Su proyecto, para volver a editarlo (Abrir uno ya creado > Mi Olimar).
+	{
+		std::vector<std::pair<std::string, std::vector<std::uint8_t>>> project;
+		projectFiles(project);
+		const fs::path root = fs::u8path(customDir()) / "project";
+		std::error_code rm;
+		fs::remove_all(root, rm);
+		for (const auto& [rel, data] : project) {
+			const fs::path p = root / fs::u8path(rel);
+			fs::create_directories(p.parent_path(), rm);
+			std::ofstream o(p, std::ios::binary);
+			o.write(reinterpret_cast<const char*>(data.data()), std::streamsize(data.size()));
+		}
+	}
 	// Si estaba quitado, el apagado ya no vale.
 	std::error_code ec;
 	fs::remove(fs::u8path(packPath() + ".off"), ec);
@@ -1010,7 +1395,59 @@ void App::removeCustom()
 
 // ── Personajes propios ──────────────────────────────────────────────────
 
-void App::refreshInstalled() { installed_ = nectar::listCharacters(cfg_.gameDir()); }
+void App::refreshInstalled()
+{
+	installed_ = isPikmin() ? nectar::listPikminModels(cfg_.gameDir()) : nectar::listCharacters(cfg_.gameDir());
+	creations_ = nectar::listCharacters(cfg_.gameDir());
+	for (const nectar::CharacterInfo& c : nectar::listPikminModels(cfg_.gameDir())) creations_.push_back(c);
+}
+
+namespace {
+const char* const kTargets[5] = { nectar::kTargetCaptain, nectar::kTargetPikminRed, nectar::kTargetPikminYellow, nectar::kTargetPikminBlue,
+	                              nectar::kTargetPikminAll };
+const char* targetLabel(const std::string& target)
+{
+	if (target == nectar::kTargetPikminRed) return L("rojos", "red");
+	if (target == nectar::kTargetPikminYellow) return L("amarillos", "yellow");
+	if (target == nectar::kTargetPikminBlue) return L("azules", "blue");
+	if (target == nectar::kTargetPikminAll) return L("los tres", "all three");
+	return "";
+}
+} // namespace
+
+// Elige el pack en el juego para sus colores: lo hace el propio juego
+// (--pikmin-model), que es quien guarda pikmin_settings.conf.
+void App::useNowInGame(const nectar::CharacterInfo& info)
+{
+	std::string exe = cfg_.gameExe;
+	std::error_code ec;
+	if (exe.empty() || !fs::exists(exe, ec)) exe = nm::guessGameExe();
+	if (exe.empty()) {
+		const fs::path guess = fs::path(cfg_.gameDir()) /
+#ifdef _WIN32
+		                       "nectar.exe";
+#else
+		                       "nectar";
+#endif
+		if (fs::exists(guess, ec)) exe = guess.string();
+	}
+	if (exe.empty()) {
+		say(L("Instalado. Elígelo en el juego: Opciones > Gráficos > modelos de Pikmin.", "Installed. Pick it in the game: Options > Graphics > Pikmin models."));
+		return;
+	}
+	std::vector<std::string> colours;
+	if (info.target == nectar::kTargetPikminAll) colours = { "red", "yellow", "blue" };
+	else colours = { info.target.substr(std::string("pikmin_").size()) };
+	for (const std::string& c : colours) {
+		std::string output, error;
+		if (!pikmin::launcher::platform::runAndCapture(exe, { "--pikmin-model", c, info.id }, cfg_.gameDir(), output, error)) {
+			say(std::string(L("Instalado, pero no se pudo elegir: ", "Installed, but it could not be selected: ")) + error, true);
+			return;
+		}
+	}
+	say(std::string("\"") + info.name + L("\" instalado y elegido: los Pikmin ", "\" installed and selected: the ") + targetLabel(info.target)
+	    + L(" ya lo usan.", " Pikmin use it now."));
+}
 
 // Tarjeta del selector: el modelo de frente y un poco girado, en reposo.
 bool App::renderPortrait(std::vector<std::uint8_t>& png)
@@ -1044,13 +1481,16 @@ bool App::characterFiles(nectar::CharacterFiles& files, std::string& error)
 		exportDirty_ = false;
 	}
 	if (!buildNhm(export_, rig_, olimar_, files.nhm, error)) return false;
-	files.info        = nectar::CharacterInfo();
-	files.info.name   = charName_[0] ? charName_ : "Custom";
-	files.info.author = charAuthor_;
+	files.info          = nectar::CharacterInfo();
+	files.info.name     = charName_[0] ? charName_ : "Custom";
+	files.info.author   = charAuthor_;
+	files.info.target   = kTargets[target_];
+	files.info.skeleton = isPikmin() ? "pikmin" : "olimar";
 	// Mismo nombre y autor: la misma carpeta (instalar otra vez lo reemplaza).
 	const std::string key = files.info.name + "\n" + files.info.author;
-	files.info.id         = nectar::characterId(files.info.name, std::vector<std::uint8_t>(key.begin(), key.end()));
+	files.info.id         = editingId_.empty() ? nectar::characterId(files.info.name, std::vector<std::uint8_t>(key.begin(), key.end())) : editingId_;
 	renderPortrait(files.portrait);
+	projectFiles(files.project);
 	saveProject();
 	return true;
 }
@@ -1064,6 +1504,11 @@ void App::installAsCharacter()
 		return;
 	}
 	refreshInstalled();
+	if (isPikmin()) {
+		files.info.dir = dir;
+		useNowInGame(files.info);
+		return;
+	}
 	say(std::string(L("\"", "\"")) + files.info.name
 	    + L("\" ya está en el selector de capitán del juego.", "\" is now in the game's captain selector."));
 }
@@ -1100,21 +1545,33 @@ void App::installPack(const std::string& path)
 		return;
 	}
 	refreshInstalled();
-	say(std::string("\"") + info.name + L("\" instalado: sale en el selector de capitán.", "\" installed: it is in the captain selector."));
+	if (info.isPikmin())
+		say(std::string("\"") + info.name + L("\" instalado: elígelo en Opciones > Gráficos del juego (Pikmin ", "\" installed: pick it in the game's Options > Graphics (")
+		    + targetLabel(info.target) + L(").", " Pikmin)."));
+	else
+		say(std::string("\"") + info.name + L("\" instalado: sale en el selector de capitán.", "\" installed: it is in the captain selector."));
 }
 
 void App::drawCharacters()
 {
-	stepHeader(6, L("Personaje propio", "Custom character"));
-	hint(L("Con su propio hueco en el selector de capitán, sin quitar a Olimar. Se puede compartir como archivo .nectarchar.",
-	       "With its own slot in the captain selector, keeping Olimar. It can be shared as a .nectarchar file."));
+	if (isPikmin()) {
+		stepHeader(6, L("Tus Pikmin en el juego", "Your Pikmin in the game"));
+		hint(L("Se instala como modelo de Pikmin y se elige por color en Opciones > Gráficos del juego o en el launcher. Se puede compartir como archivo .nectarchar.",
+		       "It installs as a Pikmin model, picked per colour in the game's Options > Graphics or in the launcher. It can be shared as a .nectarchar file."));
+	} else {
+		stepHeader(6, L("Personaje propio", "Custom character"));
+		hint(L("Con su propio hueco en el selector de capitán, sin quitar a Olimar. Se puede compartir como archivo .nectarchar.",
+		       "With its own slot in the captain selector, keeping Olimar. It can be shared as a .nectarchar file."));
+	}
 	if (hasModel_) {
 		ImGui::SetNextItemWidth(-1);
-		ImGui::InputTextWithHint("##charname", L("Nombre en el selector", "Name in the selector"), charName_, sizeof(charName_));
+		ImGui::InputTextWithHint("##charname", isPikmin() ? L("Nombre del modelo", "Model name") : L("Nombre en el selector", "Name in the selector"), charName_,
+		                         sizeof(charName_));
 		ImGui::SetNextItemWidth(-1);
 		ImGui::InputTextWithHint("##charauthor", L("Autor (opcional)", "Author (optional)"), charAuthor_, sizeof(charAuthor_));
 		ImGui::BeginDisabled(exportDirty_ || !export_.ok() || working_);
-		if (bigButton(L("Instalar como personaje en el juego", "Install as a character in the game"))) installAsCharacter();
+		if (bigButton(isPikmin() ? L("Instalar y usar ya", "Install and use now") : L("Instalar como personaje en el juego", "Install as a character in the game")))
+			installAsCharacter();
 		if (ImGui::Button(L("Exportar archivo .nectarchar…", "Export .nectarchar file…"), ImVec2(-1, 0))) exportCharacter();
 		ImGui::EndDisabled();
 	}
@@ -1128,7 +1585,8 @@ void App::drawCharacters()
 		ImGui::PushID(c.id.c_str());
 		ImGui::Bullet();
 		ImGui::SameLine();
-		if (c.author.empty()) ImGui::TextUnformatted(c.name.c_str());
+		if (c.isPikmin()) ImGui::Text("%s  [%s]", c.name.c_str(), targetLabel(c.target));
+		else if (c.author.empty()) ImGui::TextUnformatted(c.name.c_str());
 		else ImGui::Text("%s  (%s)", c.name.c_str(), c.author.c_str());
 		ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - 70);
 		if (ImGui::SmallButton(L("Quitar", "Remove"))) {

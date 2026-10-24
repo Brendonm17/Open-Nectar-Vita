@@ -140,15 +140,45 @@ std::string displayName(const std::string& path)
 
 const char* packBoneName(int joint) { return joint >= 0 && joint < kJoints ? kPackBones[joint] : nullptr; }
 
-bool OlimarRig::load(const std::string& dataDir, std::string& error)
+bool LeafModel::load(const std::string& path, std::string& error)
 {
 	nectar::Model mod;
-	if (!nectar::loadMod(dataDir + "/pikis/nv3Model.mod", mod, error)) {
-		error = "pikis/nv3Model.mod: " + error;
+	if (!nectar::loadMod(path, mod, error)) return false;
+	verts.clear();
+	triMaterial.clear();
+	materialTex.assign(mod.materials.size(), {});
+	materialColour.assign(mod.materials.size(), {});
+	for (std::size_t i = 0; i < mod.materials.size(); ++i) {
+		const nectar::ModMaterial& m = mod.materials[i];
+		materialColour[i]            = m.colour;
+		if (m.texAttr >= 0 && std::size_t(m.texAttr) < mod.texAttrs.size()) {
+			const int t = mod.texAttrs[std::size_t(m.texAttr)].texture;
+			if (t >= 0 && std::size_t(t) < mod.textures.size()) materialTex[i] = mod.textures[std::size_t(t)].decode();
+		}
+	}
+	for (const nectar::BakedTri& t : nectar::bakeModel(mod)) {
+		for (int k = 0; k < 3; ++k) {
+			SkinVertex v;
+			v.p  = t.p[k];
+			v.n  = t.n[k];
+			v.uv = t.uv[k];
+			v.col[0] = t.col[k].r / 255.0f, v.col[1] = t.col[k].g / 255.0f, v.col[2] = t.col[k].b / 255.0f, v.col[3] = t.col[k].a / 255.0f;
+			verts.push_back(v);
+		}
+		triMaterial.push_back(t.material);
+	}
+	return !verts.empty();
+}
+
+bool OlimarRig::load(const std::string& dataDir, const std::string& modName, std::string& error)
+{
+	nectar::Model mod;
+	if (!nectar::loadMod(dataDir + "/" + modName, mod, error)) {
+		error = modName + ": " + error;
 		return false;
 	}
 	if (mod.joints.size() != std::size_t(kJoints)) {
-		error = "pikis/nv3Model.mod: " + std::to_string(mod.joints.size()) + " joints (expected 12)";
+		error = modName + ": " + std::to_string(mod.joints.size()) + " joints (expected 12)";
 		return false;
 	}
 	bind = mod.bindPose();
@@ -235,7 +265,7 @@ bool OlimarRig::load(const std::string& dataDir, std::string& error)
 		}
 	}
 	if (verts.empty()) {
-		error = "pikis/nv3Model.mod: no triangles";
+		error = modName + ": no triangles";
 		return false;
 	}
 	min = max = verts[0].p;

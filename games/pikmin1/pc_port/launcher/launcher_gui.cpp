@@ -1083,6 +1083,48 @@ struct Hub {
             }
             ImGui::PopID();
         }
+        drawPikminModels(snap, busy);
+    }
+
+    // Modelos de Pikmin propios (creador de modelos): uno por color. Se
+    // instalan con el botón Characters de la portada.
+    void drawPikminModels(const SettingsSnapshot& snap, bool busy)
+    {
+        if (snap.pikminModels.empty()) return;
+        ImGui::Dummy(ImVec2(0, 14));
+        ImGui::PushFont(fonts.caption);
+        ImGui::TextColored(kOrangeDeep, "PIKMIN MODELS");
+        ImGui::PopFont();
+        ImGui::Separator();
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextColored(ImVec4(1.0f, 0.93f, 0.80f, 0.85f),
+                           "Pikmin made with the Model Maker. Install them with the Characters button on the home screen; "
+                           "the leaf, bud and flower stay the game's.");
+        ImGui::PopTextWrapPos();
+        ImGui::Dummy(ImVec2(0, 6));
+        const float comboW = 300.0f;
+        for (const PikminModelChoice& choice : snap.pikminModels) {
+            ImGui::PushID(choice.color.c_str());
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextColored(ImVec4(1.0f, 0.93f, 0.80f, 1.0f), "%s", choice.name.c_str());
+            ImGui::SameLine(ImGui::GetContentRegionMax().x - comboW);
+            ImGui::SetNextItemWidth(comboW);
+            std::string current = "Game";
+            for (const auto& [id, name] : choice.options)
+                if (id == choice.selected) current = name;
+            ImGui::BeginDisabled(busy || choice.options.size() < 2);
+            if (ImGui::BeginCombo("##model", current.c_str())) {
+                for (const auto& [id, name] : choice.options) {
+                    ImGui::PushID(id.c_str());
+                    if (ImGui::Selectable(name.c_str(), id == choice.selected) && id != choice.selected)
+                        queue({ "--pikmin-model", choice.color, id });
+                    ImGui::PopID();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::EndDisabled();
+            ImGui::PopID();
+        }
     }
 
     void drawSettings(float top, ImVec2 size, float dt)

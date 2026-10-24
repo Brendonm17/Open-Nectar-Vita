@@ -14,6 +14,8 @@
 #include "imgui.h"
 #include "nectar_assets/charpack.h"
 
+#include <nlohmann/json.hpp>
+
 #include <atomic>
 #include <string>
 #include <thread>
@@ -75,12 +77,35 @@ private:
 	int dragMarker_ = -1, hoverMarker_ = -1;
 	bool orbiting_  = false, panning_ = false;
 
+	// A quién reemplaza el modelo: un capitán (Olimar o un personaje propio)
+	// o los Pikmin de un color (o los tres, teñidos por el juego).
+	enum Target { T_CAPTAIN, T_RED, T_YELLOW, T_BLUE, T_ALL };
+	int target_ = T_CAPTAIN;
+	LeafModel leaves_[3]; ///< hoja, capullo, flor (los pone el juego en la punta del tallo)
+	std::vector<GLuint> leafTex_[3];
+	int leafKind_ = 0;
+	DynamicMesh leafMesh_;
+	std::vector<nectar::CharacterInfo> installedPikmin_;
+	bool isPikmin() const { return target_ != T_CAPTAIN; }
+	bool loadReference(std::string& error);
+	void setTarget(int target);
+	void ensureStemMaterial();
+	void speciesColour(float out[3]) const;
+	void appendLeaf(DynamicMesh& mesh, const Mat34& world, float offsetX, const float tint[3]);
+	void useNowInGame(const nectar::CharacterInfo& info);
+
 	// Personaje propio: su nombre en el selector de capitán, el autor y los
 	// que ya hay instalados en el juego (Load/Characters).
 	char charName_[41]   = {};
 	char charAuthor_[41] = {};
 	std::vector<nectar::CharacterInfo> installed_;
 	std::string removeId_; ///< el que se va a quitar (pide confirmación)
+	// Volver a editar uno ya creado: el id con el que se reinstala (aunque
+	// cambie el nombre) y los ajustes de su proyecto para cuando acabe de abrir.
+	std::string editingId_, editingName_;
+	bool editingOlimar_ = false;
+	std::string restoreJson_;
+	std::vector<nectar::CharacterInfo> creations_; ///< capitanes y Pikmin instalados (para editar)
 
 	std::string status_;
 	bool statusError_ = false;
@@ -107,7 +132,14 @@ private:
 	std::string packPath() const;
 	std::string projectPath() const;
 	void saveProject() const;
-	bool loadProject(std::string& source);
+	nlohmann::json projectJson(const std::string& source) const;
+	/// El proyecto para guardarlo con el personaje: project.json y una copia
+	/// del modelo original con todo lo que abrió (texturas, .bin, .mtl).
+	void projectFiles(std::vector<std::pair<std::string, std::vector<std::uint8_t>>>& out) const;
+	void editCreation(const std::string& dir, const nectar::CharacterInfo& info, bool olimar);
+	void openPackForEdit(const std::string& path);
+	void drawCreations();
+	bool loadProject(std::string& source, int& target);
 	bool save();
 	void playInGame();
 	void removeCustom();
