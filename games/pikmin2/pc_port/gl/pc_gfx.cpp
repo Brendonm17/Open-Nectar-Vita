@@ -1086,6 +1086,9 @@ bool pc_gfx_replay_captured_frame(void) {
 struct VertexArrayState {
     const u8* base = nullptr;
     u8 stride = 0;
+    // Fin de la memoria legible tras base: un índice fuera del array no puede
+    // leer más allá (en la GC devolvía basura; aquí sería SIGSEGV, issue #166).
+    const u8* limit = nullptr;
 };struct VertexFormatState {
     GXCompCnt count = GX_COMPCNT_NULL;
     GXCompType type = GX_F32;
@@ -6735,6 +6738,19 @@ void pc_gfx_init_tex_obj_rgba(GXTexObj* obj, void* rgba, u16 width, u16 height, 
     sBoundTextures[0] = 0;
 }
 
+extern "C" size_t pc_host_readable_bytes(const void* p, size_t want);
+extern "C" const void* pc_host_readable_end(const void* p);
+
+// Copia `bytes` de memoria del juego sin leer más allá de la arena; lo que
+// falte (el GPU de la GC habría leído basura) queda a cero. Issue #166.
+template <typename Vec>
+static void assign_guest_bytes(Vec& dst, const void* src, size_t bytes) {
+    const u8* p = static_cast<const u8*>(src);
+    const size_t readable = pc_host_readable_bytes(p, bytes);
+    dst.assign(p, p + readable);
+    dst.resize(bytes, 0);
+}
+
 void pc_gfx_init_tex_obj(GXTexObj* obj, void* imagePtr, u16 width, u16 height, GXTexFmt format,
                          GXTexWrapMode wrapS, GXTexWrapMode wrapT, GXBool mipmap) {
     if (!obj || !imagePtr || width == 0 || height == 0) return;
@@ -6744,8 +6760,7 @@ void pc_gfx_init_tex_obj(GXTexObj* obj, void* imagePtr, u16 width, u16 height, G
     const uintptr_t key = reinterpret_cast<uintptr_t>(obj);
     std::lock_guard<std::mutex> lock(sTextureRegistryMutex);
     PcTextureSource& sourceRecord = sTextureSources[key];
-    sourceRecord.image.assign(static_cast<const u8*>(imagePtr),
-                              static_cast<const u8*>(imagePtr) + sourceBytes);
+    assign_guest_bytes(sourceRecord.image, imagePtr, sourceBytes);
     sourceRecord.width = width;
     sourceRecord.height = height;
     sourceRecord.format = static_cast<u32>(format);
@@ -7014,7 +7029,12 @@ void pc_gfx_init_tlut_obj(GXTlutObj* obj, void* lut, GXTlutFmt format, u16 numEn
     if (!obj || !lut || numEntries == 0) return;
     PcTlut decoded;
     decoded.rgba.resize(static_cast<size_t>(numEntries) * 4);
+    std::vector<u8> padded;
     const u8* source = static_cast<const u8*>(lut);
+    if (pc_host_readable_bytes(source, size_t(numEntries) * 2) < size_t(numEntries) * 2) {
+        assign_guest_bytes(padded, source, size_t(numEntries) * 2);
+        source = padded.data();
+    }
     auto expand5 = [](u16 value) -> u8 { return (value << 3) | (value >> 2); };
     auto expand6 = [](u16 value) -> u8 { return (value << 2) | (value >> 4); };
     for (u16 i = 0; i < numEntries; ++i) {
@@ -7158,8 +7178,7 @@ void pc_gfx_init_tex_obj_ci(GXTexObj* obj, void* imagePtr, u16 width, u16 height
     if (sourceBytes == 0) return;
     std::lock_guard<std::mutex> lock(sTextureRegistryMutex);
     PcTextureSource& ci = sTextureSources[key];
-    ci.image.assign(static_cast<const u8*>(imagePtr),
-                    static_cast<const u8*>(imagePtr) + sourceBytes);
+    assign_guest_bytes(ci.image, imagePtr, sourceBytes);
     ci.width = width;
     ci.height = height;
     ci.format = static_cast<u32>(format);
@@ -7444,7 +7463,8 @@ void pc_gfx_set_vtx_attr_fmt(GXVtxFmt fmt, GXAttr attr, GXCompCnt cnt, GXCompTyp
 }
 void pc_gfx_set_array(GXAttr attr, void* basePtr, u8 stride) {
     if (attr >= 0 && attr < GX_VA_MAX_ATTR) {
-        sVtxArrays[attr] = { static_cast<const u8*>(basePtr), stride };
+        sVtxArrays[attr] = { static_cast<const u8*>(basePtr), stride,
+                             static_cast<const u8*>(pc_host_readable_end(basePtr)) };
         sArraySetFrame[attr]  = sFrameSerial;
         sArraySetSerial[attr] = ++sArraySetCounter;
     }
@@ -8383,6 +8403,18 @@ static u8       sLastPosStride = 0;
 // handed us a buffer that was already garbage" and "the parser drifted part
 // way through a valid list". Reports the first few with context, then stops.
 static u8 attr_inline_size(GXAttr attr, const VertexFormatState& fmt);
+
+// Elemento `index` de un array de vértices, o ceros si se sale de la memoria
+// legible. La comprobación barata (64 >= mayor atributo, NBT F32 = 36 bytes)
+// deja el bucle caliente casi intacto.
+static const u8 sZeroAttr[64] = {};
+static inline const u8* vtx_array_element(const VertexArrayState& array, u16 index, GXAttr attr,
+                                          const VertexFormatState& fmt) {
+    const u8* element = array.base + size_t(index) * array.stride;
+    if (element + sizeof(sZeroAttr) <= array.limit) return element;
+    if (array.limit && element >= array.base && element + attr_inline_size(attr, fmt) <= array.limit) return element;
+    return sZeroAttr;
+}
 static int sDesyncReports = 0;
 static void report_desync(const char* what, const void* list, size_t offset, u32 nbytes) {
     if (sDesyncReports >= 8) return;
@@ -10292,7 +10324,7 @@ static void fifo_imm_apply_attr(GXAttr attr, const u8* data)
         }
         const VertexArrayState& array = sVtxArrays[attr];
         if (!array.base || array.stride == 0) return;
-        element = array.base + size_t(index) * array.stride;
+        element = vtx_array_element(array, index, GXAttr(attr), sVtxFormats[sImmVtxFmt][attr]);
     }
 
     if (attr == GX_VA_POS) {
@@ -11042,8 +11074,10 @@ static void handle_indexed_xf_load(u8 command, u32 header) {
     // mModelDrawMtx and friends), so they are host floats, unlike the
     // big-endian file data behind the vertex arrays.
     const u8* src = array.base + size_t(index) * array.stride;
-    u32 words[16];
-    memcpy(words, src, (size < 16 ? size : 16) * sizeof(u32));
+    u32 words[16] = {};
+    const size_t want = (size < 16 ? size : 16) * sizeof(u32);
+    if (src >= array.base && array.limit && src < array.limit)
+        memcpy(words, src, want < size_t(array.limit - src) ? want : size_t(array.limit - src));
     handle_xf_regs(addr, size < 16 ? size : 16, words);
 }
 
@@ -11109,7 +11143,7 @@ static void fifo_cmd_byte(u8 val) {
         handle_bp_reg(be32(p));
     } else if (cmd == GX_CMD_CALL_DL) {
         void* list = pc_host_from_gc_phys(be32(p));
-        if (list) pc_gfx_call_display_list(list, be32(p + 4));
+        if (list) pc_gfx_call_display_list(list, u32(pc_host_readable_bytes(list, be32(p + 4))));
     } else {
         handle_indexed_xf_load(cmd, be32(p));
     }
@@ -11395,7 +11429,8 @@ static void pc_gfx_call_display_list_impl(const void* list, u32 nbytes) {
             flushPendingStrip();
             u32 addr, size;
             if (!read_be_u32(cursor, end, addr) || !read_be_u32(cursor, end, size)) break;
-            if (void* nested = pc_host_from_gc_phys(addr)) pc_gfx_call_display_list(nested, size);
+            if (void* nested = pc_host_from_gc_phys(addr))
+                pc_gfx_call_display_list(nested, u32(pc_host_readable_bytes(nested, size)));
             continue;
         }
         if (command == GX_CMD_INVL_VC) continue;
@@ -11534,8 +11569,8 @@ static void pc_gfx_call_display_list_impl(const void* list, u32 nbytes) {
                     }
                     const VertexArrayState& array = sVtxArrays[attr];
                     if (!array.base || array.stride == 0) continue;
-                    element = array.base + size_t(index) * array.stride;
-                    if (building) meshNoteRange(element, array.stride);
+                    element = vtx_array_element(array, index, GXAttr(attr), sVtxFormats[format][attr]);
+                    if (building && element != sZeroAttr) meshNoteRange(element, array.stride);
                     // Only the wild-vertex report below reads these, and this
                     // is the innermost loop in the whole renderer: three stores
                     // per vertex, hundreds of thousands of vertices a frame.
