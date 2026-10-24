@@ -1,0 +1,83 @@
+#pragma once
+
+// Olimar tal como lo carga el juego: pikis/nv3Model.mod (12 articulaciones,
+// las mismas que los Pikmin) y las animaciones que comparte con ellos
+// (pikis/bluModel.anm, ver PikiShapeObject::getAnimMgr).
+
+#include "mm_math.h"
+#include "nectar_assets/image.h"
+
+#include <string>
+#include <vector>
+
+namespace mm {
+
+constexpr int kJoints = 12;
+// Índices de articulación de nv3Model.mod (pc_hd_models.cpp, kNaviRig). Mira
+// hacia +Z, así que su izquierda está en +X.
+enum OlimarJoint : int {
+	J_ROOT  = 0, // kosinull
+	J_SPINE = 1, // sebonjnt: todo el cuerpo y la cadera
+	J_HEAD  = 2, // headjnt
+	J_FACE  = 3, // ayudante de la cabeza (el juego no lo nombra; el pack no lo usa)
+	J_ANT1  = 4, // happajnt1-3: la antena
+	J_ANT2  = 5,
+	J_ANT3  = 6,
+	J_RARM  = 7, // rhandjnt (-x): el brazo entero
+	J_LARM  = 8, // lhandjnt (+x)
+	J_LEGS  = 9, // legcentre
+	J_RLEG  = 10, // rlegjnt (-x): la pierna entera
+	J_LLEG  = 11, // llegjnt (+x)
+};
+
+/// Nombre del hueso en el pack (el que espera pc_hd_models.cpp), o nullptr.
+const char* packBoneName(int joint);
+
+struct SkinVertex {
+	Vec3 p, n;
+	Vec2 uv;
+	float col[4] = { 1, 1, 1, 1 };
+	int joint[4]    = { 0, 0, 0, 0 };
+	float weight[4] = { 1, 0, 0, 0 };
+};
+
+struct OlimarRig {
+	std::vector<Mat34> bind; ///< pose de reposo de cada articulación (espacio del modelo)
+	std::vector<int> parent;
+	std::vector<SkinVertex> verts; ///< triángulos sueltos (3 vértices cada uno), en reposo
+	std::vector<int> triMaterial;
+	std::vector<nectar::Image> materialTex; ///< vacía: solo color
+	std::vector<nectar::Rgba8> materialColour;
+	Vec3 min, max;
+	float bodyTop = 13; ///< lo más alto sin la antena
+
+	bool load(const std::string& dataDir, std::string& error);
+	/// Centro de lo que pesa en `joint` (para saber hacia dónde va un brazo).
+	Vec3 jointCentroid(int joint) const;
+	Vec3 pivot(int joint) const { return translationOf(bind[std::size_t(joint)]); }
+};
+
+struct AnimParam {
+	int count = 0, offset = 0, flags = 0;
+};
+struct AnimJoint {
+	AnimParam s[3], r[3], t[3];
+};
+
+/// Una animación .dca (un valor por fotograma) o .dck (claves con tangentes).
+struct Anim {
+	std::string path; ///< ruta dentro del bundle
+	std::string name; ///< para mostrar
+	bool keyed = false;
+	int frames = 0;
+	std::vector<float> sData, rData, tData;
+	std::vector<AnimJoint> joints;
+
+	/// Matrices del mundo de cada articulación en el fotograma `frame`
+	/// (raíz sobre la identidad), como BaseShape::updateAnim.
+	void pose(float frame, const std::vector<int>& parent, std::vector<Mat34>& world) const;
+};
+
+bool loadAnimBundle(const std::string& path, std::vector<Anim>& out, std::string& error);
+
+} // namespace mm

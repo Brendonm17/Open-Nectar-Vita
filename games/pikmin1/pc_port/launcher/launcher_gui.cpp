@@ -904,6 +904,13 @@ struct Hub {
         }
     }
 
+    // Filas de botones bajo la portada de Pikmin 1 antes del cooperativo: una,
+    // o dos con los dos editores (HD textures baja a la segunda).
+    float editorRows() const
+    {
+        return (!state.mapEditor.empty() && !state.modelMaker.empty()) ? 2.0f : 1.0f;
+    }
+
     void drawGames(float top, ImVec2 size, float dt, float t)
     {
         const float cardW = std::clamp(size.x * 0.19f, 190.0f, 280.0f);
@@ -931,25 +938,37 @@ struct Hub {
                 if (glassButton("Install", ImVec2(cardW, 44.0f))) choose(HubAction::Install, HubGame(i));
             } else {
                 const bool editor = !isPikmin2 && !state.mapEditor.empty();
-                const float buttonW = editor ? (cardW - 12.0f) * 0.5f : cardW;
-                if (editor) {
-                    if (glassButton("Map editor", ImVec2(buttonW, 44.0f))) choose(HubAction::MapEditor, HubGame(i));
-                    ImGui::SetCursorScreenPos(ImVec2(x + buttonW + 12.0f, below + 38.0f));
+                const bool models = !isPikmin2 && !state.modelMaker.empty();
+                const float halfW = (cardW - 12.0f) * 0.5f;
+                if (editor && models) {
+                    // Los dos editores arriba y HD textures en su propia fila.
+                    if (glassButton("Map editor", ImVec2(halfW, 44.0f))) choose(HubAction::MapEditor, HubGame(i));
+                    ImGui::SetCursorScreenPos(ImVec2(x + halfW + 12.0f, below + 38.0f));
+                    if (glassButton("Model maker", ImVec2(halfW, 44.0f))) choose(HubAction::ModelMaker, HubGame(i));
+                    ImGui::SetCursorScreenPos(ImVec2(x, below + 38.0f + 44.0f + 10.0f));
+                    if (glassButton("HD textures", ImVec2(cardW, 44.0f))) choose(HubAction::TexturePack, HubGame(i));
+                } else {
+                    const bool one = editor || models;
+                    const float buttonW = one ? halfW : cardW;
+                    if (editor && glassButton("Map editor", ImVec2(buttonW, 44.0f))) choose(HubAction::MapEditor, HubGame(i));
+                    if (models && glassButton("Model maker", ImVec2(buttonW, 44.0f))) choose(HubAction::ModelMaker, HubGame(i));
+                    if (one) ImGui::SetCursorScreenPos(ImVec2(x + buttonW + 12.0f, below + 38.0f));
+                    if (glassButton("HD textures", ImVec2(buttonW, 44.0f))) choose(HubAction::TexturePack, HubGame(i));
                 }
-                if (glassButton("HD textures", ImVec2(buttonW, 44.0f))) choose(HubAction::TexturePack, HubGame(i));
             }
 #if PIKMIN_LAUNCHER_NETPLAY
             // Online co-op: two captains on two PCs (netplay builds).
             if (installed && !isPikmin2 && state.netplay) {
                 const float coopW = (cardW - 12.0f) * 0.5f;
-                ImGui::SetCursorScreenPos(ImVec2(x, below + 38.0f + 44.0f + 10.0f));
+                const float rows  = below + 38.0f + editorRows() * (44.0f + 10.0f);
+                ImGui::SetCursorScreenPos(ImVec2(x, rows));
                 if (glassButton("Host Co-op", ImVec2(coopW, 44.0f))) openCoop(true);
-                ImGui::SetCursorScreenPos(ImVec2(x + coopW + 12.0f, below + 38.0f + 44.0f + 10.0f));
+                ImGui::SetCursorScreenPos(ImVec2(x + coopW + 12.0f, rows));
                 if (glassButton("Join Co-op", ImVec2(coopW, 44.0f))) openCoop(false);
                 // Online VS: a 1v1 match on two PCs, on the host's VS map.
-                ImGui::SetCursorScreenPos(ImVec2(x, below + 38.0f + 2.0f * (44.0f + 10.0f)));
+                ImGui::SetCursorScreenPos(ImVec2(x, rows + 44.0f + 10.0f));
                 if (glassButton("Host VS", ImVec2(coopW, 44.0f))) openCoop(true, true);
-                ImGui::SetCursorScreenPos(ImVec2(x + coopW + 12.0f, below + 38.0f + 2.0f * (44.0f + 10.0f)));
+                ImGui::SetCursorScreenPos(ImVec2(x + coopW + 12.0f, rows + 44.0f + 10.0f));
                 if (glassButton("Join VS", ImVec2(coopW, 44.0f))) openCoop(false, true);
             }
 #endif
@@ -958,7 +977,7 @@ struct Hub {
 
         // Un solo Update, centrado entre los dos juegos y debajo de sus botones.
         if (state.games[int(HubGame::Pikmin1)].installed) {
-            float y = cardY + cardH + 22.0f + 38.0f + 44.0f + 32.0f;
+            float y = cardY + cardH + 22.0f + 38.0f + 44.0f + 32.0f + (editorRows() - 1) * (44.0f + 10.0f);
 #if PIKMIN_LAUNCHER_NETPLAY
             if (state.netplay) y += 2.0f * (44.0f + 10.0f);
 #endif

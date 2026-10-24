@@ -40,6 +40,9 @@ constexpr unsigned kPartFlagRepeat = 1; // texture wraps instead of clamping
 constexpr unsigned kPartFlagNoCull = 2; // thin two-sided pieces (eye discs)
 constexpr unsigned kPartFlagNoTint = 4; // ignores the caller's tint (a captain's head/visor)
 
+// Model flags (NHM version 3, written by tools/modelmaker).
+constexpr unsigned kModelFlagRetarget = 1; // the pack keeps its own joint positions (see retargetSkin)
+
 struct Part {
 	std::vector<Vertex> vertices;
 	unsigned width = 0;
@@ -146,6 +149,9 @@ const Entry kEntries[PC_HD_MODEL_COUNT] = {
 	{ "Pikmin2", "piki_white.nhm", BIND_PACK, GX_CULL_FRONT, kNaviRig, 12 },
 	{ "Pikmin2", "piki_purple.nhm", BIND_PACK, GX_CULL_FRONT, kNaviRig, 12 },
 	{ "Pikmin2", "bulbmin.nhm", BIND_PACK, GX_CULL_FRONT, kNaviRig, 12 },
+	// Olimar propio del creador de modelos (nectar-modelmaker): va por delante
+	// del pack HD y del original cuando existe.
+	{ "Custom", "olimar.nhm", BIND_PACK, GX_CULL_FRONT, kNaviRig, 12 },
 };
 
 struct Model {
@@ -153,6 +159,7 @@ struct Model {
 	bool ready = false;
 	bool texturesReady = false;
 	bool bonesResolved = false;
+	unsigned flags = 0; // kModelFlag*
 	std::string path;
 	std::vector<Bone> bones;
 	std::vector<Part> parts;
@@ -180,7 +187,8 @@ bool loadModel(Model& model, const Entry& entry)
 	unsigned version, boneCount, partCount;
 	if (!in.read(magic, sizeof(magic)) || std::memcmp(magic, "NHM1", 4) != 0
 	    || !readValue(in, version) || !readValue(in, boneCount) || !readValue(in, partCount)
-	    || version < 1 || version > 2 || boneCount == 0 || boneCount > 64 || partCount == 0 || partCount > 8) {
+	    || version < 1 || version > 3 || boneCount == 0 || boneCount > 64 || partCount == 0 || partCount > 8
+	    || (version >= 3 && !readValue(in, model.flags))) {
 		std::printf("[HD Models] invalid header in %s\n", model.path.c_str());
 		return false;
 	}
@@ -291,7 +299,9 @@ int settingsRow(PcHdModelId id)
 	case PC_HD_MODEL_PRESIDENT:
 	case PC_HD_MODEL_PIKI_WHITE:
 	case PC_HD_MODEL_PIKI_PURPLE:
-	case PC_HD_MODEL_BULBMIN: return -1;
+	case PC_HD_MODEL_BULBMIN:
+	// El Olimar propio se quita desde el creador de modelos.
+	case PC_HD_MODEL_OLIMAR_CUSTOM: return -1;
 	default: return 3;
 	}
 }
@@ -393,6 +403,97 @@ void drawModel(Graphics& gfx, const Model& model, const Entry& entry, const std:
 	GXSetTevOp(GX_TEVSTAGE0, GX_MODULATE);
 }
 
+// 3x4 affine matrices (rows, like Mtx) for retargetSkin.
+struct Affine {
+	float m[3][4];
+};
+
+Affine affineFrom(const Matrix4f& src)
+{
+	Affine a;
+	for (int row = 0; row < 3; ++row)
+		for (int col = 0; col < 4; ++col) a.m[row][col] = src.mMtx[row][col];
+	return a;
+}
+
+Affine affineMul(const Affine& a, const Affine& b)
+{
+	Affine r;
+	for (int row = 0; row < 3; ++row) {
+		for (int col = 0; col < 4; ++col) {
+			r.m[row][col] = a.m[row][0] * b.m[0][col] + a.m[row][1] * b.m[1][col] + a.m[row][2] * b.m[2][col];
+		}
+		r.m[row][3] += a.m[row][3];
+	}
+	return r;
+}
+
+// General affine inverse (the animation may scale joints).
+Affine affineInverse(const Affine& a)
+{
+	const float(&m)[3][4] = a.m;
+	const float c00 = m[1][1] * m[2][2] - m[1][2] * m[2][1];
+	const float c01 = m[1][2] * m[2][0] - m[1][0] * m[2][2];
+	const float c02 = m[1][0] * m[2][1] - m[1][1] * m[2][0];
+	const float det = m[0][0] * c00 + m[0][1] * c01 + m[0][2] * c02;
+	Affine r = { { { 1, 0, 0, 0 }, { 0, 1, 0, 0 }, { 0, 0, 1, 0 } } };
+	if (std::fabs(det) < 1e-12f) return r;
+	const float k = 1.0f / det;
+	r.m[0][0] = c00 * k;
+	r.m[0][1] = (m[0][2] * m[2][1] - m[0][1] * m[2][2]) * k;
+	r.m[0][2] = (m[0][1] * m[1][2] - m[0][2] * m[1][1]) * k;
+	r.m[1][0] = c01 * k;
+	r.m[1][1] = (m[0][0] * m[2][2] - m[0][2] * m[2][0]) * k;
+	r.m[1][2] = (m[0][2] * m[1][0] - m[0][0] * m[1][2]) * k;
+	r.m[2][0] = c02 * k;
+	r.m[2][1] = (m[0][1] * m[2][0] - m[0][0] * m[2][1]) * k;
+	r.m[2][2] = (m[0][0] * m[1][1] - m[0][1] * m[1][0]) * k;
+	for (int row = 0; row < 3; ++row)
+		r.m[row][3] = -(r.m[row][0] * m[0][3] + r.m[row][1] * m[1][3] + r.m[row][2] * m[2][3]);
+	return r;
+}
+
+// Packs with kModelFlagRetarget keep their own joint positions (a tall
+// character's shoulders, hips and neck) and borrow only the motion of the
+// engine's joints: each animated local transform keeps its rotation and
+// scale and shifts its origin by the difference between the pack's and the
+// engine's bind offsets, so the arms swing from the character's own
+// shoulders. The pack's inverse binds give its bind positions; their
+// rotation is always the engine's.
+void retargetSkin(const Model& model, BaseShape* shape, std::vector<float>& matrices)
+{
+	const int count = shape->mJointCount;
+	std::vector<Affine> bind(count), packBind(count), packAnim(count);
+	for (int j = 0; j < count; ++j) bind[j] = packBind[j] = affineInverse(affineFrom(shape->mJointList[j].mInverseAnimMatrix));
+	for (const Bone& bone : model.bones) {
+		Affine inverseBind;
+		for (int row = 0; row < 3; ++row)
+			for (int col = 0; col < 4; ++col) inverseBind.m[row][col] = bone.inverseBind[row * 4 + col];
+		const Affine own = affineInverse(inverseBind);
+		for (int row = 0; row < 3; ++row) packBind[bone.shapeIndex].m[row][3] = own.m[row][3];
+	}
+	// The .mod joint order lists parents before their children.
+	for (int j = 0; j < count; ++j) {
+		const Affine anim = affineFrom(shape->mAnimMatrices[j]);
+		const int parent  = shape->mJointList[j].mParentIndex;
+		if (parent < 0 || parent >= j) {
+			packAnim[j] = affineMul(anim, affineMul(affineInverse(bind[j]), packBind[j]));
+			continue;
+		}
+		Affine local           = affineMul(affineInverse(affineFrom(shape->mAnimMatrices[parent])), anim);
+		const Affine bindLocal = affineMul(affineInverse(bind[parent]), bind[j]);
+		const Affine packLocal = affineMul(affineInverse(packBind[parent]), packBind[j]);
+		for (int row = 0; row < 3; ++row) local.m[row][3] += packLocal.m[row][3] - bindLocal.m[row][3];
+		packAnim[j] = affineMul(packAnim[parent], local);
+	}
+	for (size_t i = 0; i < model.bones.size(); ++i) {
+		const int idx     = model.bones[i].shapeIndex;
+		const Affine skin = affineMul(packAnim[idx], affineInverse(packBind[idx]));
+		for (int row = 0; row < 3; ++row)
+			for (int col = 0; col < 4; ++col) matrices[i * 12 + row * 4 + col] = skin.m[row][col];
+	}
+}
+
 } // namespace
 
 const char* pc_hd_model_path(PcHdModelId id)
@@ -411,6 +512,11 @@ bool pc_hd_model_draw_skinned(Graphics& gfx, BaseShape* shape, PcHdModelId id, G
 	if (!resolveBones(*model, entry, shape)) return false;
 
 	std::vector<float> matrices(model->bones.size() * 12);
+	if (model->flags & kModelFlagRetarget) {
+		retargetSkin(*model, shape, matrices);
+		drawModel(gfx, *model, entry, matrices, tint, whiten);
+		return true;
+	}
 	for (size_t i = 0; i < model->bones.size(); ++i) {
 		const Bone& bone = model->bones[i];
 		const int idx    = bone.shapeIndex;

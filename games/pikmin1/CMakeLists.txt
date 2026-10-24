@@ -154,6 +154,7 @@ endif()
 option(PIKMIN_BUILD_LAUNCHER "Build the standalone first-run launcher" ${PIKMIN_DESKTOP_DEFAULT})
 option(PIKMIN_BUILD_TESTS "Build the host-run test executables" ${PIKMIN_DESKTOP_DEFAULT})
 option(NECTAR_BUILD_MAPMAKER "Build the VS map editor (tools/mapmaker)" ${PIKMIN_DESKTOP_DEFAULT})
+option(NECTAR_BUILD_MODELMAKER "Build the model maker (tools/modelmaker)" ${PIKMIN_DESKTOP_DEFAULT})
 option(NECTAR_ONLINE "Build the experimental direct online co-op layer" OFF)
 
 if(PIKMIN_BUILD_TESTS)
@@ -1430,4 +1431,10 @@ endif()
 # donde busca el ejecutable para "Probar". Usa la ImGui del launcher.
 if (NECTAR_BUILD_MAPMAKER AND NOT ANDROID)
     add_subdirectory("${NECTAR_LIBS_DIR}/../tools/mapmaker" "${CMAKE_CURRENT_BINARY_DIR}/mapmaker")
+endif()
+
+# Creador de modelos (tools/modelmaker): Olimar propio a partir de un glTF,
+# VRM u OBJ. Comparte con el editor de mapas la ImGui, OpenGL y nectar_assets.
+if (NECTAR_BUILD_MODELMAKER AND NOT ANDROID)
+    add_subdirectory("${NECTAR_LIBS_DIR}/../tools/modelmaker" "${CMAKE_CURRENT_BINARY_DIR}/modelmaker")
 endif()

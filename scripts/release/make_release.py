@@ -91,6 +91,7 @@ def main():
     ap.add_argument("--p2", required=True)
     ap.add_argument("--p2-usa", help="build USA (GPVE01) de Pikmin 2; --p2 es la europea")
     ap.add_argument("--mapmaker", help="editor de mapas VS; viaja con el launcher")
+    ap.add_argument("--modelmaker", help="creador de modelos (Olimar propio); viaja con el launcher")
     ap.add_argument("--extra", action="append", default=[], help="archivo que va junto al launcher (README, icono)")
     args = ap.parse_args()
 
@@ -109,6 +110,8 @@ def main():
     launcher_files = [(args.launcher, "nectar-launcher" + exe, True)]
     if args.mapmaker:
         launcher_files.append((args.mapmaker, "nectar-mapmaker" + exe, True))
+    if args.modelmaker:
+        launcher_files.append((args.modelmaker, "nectar-modelmaker" + exe, True))
     launcher_files += [(f, os.path.basename(f), False) for f in args.extra]
     p1_files = [(args.p1_usa, "nectar" + exe, True), (args.p1_pal, "nectar-pal" + exe, True)]
     p2_files = [(args.p2, "pikmin2_pc" + exe, True)]

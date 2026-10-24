@@ -77,7 +77,7 @@ fi
 
 printf '[1/4] Pikmin 1 USA, el launcher y el editor de mapas...\n'
 cmake -S "${p1}" -B "${build_dir}/p1-usa" "${common[@]}" "${online[@]}" -DOPEN_NECTAR_VERSION="${version}"
-cmake --build "${build_dir}/p1-usa" --target pikmin_pc pikmin_launcher nectar_mapmaker -j"${jobs}"
+cmake --build "${build_dir}/p1-usa" --target pikmin_pc pikmin_launcher nectar_mapmaker nectar_modelmaker -j"${jobs}"
 
 printf '[2/4] Pikmin 1 PAL...\n'
 cmake -S "${p1}" -B "${build_dir}/p1-pal" "${common[@]}" "${online[@]}" -DOPEN_NECTAR_VERSION="${version}" \
@@ -95,6 +95,7 @@ launcher="${build_dir}/p1-usa/bin/nectar-launcher"
 usa="${build_dir}/p1-usa/bin/nectar"
 pal="${build_dir}/p1-pal/bin/nectar"
 mapmaker="${build_dir}/p1-usa/bin/nectar-mapmaker"
+modelmaker="${build_dir}/p1-usa/bin/nectar-modelmaker"
 p2eu="${build_dir}/p2/pikmin2_pc"
 p2usa="${build_dir}/p2-usa/pikmin2_pc"
 
@@ -106,6 +107,7 @@ cp "${launcher}" "${stripped}/nectar-launcher"
 cp "${usa}" "${stripped}/nectar"
 cp "${pal}" "${stripped}/nectar-pal"
 cp "${mapmaker}" "${stripped}/nectar-mapmaker"
+cp "${modelmaker}" "${stripped}/nectar-modelmaker"
 cp "${p2eu}" "${stripped}/pikmin2_pc"
 cp "${p2usa}" "${stripped}/pikmin2_pc-usa"
 for exe in "${stripped}"/*; do
@@ -127,7 +129,7 @@ done
 python3 "${root}/scripts/release/make_release.py" --os macos --out "${out_dir}" \
     --launcher "${stripped}/nectar-launcher" --p1-usa "${stripped}/nectar" \
     --p1-pal "${stripped}/nectar-pal" --p2 "${stripped}/pikmin2_pc" --p2-usa "${stripped}/pikmin2_pc-usa" \
-    --mapmaker "${stripped}/nectar-mapmaker" \
+    --mapmaker "${stripped}/nectar-mapmaker" --modelmaker "${stripped}/nectar-modelmaker" \
     --extra "${root}/games/pikmin1/packaging/macos/README.txt" \
     --extra "${root}/games/pikmin1/packaging/icon/open_nectar.png"
 

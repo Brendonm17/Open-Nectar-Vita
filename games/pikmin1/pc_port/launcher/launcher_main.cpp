@@ -48,10 +48,12 @@ namespace platform = pikmin::launcher::platform;
 constexpr const char* kGameExecutable     = "nectar.exe";
 constexpr const char* kLauncherExecutable = "nectar-launcher.exe";
 constexpr const char* kMapEditorExecutable = "nectar-mapmaker.exe";
+constexpr const char* kModelMakerExecutable = "nectar-modelmaker.exe";
 #else
 constexpr const char* kGameExecutable     = "nectar";
 constexpr const char* kLauncherExecutable = "nectar-launcher";
 constexpr const char* kMapEditorExecutable = "nectar-mapmaker";
+constexpr const char* kModelMakerExecutable = "nectar-modelmaker";
 #endif
 
 
@@ -990,6 +992,8 @@ bool installSharedParts(const fs::path& package, const fs::path& install, std::s
     if (fs::is_regular_file(palBuild) && !replaceExecutable(palBuild, install / palBuild.filename(), failure)) return false;
     const fs::path mapEditor = package / kMapEditorExecutable;
     if (fs::is_regular_file(mapEditor) && !replaceExecutable(mapEditor, install / kMapEditorExecutable, failure)) return false;
+    const fs::path modelMaker = package / kModelMakerExecutable;
+    if (fs::is_regular_file(modelMaker) && !replaceExecutable(modelMaker, install / kModelMakerExecutable, failure)) return false;
     const fs::path icon = package / "open_nectar.png";
     if (fs::is_regular_file(icon) && !sameFile(icon, install / icon.filename())) {
         fs::copy_file(icon, install / icon.filename(), fs::copy_options::overwrite_existing, ec);
@@ -1396,6 +1400,12 @@ int main(int argc, char** argv)
                     break;
                 }
             }
+            for (const fs::path& dir : { pikmin1Directory, platform::executablePath().parent_path() }) {
+                if (!dir.empty() && fs::is_regular_file(dir / kModelMakerExecutable)) {
+                    hubState.modelMaker = (dir / kModelMakerExecutable).string();
+                    break;
+                }
+            }
         }
         auto window = std::make_unique<pikmin::launcher::HubWindow>();
         std::string hubError;
@@ -1436,6 +1446,11 @@ int main(int argc, char** argv)
                     if (choice.action == pikmin::launcher::HubAction::MapEditor) {
                         // Se abre en la carpeta del juego: de ahí saca assets/ y el ejecutable.
                         if (!hubState.mapEditor.empty()) play(hubState.games[0].directory, hubState.mapEditor);
+                        continue;
+                    }
+                    if (choice.action == pikmin::launcher::HubAction::ModelMaker) {
+                        // Como el editor de mapas: en la carpeta del juego (assets/ y Load/Models).
+                        if (!hubState.modelMaker.empty()) play(hubState.games[0].directory, hubState.modelMaker);
                         continue;
                     }
                     if (choice.action == pikmin::launcher::HubAction::TexturePack) {

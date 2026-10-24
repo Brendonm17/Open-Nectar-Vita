@@ -28,6 +28,7 @@ enum PcHdModelId {
 	PC_HD_MODEL_PIKI_WHITE,   // sobre el esqueleto de un Pikmin
 	PC_HD_MODEL_PIKI_PURPLE,
 	PC_HD_MODEL_BULBMIN,
+	PC_HD_MODEL_OLIMAR_CUSTOM, // Load/Models/Custom/olimar.nhm (nectar-modelmaker)
 	PC_HD_MODEL_COUNT,
 };
 

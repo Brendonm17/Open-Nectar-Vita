@@ -52,7 +52,7 @@ fi
 printf '[1/4] Pikmin 1 USA y el launcher...\n'
 cmake -S "${p1}" -B "${build_dir}/p1-usa" "${common[@]}" "${online[@]}" \
     -DCMAKE_TOOLCHAIN_FILE="${p1_toolchain}" -DOPEN_NECTAR_VERSION="${launcher_version}"
-cmake --build "${build_dir}/p1-usa" --target pikmin_pc pikmin_launcher nectar_mapmaker -j"${jobs}"
+cmake --build "${build_dir}/p1-usa" --target pikmin_pc pikmin_launcher nectar_mapmaker nectar_modelmaker -j"${jobs}"
 
 printf '[2/4] Pikmin 1 PAL...\n'
 cmake -S "${p1}" -B "${build_dir}/p1-pal" "${common[@]}" "${online[@]}" \
@@ -74,6 +74,7 @@ pal="${build_dir}/p1-pal/bin/nectar.exe"
 p2exe="${build_dir}/p2/pikmin2_pc.exe"
 p2usa="${build_dir}/p2-usa/pikmin2_pc.exe"
 mapmaker="${build_dir}/p1-usa/bin/nectar-mapmaker.exe"
+modelmaker="${build_dir}/p1-usa/bin/nectar-modelmaker.exe"
 
 printf '[4/4] Montando los archivos de la release...\n'
 stripped="${build_dir}/stripped"
@@ -84,6 +85,7 @@ cp "${pal}" "${stripped}/nectar-pal.exe"
 cp "${p2exe}" "${stripped}/pikmin2_pc.exe"
 cp "${p2usa}" "${stripped}/pikmin2_pc-usa.exe"
 cp "${mapmaker}" "${stripped}/nectar-mapmaker.exe"
+cp "${modelmaker}" "${stripped}/nectar-modelmaker.exe"
 x86_64-w64-mingw32-strip "${stripped}"/*.exe
 
 # Nada de DLL propias: cada .exe debe pedir solo DLL del sistema.
@@ -100,5 +102,5 @@ done
 python3 "${root}/scripts/release/make_release.py" --os windows --out "${out_dir}" \
     --launcher "${stripped}/nectar-launcher.exe" --p1-usa "${stripped}/nectar.exe" \
     --p1-pal "${stripped}/nectar-pal.exe" --p2 "${stripped}/pikmin2_pc.exe" --p2-usa "${stripped}/pikmin2_pc-usa.exe" \
-    --mapmaker "${stripped}/nectar-mapmaker.exe" \
+    --mapmaker "${stripped}/nectar-mapmaker.exe" --modelmaker "${stripped}/nectar-modelmaker.exe" \
     --extra "${p1}/packaging/windows/README.txt"

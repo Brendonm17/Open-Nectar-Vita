@@ -16,6 +16,7 @@ enum class HubAction {
     Install, // botón Instalar (pide la ISO)
     Update,  // botón Actualizar (pide la carpeta de la instalación anterior)
     MapEditor, // botón del editor de mapas VS (Pikmin 1 instalado)
+    ModelMaker, // botón del creador de modelos (Olimar propio, Pikmin 1)
     TexturePack, // botón HD textures: descarga e instala el pack de ese juego
 };
 
@@ -46,6 +47,8 @@ struct HubState {
     // Editor de mapas VS (nectar-mapmaker) junto al launcher o en la
     // instalación de Pikmin 1. Vacío = no hay: sin botón.
     std::string mapEditor;
+    // Creador de modelos (nectar-modelmaker), igual que el editor de mapas.
+    std::string modelMaker;
     // Host Co-op / Join Co-op under Pikmin 1 (netplay builds of the game).
     bool netplay = false;
 };

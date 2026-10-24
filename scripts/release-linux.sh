@@ -42,10 +42,11 @@ pal="${build_dir}/p1-pal/bin/nectar"
 p2="${build_dir}/p2/pikmin2_pc"
 p2usa="${build_dir}/p2-usa/pikmin2_pc"
 mapmaker="${build_dir}/p1-usa/bin/nectar-mapmaker"
+modelmaker="${build_dir}/p1-usa/bin/nectar-modelmaker"
 
 # Solo glibc, libGL y libX11: cualquier otra dependencia es un error de empaquetado.
 allowed='^(libc|libm|libdl|libpthread|librt|libgcc_s|ld-linux-x86-64)\.so|^libGL\.so\.1$|^libX11\.so\.6$'
-for exe in "${launcher}" "${usa}" "${pal}" "${p2}" "${p2usa}" "${mapmaker}"; do
+for exe in "${launcher}" "${usa}" "${pal}" "${p2}" "${p2usa}" "${mapmaker}" "${modelmaker}"; do
     [[ -f "${exe}" ]] || { printf 'No se generó %s\n' "${exe}" >&2; exit 1; }
     while read -r lib; do
         if ! printf '%s\n' "${lib}" | grep -Eq "${allowed}"; then
@@ -64,10 +65,12 @@ cp "${pal}" "${stripped}/nectar-pal"
 cp "${p2}" "${stripped}/pikmin2_pc"
 cp "${p2usa}" "${stripped}/pikmin2_pc-usa"
 cp "${mapmaker}" "${stripped}/nectar-mapmaker"
+cp "${modelmaker}" "${stripped}/nectar-modelmaker"
 strip "${stripped}"/* 2>/dev/null || true
 python3 "${root}/scripts/release/make_release.py" --os linux --out "${out_dir}" \
     --launcher "${stripped}/nectar-launcher" --p1-usa "${stripped}/nectar" \
     --p1-pal "${stripped}/nectar-pal" --p2 "${stripped}/pikmin2_pc" --p2-usa "${stripped}/pikmin2_pc-usa" --mapmaker "${stripped}/nectar-mapmaker" \
+    --modelmaker "${stripped}/nectar-modelmaker" \
     --extra "${root}/games/pikmin1/packaging/linux/README.txt" \
     --extra "${root}/games/pikmin1/packaging/linux/LEEME.txt" \
     --extra "${root}/games/pikmin1/packaging/icon/open_nectar.png"
