@@ -12,6 +12,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -173,11 +174,10 @@ bool readValue(std::ifstream& in, T& value)
 	return bool(in.read(reinterpret_cast<char*>(&value), sizeof(value)));
 }
 
-bool loadModel(Model& model, const Entry& entry)
+bool loadModel(Model& model, const fs::path& path)
 {
 	model.attempted = true;
-	const fs::path path = fs::path("Load") / "Models" / entry.dir / entry.file;
-	model.path          = path.string();
+	model.path      = path.string();
 	std::ifstream in(path, std::ios::binary);
 	if (!in) {
 		std::printf("[HD Models] disabled: %s not found\n", model.path.c_str());
@@ -306,6 +306,8 @@ int settingsRow(PcHdModelId id)
 	}
 }
 
+Model* finishPrepare(Model& model);
+
 Model* prepare(PcHdModelId id)
 {
 	if (id < 0 || id >= PC_HD_MODEL_COUNT) return nullptr;
@@ -319,7 +321,13 @@ Model* prepare(PcHdModelId id)
 		pc_hd_models_convert_sources();
 	}
 	Model& model = sModels[id];
-	if (!model.attempted && !loadModel(model, kEntries[id])) return nullptr;
+	if (!model.attempted && !loadModel(model, fs::path("Load") / "Models" / kEntries[id].dir / kEntries[id].file)) return nullptr;
+	return finishPrepare(model);
+}
+
+// Texturas en la GPU la primera vez que se dibuja.
+Model* finishPrepare(Model& model)
+{
 	if (!model.ready) return nullptr;
 	if (!model.texturesReady) {
 		for (Part& part : model.parts) {
@@ -504,11 +512,15 @@ const char* pc_hd_model_path(PcHdModelId id)
 	return paths[id].c_str();
 }
 
-bool pc_hd_model_draw_skinned(Graphics& gfx, BaseShape* shape, PcHdModelId id, GXColor tint, u8 whiten)
+namespace {
+
+// Personajes propios (Load/Characters): mismo esqueleto que Olimar.
+const Entry kCustomEntry = { "Characters", "model.nhm", BIND_PACK, GX_CULL_FRONT, kNaviRig, 12 };
+std::map<std::string, Model> sCustomModels;
+
+bool drawSkinned(Graphics& gfx, BaseShape* shape, Model* model, const Entry& entry, GXColor tint, u8 whiten)
 {
-	Model* model = prepare(id);
 	if (!model || !shape || !shape->mAnimMatrices) return false;
-	const Entry& entry = kEntries[id];
 	if (!resolveBones(*model, entry, shape)) return false;
 
 	std::vector<float> matrices(model->bones.size() * 12);
@@ -536,6 +548,21 @@ bool pc_hd_model_draw_skinned(Graphics& gfx, BaseShape* shape, PcHdModelId id, G
 	}
 	drawModel(gfx, *model, entry, matrices, tint, whiten);
 	return true;
+}
+
+} // namespace
+
+bool pc_hd_model_draw_skinned(Graphics& gfx, BaseShape* shape, PcHdModelId id, GXColor tint, u8 whiten)
+{
+	return drawSkinned(gfx, shape, prepare(id), kEntries[id < 0 || id >= PC_HD_MODEL_COUNT ? 0 : id], tint, whiten);
+}
+
+bool pc_hd_model_draw_custom(Graphics& gfx, BaseShape* shape, const char* path, GXColor tint, u8 whiten)
+{
+	if (!path || !*path) return false;
+	Model& model = sCustomModels[path];
+	if (!model.attempted) loadModel(model, fs::u8path(path));
+	return drawSkinned(gfx, shape, finishPrepare(model), kCustomEntry, tint, whiten);
 }
 
 bool pc_hd_model_draw_rigid(Graphics& gfx, const Matrix4f& mtx, PcHdModelId id, GXColor tint, u8 whiten)

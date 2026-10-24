@@ -334,6 +334,9 @@ struct NaviTexCallBack : public P2DPaneCallBack {
 				if (!custom) {
 					custom = zen::loadTexExp(kPikiPortrait[Red], true, true);
 				}
+			} else if (pc_captain_is_custom(captain)) {
+				// Personaje propio: su tarjeta (portrait.png); sin ella, la de Olimar.
+				if (const char* portrait = pc_captain_custom_portrait(captain)) custom = pc_art_texture(portrait);
 			}
 			Texture* want = custom ? custom : mOriginalTex;
 			if (want && pic->getTexture(0) != want) pic->setTexture(want, 0);

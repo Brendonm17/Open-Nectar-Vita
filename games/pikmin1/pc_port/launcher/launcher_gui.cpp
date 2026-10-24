@@ -941,12 +941,15 @@ struct Hub {
                 const bool models = !isPikmin2 && !state.modelMaker.empty();
                 const float halfW = (cardW - 12.0f) * 0.5f;
                 if (editor && models) {
-                    // Los dos editores arriba y HD textures en su propia fila.
+                    // Los dos editores arriba; HD textures y Characters (instalar
+                    // un personaje del creador) en la segunda fila.
                     if (glassButton("Map editor", ImVec2(halfW, 44.0f))) choose(HubAction::MapEditor, HubGame(i));
                     ImGui::SetCursorScreenPos(ImVec2(x + halfW + 12.0f, below + 38.0f));
                     if (glassButton("Model maker", ImVec2(halfW, 44.0f))) choose(HubAction::ModelMaker, HubGame(i));
                     ImGui::SetCursorScreenPos(ImVec2(x, below + 38.0f + 44.0f + 10.0f));
-                    if (glassButton("HD textures", ImVec2(cardW, 44.0f))) choose(HubAction::TexturePack, HubGame(i));
+                    if (glassButton("HD textures", ImVec2(halfW, 44.0f))) choose(HubAction::TexturePack, HubGame(i));
+                    ImGui::SetCursorScreenPos(ImVec2(x + halfW + 12.0f, below + 38.0f + 44.0f + 10.0f));
+                    if (glassButton("Characters", ImVec2(halfW, 44.0f))) choose(HubAction::InstallCharacter, HubGame(i));
                 } else {
                     const bool one = editor || models;
                     const float buttonW = one ? halfW : cardW;

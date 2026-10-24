@@ -7,6 +7,7 @@
 #include "import.h"
 #include "rig.h"
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -45,6 +46,8 @@ struct ExportOptions {
 
 ExportResult buildParts(const ImpModel& model, const RigResult& rig, const OlimarRig& olimar, const FitSettings& fit, const ExportOptions& opt);
 
+/// El .nhm en memoria (para un personaje .nectarchar) o en un archivo.
+bool buildNhm(const ExportResult& result, const RigResult& rig, const OlimarRig& olimar, std::vector<std::uint8_t>& out, std::string& error);
 bool writeNhm(const std::string& path, const ExportResult& result, const RigResult& rig, const OlimarRig& olimar, std::string& error);
 
 } // namespace mm

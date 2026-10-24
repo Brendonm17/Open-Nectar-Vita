@@ -14,6 +14,7 @@
 #include "launcher_platform.h"
 #include "release_update.h"
 #include "texture_pack_download.h"
+#include "nectar_assets/charpack.h"
 #if PIKMIN_LAUNCHER_NETPLAY
 #include "launcher_coop.h"
 #endif
@@ -1446,6 +1447,21 @@ int main(int argc, char** argv)
                     if (choice.action == pikmin::launcher::HubAction::MapEditor) {
                         // Se abre en la carpeta del juego: de ahí saca assets/ y el ejecutable.
                         if (!hubState.mapEditor.empty()) play(hubState.games[0].directory, hubState.mapEditor);
+                        continue;
+                    }
+                    if (choice.action == pikmin::launcher::HubAction::InstallCharacter) {
+                        // Un personaje del creador de modelos: a Load/Characters de
+                        // Pikmin 1; sale en el selector de capitán.
+                        const fs::path pack = platform::askForFile("Install a character", "Character", "*.nectarchar");
+                        if (!pack.empty()) {
+                            nectar::CharacterInfo info;
+                            std::string error;
+                            if (nectar::installCharacterPack(hubState.games[0].directory, pack.u8string(), info, error))
+                                platform::showMessage("Character installed",
+                                                      "\"" + info.name + "\" is in the captain selector of Pikmin.", false);
+                            else
+                                platform::showMessage("Could not install the character", error, true);
+                        }
                         continue;
                     }
                     if (choice.action == pikmin::launcher::HubAction::ModelMaker) {

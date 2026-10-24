@@ -265,12 +265,13 @@ ExportResult buildParts(const ImpModel& model, const RigResult& rig, const Olima
 	return res;
 }
 
-bool writeNhm(const std::string& path, const ExportResult& result, const RigResult& rig, const OlimarRig& olimar, std::string& error)
+bool buildNhm(const ExportResult& result, const RigResult& rig, const OlimarRig& olimar, std::vector<std::uint8_t>& out, std::string& error)
 {
 	if (!result.ok()) {
 		error = L("el modelo tiene errores (en rojo)", "the model has errors (in red)");
 		return false;
 	}
+	out.clear();
 	// Huesos del pack: las articulaciones con nombre, en orden.
 	std::vector<int> joints;
 	int boneOf[kJoints];
@@ -281,7 +282,6 @@ bool writeNhm(const std::string& path, const ExportResult& result, const RigResu
 			joints.push_back(j);
 		}
 	}
-	std::vector<std::uint8_t> out;
 	out.insert(out.end(), { 'N', 'H', 'M', '1' });
 	put(out, std::uint32_t(3));
 	put(out, std::uint32_t(joints.size()));
@@ -318,6 +318,13 @@ bool writeNhm(const std::string& path, const ExportResult& result, const RigResu
 		}
 		out.insert(out.end(), p.texture.rgba.begin(), p.texture.rgba.end());
 	}
+	return true;
+}
+
+bool writeNhm(const std::string& path, const ExportResult& result, const RigResult& rig, const OlimarRig& olimar, std::string& error)
+{
+	std::vector<std::uint8_t> out;
+	if (!buildNhm(result, rig, olimar, out, error)) return false;
 	std::error_code ec;
 	const fs::path target = fs::u8path(path);
 	fs::create_directories(target.parent_path(), ec);

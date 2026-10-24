@@ -1,5 +1,7 @@
 #include "view.h"
 
+#include <SDL.h>
+
 #include <cstddef>
 #include <cstdio>
 
@@ -223,6 +225,55 @@ void View::end()
 	glUseProgram(0);
 	glDisable(GL_DEPTH_TEST);
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+bool View::renderImage(int w, int h, const nm::M4& viewProj, const DynamicMesh& mesh, nectar::Image& out)
+{
+	GLuint fbo = 0, tex = 0, depth = 0;
+	glGenFramebuffers(1, &fbo);
+	glGenTextures(1, &tex);
+	glGenRenderbuffers(1, &depth);
+	glBindTexture(GL_TEXTURE_2D, tex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glBindRenderbuffer(GL_RENDERBUFFER, depth);
+	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, w, h);
+	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth);
+	const bool ok = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+	if (ok) {
+		glViewport(0, 0, w, h);
+		glClearColor(0, 0, 0, 0);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+		glEnable(GL_DEPTH_TEST);
+		glDepthFunc(GL_LEQUAL);
+		glDisable(GL_CULL_FACE);
+		// El alfa del fondo no se mezcla con el del modelo.
+		static const auto blendSeparate = reinterpret_cast<PFNGLBLENDFUNCSEPARATEPROC>(SDL_GL_GetProcAddress("glBlendFuncSeparate"));
+		if (blendSeparate) blendSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+		else glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+		glEnable(GL_BLEND);
+		glUseProgram(program_);
+		glUniformMatrix4fv(uMvp_, 1, GL_FALSE, viewProj.m);
+		glUniform1i(uTex_, 0);
+		glActiveTexture(GL_TEXTURE0);
+		drawMesh(mesh, true);
+		nectar::Image img;
+		img.resize(w, h);
+		glPixelStorei(GL_PACK_ALIGNMENT, 1);
+		glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, img.rgba.data());
+		out.resize(w, h);
+		for (int y = 0; y < h; ++y) std::copy(img.at(0, h - 1 - y), img.at(0, h - 1 - y) + w * 4, out.at(0, y));
+		glUseProgram(0);
+		glDisable(GL_DEPTH_TEST);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glDeleteFramebuffers(1, &fbo);
+	glDeleteRenderbuffers(1, &depth);
+	glDeleteTextures(1, &tex);
+	return ok;
 }
 
 View::~View()

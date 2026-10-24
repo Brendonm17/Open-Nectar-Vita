@@ -336,6 +336,7 @@ set(PC_PORT_SOURCES
     pc_port/mods/pc_map_catalog.cpp
     pc_port/mods/pc_mission.cpp
     pc_port/mods/pc_campaign.cpp
+    pc_port/mods/pc_characters.cpp
     # Mapas VS: formato y compilador compartidos con el editor de mapas.
     ${NECTAR_LIBS_DIR}/nectar_mapcore/src/map_json.cpp
     ${NECTAR_LIBS_DIR}/nectar_mapcore/src/i18n.cpp
@@ -346,6 +347,8 @@ set(PC_PORT_SOURCES
     ${NECTAR_LIBS_DIR}/nectar_assets/src/gen.cpp
     ${NECTAR_LIBS_DIR}/nectar_assets/src/image.cpp
     ${NECTAR_LIBS_DIR}/nectar_assets/src/mesh_mod.cpp
+    # Personajes propios (Load/Characters), compartido con el launcher y el creador.
+    ${NECTAR_LIBS_DIR}/nectar_assets/src/charpack.cpp
     ${PC_PORT_DIR}/launcher/bti_decode.cpp
     pc_port/pc_vs.cpp
     pc_port/pc_achievements.cpp
@@ -1024,6 +1027,7 @@ if(PIKMIN_BUILD_LAUNCHER)
         pc_port/launcher/release_update.cpp
         pc_port/launcher/texture_pack_download.cpp
         pc_port/launcher/installer_ui.cpp
+        ${NECTAR_LIBS_DIR}/nectar_assets/src/charpack.cpp
         pc_port/pc_icon.cpp
         ${LAUNCHER_PLATFORM_SOURCE}
         "${LAUNCHER_EMBED_DIR}/logo_open_nectar.h"
@@ -1035,6 +1039,10 @@ if(PIKMIN_BUILD_LAUNCHER)
         "${LAUNCHER_EMBED_DIR}"
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb)
     target_link_libraries(pikmin_launcher PRIVATE launcher_imgui)
+    # Instalar personajes (.nectarchar) con charpack, como el juego y el creador.
+    target_include_directories(pikmin_launcher PRIVATE ${NECTAR_LIBS_DIR}/nectar_assets/include)
+    set_source_files_properties(${NECTAR_LIBS_DIR}/nectar_assets/src/charpack.cpp PROPERTIES
+        INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann/include;${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb")
     # Versión que el launcher compara con el último release de GitHub para
     # avisar y actualizarse. Súbela en cada release (la etiqueta de GitHub).
     set(OPEN_NECTAR_VERSION "1.0.8" CACHE STRING "Open Nectar version of this build (GitHub release tag)")

@@ -5352,57 +5352,115 @@ void devAssignRestart() {
     pc_menu_edge_reset();
 }
 
-// Tarjetas del selector de capitán, en orden (índice = PcCaptain).
-const char* const kCaptainNames[PC_CAPTAIN_COUNT] = { "Olimar", "Louie", "Red", "Yellow", "Blue",
-                                                      "President", "White", "Purple", "Bulbmin", "Puffmin" };
+// Tarjetas del selector de capitán, en orden (índice = PcCaptain). Los
+// propios (Load/Characters) no están en estas tablas: ver captainName/Art.
+const char* const kCaptainNames[PC_CAPTAIN_CUSTOM_FIRST] = { "Olimar", "Louie", "Red", "Yellow", "Blue",
+                                                             "President", "White", "Purple", "Bulbmin", "Puffmin" };
 // Sprites al doble (Olimar/Louie de Pikmin 2-e; los Pikmin, de Pikmin Puzzle
 // Cards de GBA, de pie con la hoja).
-const char* const kCaptainArt[PC_CAPTAIN_COUNT] = { "coop_olimar", "coop_louie", "coop_piki_red", "coop_piki_yellow",
-                                                    "coop_piki_blue", "coop_president", "coop_piki_white",
-                                                    "coop_piki_purple", "coop_bulbmin", "coop_puffmin" };
+const char* const kCaptainArt[PC_CAPTAIN_CUSTOM_FIRST] = { "coop_olimar", "coop_louie", "coop_piki_red", "coop_piki_yellow",
+                                                           "coop_piki_blue", "coop_president", "coop_piki_white",
+                                                           "coop_piki_purple", "coop_bulbmin", "coop_puffmin" };
+const char* captainName(int captain) {
+    if (pc_captain_is_custom(captain)) return pc_captain_custom_name(captain);
+    return (captain >= 0 && captain < PC_CAPTAIN_CUSTOM_FIRST) ? kCaptainNames[captain] : kCaptainNames[0];
+}
+// Tarjeta de un propio: su portrait.png ("@ruta"); sin ella, la de Olimar.
+const char* captainArt(int captain) {
+    if (pc_captain_is_custom(captain)) {
+        const char* p = pc_captain_custom_portrait(captain);
+        return p ? p : kCaptainArt[0];
+    }
+    return (captain >= 0 && captain < PC_CAPTAIN_CUSTOM_FIRST) ? kCaptainArt[captain] : kCaptainArt[0];
+}
 // Si falta el PNG de un Pikmin, sale de la textura del juego piki3 (116x64):
 // rojo, amarillo y azul tumbados con su hoja. Columnas de cada uno.
 const int kCaptainPikiCol[PC_CAPTAIN_COUNT][2] = { { 0, 0 }, { 0, 0 }, { 0, 38 }, { 34, 78 }, { 76, 116 } };
-constexpr int kCaptainBoxW = 104, kCaptainBoxH = 120, kCaptainBoxGap = 9;
-// Primera fila: los de Pikmin 1; segunda: los de Pikmin 2 que estén
-// instalados y el Puffmin, que siempre está.
+constexpr int kCaptainBoxW = 104, kCaptainBoxGap = 9;
+// Filas: 0 los de Pikmin 1; 1 los de Pikmin 2 instalados y el Puffmin, que
+// siempre está; 2 los personajes propios. Con las tres a la vista las
+// tarjetas son algo más bajas para caber en 480 de alto.
+constexpr int kCaptainBoxTall = 120, kCaptainBoxShort = 104;
+// Tarjetas a la vista por fila; la de los propios se desplaza si hay más.
+constexpr int kCaptainRowSlots = 5;
+int sCaptainCustomScroll = 0;
 constexpr int captainRowLeft(int count) { return (620 - (count * kCaptainBoxW + (count - 1) * kCaptainBoxGap)) / 2; }
-int captainRowOf(int captain) { return captain >= PC_CAPTAIN_FIRST_PIKMIN2 ? 1 : 0; }
-// Tarjetas visibles de una fila, y la de la columna col (-1 si no hay).
+int captainRowOf(int captain) {
+    if (captain < PC_CAPTAIN_FIRST_PIKMIN2) return 0;
+    return pc_captain_is_custom(captain) ? 2 : 1;
+}
+void captainRowRange(int row, int* first, int* end) {
+    *first = row == 0 ? 0 : row == 1 ? PC_CAPTAIN_FIRST_PIKMIN2 : PC_CAPTAIN_CUSTOM_FIRST;
+    *end   = row == 0 ? PC_CAPTAIN_FIRST_PIKMIN2 : row == 1 ? PC_CAPTAIN_CUSTOM_FIRST : PC_CAPTAIN_COUNT;
+}
+// Tarjetas de una fila (las que se pueden elegir), y la de la columna col (-1 si no hay).
 int captainRowCount(int row) {
     if (row == 0) return PC_CAPTAIN_FIRST_PIKMIN2;
-    int n = 0;
-    for (int i = PC_CAPTAIN_FIRST_PIKMIN2; i < PC_CAPTAIN_COUNT; i++) n += pc_captain_available(i) ? 1 : 0;
+    int first = 0, end = 0, n = 0;
+    captainRowRange(row, &first, &end);
+    for (int i = first; i < end; i++) n += pc_captain_available(i) ? 1 : 0;
     return n;
 }
 int captainRowAt(int row, int col) {
     if (row == 0) return (col >= 0 && col < PC_CAPTAIN_FIRST_PIKMIN2) ? col : -1;
-    for (int i = PC_CAPTAIN_FIRST_PIKMIN2; i < PC_CAPTAIN_COUNT; i++) {
+    int first = 0, end = 0;
+    captainRowRange(row, &first, &end);
+    for (int i = first; i < end; i++) {
         if (pc_captain_available(i) && col-- == 0) return i;
     }
     return -1;
 }
 int captainColOf(int captain) {
-    if (captainRowOf(captain) == 0) return captain;
-    int col = 0;
-    for (int i = PC_CAPTAIN_FIRST_PIKMIN2; i < captain; i++) col += pc_captain_available(i) ? 1 : 0;
+    const int row = captainRowOf(captain);
+    if (row == 0) return captain;
+    int first = 0, end = 0, col = 0;
+    captainRowRange(row, &first, &end);
+    for (int i = first; i < captain; i++) col += pc_captain_available(i) ? 1 : 0;
     return col;
 }
-bool captainSecondRow() { return captainRowCount(1) > 0; }
-// Alto extra del panel con la segunda fila.
-int captainExtraH() { return captainSecondRow() ? kCaptainBoxH + kCaptainBoxGap : 0; }
+bool captainRowShown(int row) { return row == 0 || captainRowCount(row) > 0; }
+int captainRowsShown() { return 1 + (captainRowShown(1) ? 1 : 0) + (captainRowShown(2) ? 1 : 0); }
+// Puesto en pantalla de una fila (salta las vacías).
+int captainScreenRow(int row) {
+    int r = 0;
+    for (int k = 0; k < row; k++) r += captainRowShown(k) ? 1 : 0;
+    return r;
+}
+int captainBoxH() { return captainRowsShown() >= 3 ? kCaptainBoxShort : kCaptainBoxTall; }
+bool captainSecondRow() { return captainRowsShown() > 1; }
+// Alto extra del panel (el de 260 trae una fila de las altas).
+int captainExtraH() {
+    return (captainRowsShown() - 1) * (captainBoxH() + kCaptainBoxGap) - (kCaptainBoxTall - captainBoxH());
+}
+// Columna a la vista dentro de su fila (la de los propios, desplazada).
+int captainViewCol(int captain) {
+    const int col = captainColOf(captain);
+    return captainRowOf(captain) == 2 ? col - sCaptainCustomScroll : col;
+}
+// La fila de los propios se mueve para que se vea el elegido.
+void captainKeepVisible(int captain) {
+    const int count = captainRowCount(2);
+    if (captainRowOf(captain) == 2) {
+        const int col = captainColOf(captain);
+        if (col < sCaptainCustomScroll) sCaptainCustomScroll = col;
+        if (col >= sCaptainCustomScroll + kCaptainRowSlots) sCaptainCustomScroll = col - kCaptainRowSlots + 1;
+    }
+    if (sCaptainCustomScroll > count - kCaptainRowSlots) sCaptainCustomScroll = count - kCaptainRowSlots;
+    if (sCaptainCustomScroll < 0) sCaptainCustomScroll = 0;
+}
 // Esquina de la tarjeta de un capitán dentro del panel; false si no se muestra.
 bool captainCardPos(int captain, int panelX, int panelY, int* x, int* y) {
     if (captain < 0 || captain >= PC_CAPTAIN_COUNT) return false;
     const int row = captainRowOf(captain);
-    if (row == 1 && !pc_captain_available(captain)) return false;
-    *x = panelX + captainRowLeft(captainRowCount(row)) + captainColOf(captain) * (kCaptainBoxW + kCaptainBoxGap);
-    *y = panelY + 84 + row * (kCaptainBoxH + kCaptainBoxGap);
+    if (row != 0 && !pc_captain_available(captain)) return false;
+    const int col = captainViewCol(captain);
+    if (col < 0 || col >= kCaptainRowSlots) return false;
+    const int shown = std::min(captainRowCount(row), kCaptainRowSlots);
+    *x = panelX + captainRowLeft(shown) + col * (kCaptainBoxW + kCaptainBoxGap);
+    *y = panelY + 84 + captainScreenRow(row) * (captainBoxH() + kCaptainBoxGap);
     return true;
 }
-const char* devAssignCaptainName(int captain) {
-    return (captain >= 0 && captain < PC_CAPTAIN_COUNT) ? kCaptainNames[captain] : kCaptainNames[0];
-}
+const char* devAssignCaptainName(int captain) { return captainName(captain); }
 
 bool devAssignLouieInstalled() {
     std::error_code ec;
@@ -5448,7 +5506,7 @@ int captainPickInput(int player, bool keyboardOk, SDL_GameController* ctl, int* 
             for (int i = 0; i < PC_CAPTAIN_COUNT; ++i) {
                 int boxX = 0, boxY = 0;
                 if (!captainCardPos(i, panelX, panelY, &boxX, &boxY) || !pc_captain_available(i)) continue;
-                if (x >= boxX && x <= boxX + kCaptainBoxW && y >= boxY && y <= boxY + kCaptainBoxH) {
+                if (x >= boxX && x <= boxX + kCaptainBoxW && y >= boxY && y <= boxY + captainBoxH()) {
                     *captain = i;
                     accept = true;
                 }
@@ -5479,12 +5537,19 @@ int captainPickInput(int player, bool keyboardOk, SDL_GameController* ctl, int* 
         if ((left || right) && count > 0) {
             *captain = captainRowAt(row, (captainColOf(*captain) + (left ? count - 1 : 1)) % count);
         }
-        if ((up || down) && captainSecondRow() && (row == 0 ? down : up)) {
-            const int col    = captainColOf(*captain);
-            const int oCount = captainRowCount(1 - row);
-            const int target = captainRowAt(1 - row, col < oCount ? col : oCount - 1);
+        if (up || down) {
+            // A la fila de al lado que se vea, a la misma columna en pantalla
+            // (o la última).
+            int target = -1;
+            for (int r = row + (down ? 1 : -1); r >= 0 && r <= 2 && target < 0; r += down ? 1 : -1) {
+                if (!captainRowShown(r)) continue;
+                const int col    = std::max(0, captainViewCol(*captain)) + (r == 2 ? sCaptainCustomScroll : 0);
+                const int oCount = captainRowCount(r);
+                target           = captainRowAt(r, col < oCount ? col : oCount - 1);
+            }
             if (target >= 0) *captain = target;
         }
+        captainKeepVisible(*captain);
     }
     if (accept && *captain == PC_CAPTAIN_LOUIE && !devAssignLouieInstalled()) {
         // Sin el modelo no se puede jugar con Louie: aviso y se queda.
@@ -5506,7 +5571,8 @@ void captainPickDraw(DGXGraphics* gfx, int panelX, int panelY, int panelW, int p
     snprintf(line1, sizeof(line1), "Player %d, choose your captain", player + 1);
     drawTextOutline(panelX + panelW / 2 - menuTextWidth(line1) / 2, panelY + 56,
                     "%s", Colour(255, 229, 120, 255), Colour(8, 12, 28, 255), line1);
-    const int boxW = kCaptainBoxW, boxH = kCaptainBoxH;
+    const int boxW = kCaptainBoxW, boxH = captainBoxH();
+    captainKeepVisible(captain);
     for (int i = 0; i < PC_CAPTAIN_COUNT; i++) {
         const bool sel = captain == i;
         int boxX = 0, boxY = 0;
@@ -5523,8 +5589,10 @@ void captainPickDraw(DGXGraphics* gfx, int panelX, int panelY, int panelW, int p
         // misma línea que Olimar (32 px de alto). Sin PNG, un Pikmin usa su
         // trozo de piki3 a tamaño real.
         int ax = 0, aw = 0, ah = 0, scale = 2;
-        Texture* art = (sCaptainCards3D && pc_captain_preview_ready(i)) ? nullptr : pc_art_texture(kCaptainArt[i]);
-        if (art && !pc_art_size(kCaptainArt[i], &aw, &ah)) art = nullptr;
+        Texture* art = (sCaptainCards3D && pc_captain_preview_ready(i)) ? nullptr : pc_art_texture(captainArt(i));
+        if (art && !pc_art_size(captainArt(i), &aw, &ah)) art = nullptr;
+        // La tarjeta de un propio es grande (256): se dibuja a 64 de alto, como Olimar.
+        const bool fitArt = art && pc_captain_is_custom(i) && ah > 32;
         if (!art && i >= PC_CAPTAIN_PIKMIN_RED && i <= PC_CAPTAIN_PIKMIN_BLUE
             && !(sCaptainCards3D && pc_captain_preview_ready(i))) {
             static Texture* sPiki3 = nullptr;
@@ -5536,8 +5604,8 @@ void captainPickDraw(DGXGraphics* gfx, int panelX, int panelY, int panelW, int p
             scale = 1;
         }
         if (art) {
-            const int dw = aw * scale, dh = ah * scale;
-            const int dx = boxX + boxW / 2 - dw / 2, dy = boxY + 10 + (scale == 2 && dh < 64 ? 64 - dh : 0);
+            const int dh = fitArt ? 64 : ah * scale, dw = fitArt ? aw * 64 / ah : aw * scale;
+            const int dx = boxX + boxW / 2 - dw / 2, dy = boxY + (boxH < kCaptainBoxTall ? 4 : 10) + (scale == 2 && dh < 64 ? 64 - dh : 0);
             const Colour tint(255, 255, 255, sel ? 255 : 190);
             if (pc_settings_p2d_active()) {
                 pc_settings_p2d_image(dx, dy, dw, dh, art, float(ax + aw) / art->mWidth, float(ah) / art->mHeight, tint,
@@ -5552,11 +5620,11 @@ void captainPickDraw(DGXGraphics* gfx, int panelX, int panelY, int panelW, int p
         }
         // Metido en la tarjeta: a lo ancho entero, los bordes del brillo de
         // selección asomaban por fuera como paréntesis.
-        if (drawGlassOption(boxX + 8, boxY + boxH - 38, boxW - 16, 30, kCaptainNames[i], sel)) continue;
-        const int tw = menuTextWidth(kCaptainNames[i]);
+        if (drawGlassOption(boxX + 8, boxY + boxH - 38, boxW - 16, 30, captainName(i), sel)) continue;
+        const int tw = menuTextWidth(captainName(i));
         drawTextOutline(boxX + boxW / 2 - tw / 2, boxY + boxH - 30, "%s",
                         sel ? Colour(255, 229, 120, 255) : Colour(170, 180, 200, 255),
-                        Colour(8, 12, 28, 255), kCaptainNames[i]);
+                        Colour(8, 12, 28, 255), captainName(i));
     }
     const bool louieMissing = !devAssignLouieInstalled();
     const bool noticing = louieMissing && SDL_GetTicks() < sDevAssignLouieNoticeUntil;
@@ -5591,6 +5659,8 @@ void pcCaptainPromptInput() {
 }
 
 void pc_captain_prompt_open(void) {
+    pc_captain_custom_refresh(); // personajes instalados con el juego abierto
+    sCaptainCustomScroll = 0;
     sCaptainPromptOpen   = true;
     sCaptainPromptChoice = PC_CAPTAIN_OLIMAR;
     sCaptainPromptResult = PC_DEVASSIGN_PENDING;
@@ -5629,7 +5699,7 @@ void pc_captain_prompt_draw(void) {
         for (int i = 0; i < PC_CAPTAIN_COUNT; i++) {
             int boxX = 0, boxY = 0;
             if (!captainCardPos(i, panelX, panelY, &boxX, &boxY)) continue;
-            pc_captain_preview_draw(i, boxX + 4, boxY + 4, kCaptainBoxW - 8, kCaptainBoxH - 44, screenW, screenH,
+            pc_captain_preview_draw(i, boxX + 4, boxY + 4, kCaptainBoxW - 8, captainBoxH() - 44, screenW, screenH,
                                     i == sCaptainPromptChoice);
         }
         Matrix4f ortho;
@@ -5638,6 +5708,8 @@ void pc_captain_prompt_draw(void) {
 }
 
 void pc_devassign_prompt_open(void) {
+    pc_captain_custom_refresh();
+    sCaptainCustomScroll = 0;
     sDevAssignOpen   = true;
     sDevAssignChoice = 0;
     sDevAssignResult = PC_DEVASSIGN_PENDING;
@@ -5810,7 +5882,7 @@ void pc_devassign_prompt_draw(void) {
             for (int i = 0; i < PC_CAPTAIN_COUNT; i++) {
                 int boxX = 0, boxY = 0;
                 if (!captainCardPos(i, panelX, panelY, &boxX, &boxY)) continue;
-                pc_captain_preview_draw(i, boxX + 4, boxY + 4, kCaptainBoxW - 8, kCaptainBoxH - 44, screenW, screenH,
+                pc_captain_preview_draw(i, boxX + 4, boxY + 4, kCaptainBoxW - 8, captainBoxH() - 44, screenW, screenH,
                                         i == sDevAssignCaptain[player]);
             }
             Matrix4f ortho;

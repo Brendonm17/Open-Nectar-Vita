@@ -1,5 +1,14 @@
 # Online co-op (netplay)
 
+> **DESACTIVADO — NO USAR.** El online de Pikmin 1 está apagado a propósito y
+> no se debe activar nunca en el juego. El código de netplay que queda son
+> restos sin uso: no se mantiene, no se prueba y las funciones nuevas no tienen
+> que darle soporte ni sincronizarse por él.
+>
+> **DISABLED — DO NOT USE.** Pikmin 1 online play is deliberately off and must
+> never be enabled in the game. The remaining netplay code is unused leftovers:
+> it is not maintained or tested, and new features must not support it.
+
 Two players on two PCs play the two-captain story co-op together: the host is
 Olimar (P1), the joiner Louie (P2), and each PC shows its own captain. The two
 games run in lockstep and exchange only the players' inputs, so both must run

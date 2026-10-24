@@ -12,6 +12,7 @@
 #include "view.h"
 
 #include "imgui.h"
+#include "nectar_assets/charpack.h"
 
 #include <atomic>
 #include <string>
@@ -74,6 +75,13 @@ private:
 	int dragMarker_ = -1, hoverMarker_ = -1;
 	bool orbiting_  = false, panning_ = false;
 
+	// Personaje propio: su nombre en el selector de capitán, el autor y los
+	// que ya hay instalados en el juego (Load/Characters).
+	char charName_[41]   = {};
+	char charAuthor_[41] = {};
+	std::vector<nectar::CharacterInfo> installed_;
+	std::string removeId_; ///< el que se va a quitar (pide confirmación)
+
 	std::string status_;
 	bool statusError_ = false;
 	bool quit_        = false;
@@ -86,6 +94,7 @@ private:
 	void rebuild();
 	void uploadTextures();
 	void fillMeshes();
+	void fillModelMesh(DynamicMesh& mesh, const std::vector<Mat34>* skin, bool unbent, bool weights);
 	void resetCamera();
 
 	void drawPanel(float width, float height);
@@ -102,6 +111,14 @@ private:
 	bool save();
 	void playInGame();
 	void removeCustom();
+
+	bool characterFiles(nectar::CharacterFiles& files, std::string& error);
+	bool renderPortrait(std::vector<std::uint8_t>& png);
+	void installAsCharacter();
+	void exportCharacter();
+	void installPack(const std::string& path);
+	void refreshInstalled();
+	void drawCharacters();
 	void say(const std::string& text, bool error = false);
 };
 

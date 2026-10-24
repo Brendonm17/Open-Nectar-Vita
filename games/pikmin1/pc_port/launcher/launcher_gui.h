@@ -17,6 +17,7 @@ enum class HubAction {
     Update,  // botón Actualizar (pide la carpeta de la instalación anterior)
     MapEditor, // botón del editor de mapas VS (Pikmin 1 instalado)
     ModelMaker, // botón del creador de modelos (Olimar propio, Pikmin 1)
+    InstallCharacter, // botón Characters: instala un personaje (.nectarchar)
     TexturePack, // botón HD textures: descarga e instala el pack de ese juego
 };
 

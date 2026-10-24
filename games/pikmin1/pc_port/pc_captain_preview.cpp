@@ -45,6 +45,7 @@ Light sFillLight;
 
 int modelSlot(int captain)
 {
+	if (pc_captain_is_custom(captain)) return 0; // sobre el esqueleto de Olimar
 	switch (captain) {
 	case PC_CAPTAIN_OLIMAR:
 	case PC_CAPTAIN_LOUIE:
@@ -241,6 +242,8 @@ void pc_captain_preview_draw(int captain, int x, int y, int w, int h, int virtW,
 		     || pc_hd_model_draw_skinned(gfx, m->shape, PC_HD_MODEL_LOUIE, white);
 	} else if (captain == PC_CAPTAIN_OLIMAR) {
 		drawn = pc_hd_model_draw_skinned(gfx, m->shape, PC_HD_MODEL_OLIMAR_CUSTOM, white);
+	} else if (pc_captain_is_custom(captain)) {
+		drawn = pc_hd_model_draw_custom(gfx, m->shape, pc_captain_custom_model(captain), white);
 	} else if (p2Model >= 0) {
 		drawn = pc_hd_model_draw_skinned(gfx, m->shape, (PcHdModelId)p2Model, white);
 	} else if (color >= 0) {

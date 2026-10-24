@@ -4183,6 +4183,9 @@ void Navi::demoDraw(Graphics& gfx, immut Matrix4f* mtx)
 		     || pc_hd_model_draw_skinned(gfx, mNaviShapeObject->mShape, PC_HD_MODEL_LOUIE, hdTint);
 	} else if (pcCaptain() == PC_CAPTAIN_PRESIDENT) {
 		drawn = pc_hd_model_draw_skinned(gfx, mNaviShapeObject->mShape, PC_HD_MODEL_PRESIDENT, hdTint);
+	} else if (pc_captain_is_custom(pcCaptain())) {
+		// Personaje propio (Load/Characters); si falla su pack, Olimar normal.
+		drawn = pc_hd_model_draw_custom(gfx, mNaviShapeObject->mShape, pc_captain_custom_model(pcCaptain()), hdTint);
 	} else {
 		drawn = pc_hd_model_draw_skinned(gfx, mNaviShapeObject->mShape, PC_HD_MODEL_OLIMAR_CUSTOM, hdTint)
 		     || pc_hd_model_draw_skinned(gfx, mNaviShapeObject->mShape, PC_HD_MODEL_OLIMAR, hdTint);

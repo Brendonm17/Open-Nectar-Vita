@@ -19,6 +19,7 @@ add_library(nectar_assets STATIC
     src/raster.cpp
     src/catalog.cpp
     src/mesh_mod.cpp
+    src/charpack.cpp
     # Decodificador de texturas del launcher, reutilizado tal cual.
     ${NECTAR_P1_DIR}/pc_port/launcher/bti_decode.cpp
 )
@@ -30,6 +31,7 @@ target_include_directories(nectar_assets
             ${CMAKE_CURRENT_SOURCE_DIR}/third_party
             ${NECTAR_P1_DIR}/pc_port/launcher
             ${NECTAR_P1_DIR}/third_party/nlohmann/include
+            ${NECTAR_P1_DIR}/third_party/stb
 )
 if(NOT MSVC)
     target_compile_options(nectar_assets PRIVATE -Wall -Wextra)

@@ -8,10 +8,12 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <map>
 
 namespace mm {
@@ -152,6 +154,7 @@ bool App::setupGame(std::string& error)
 	olimarTex_.clear();
 	for (const nectar::Image& img : olimar_.materialTex) olimarTex_.push_back(uploadTexture(img, true));
 	gameReady_ = true;
+	refreshInstalled();
 	resetCamera();
 	return true;
 }
@@ -235,6 +238,8 @@ void App::finishLoad()
 	model_    = std::move(pending_);
 	source_   = std::move(pendingSource_);
 	hasModel_ = true;
+	// Nombre del personaje: el del archivo, hasta que el usuario ponga otro.
+	std::snprintf(charName_, sizeof(charName_), "%s", fs::u8path(path).stem().u8string().c_str());
 	fit_                 = FitSettings();
 	fit_.useSkeleton     = model_.skinned;
 	autoFit(model_, olimar_, fit_);
@@ -256,6 +261,8 @@ void App::finishLoad()
 			fit_.symmetry       = j.value("symmetry", true);
 			fit_.markersCustom  = j.value("markersCustom", false);
 			exportOpt_.textureMax = j.value("textureMax", 1024);
+			std::snprintf(charName_, sizeof(charName_), "%s", j.value("charName", std::string(charName_)).c_str());
+			std::snprintf(charAuthor_, sizeof(charAuthor_), "%s", j.value("charAuthor", std::string()).c_str());
 			if (fit_.markersCustom && j.contains("markers") && j["markers"].size() == M_COUNT) {
 				for (int i = 0; i < M_COUNT; ++i)
 					fit_.markers[std::size_t(i)] = { j["markers"][std::size_t(i)][0].get<float>(), j["markers"][std::size_t(i)][1].get<float>(),
@@ -362,42 +369,52 @@ void App::fillMeshes()
 
 	// El modelo: en reposo sin enderezar (para colocar los puntos) o animado
 	// como en el juego.
-	modelMesh_.data.clear();
-	modelMesh_.ranges.clear();
-	if (!hasModel_ || rig_.verts.empty()) return;
+	if (!hasModel_ || rig_.verts.empty()) {
+		modelMesh_.data.clear();
+		modelMesh_.ranges.clear();
+		return;
+	}
 	if (animated) retargetSkin(olimar_, rig_.pivots, world, skin);
+	fillModelMesh(modelMesh_, animated ? &skin : nullptr, !animated, showWeights_);
+}
+
+// `skin` nulo: en reposo (enderezado o, con `unbent`, como se importó).
+void App::fillModelMesh(DynamicMesh& mesh, const std::vector<Mat34>* skin, bool unbent, bool weights)
+{
+	mesh.data.clear();
+	mesh.ranges.clear();
 	int lastMat = -2;
 	for (std::size_t t : order_) {
 		if (t * 3 + 2 >= rig_.verts.size()) continue;
-		const int mat           = model_.triMaterial[t];
-		const ImpMaterial& im   = model_.materials[std::size_t(mat)];
+		const int mat         = model_.triMaterial[t];
+		const ImpMaterial& im = model_.materials[std::size_t(mat)];
 		if (mat != lastMat) {
 			DynamicMesh::Range r;
-			r.first   = int(modelMesh_.data.size());
-			r.texture = showWeights_ ? 0 : modelTex_[std::size_t(mat)];
-			r.blend   = im.alpha == ImpMaterial::Blend && !showWeights_;
-			modelMesh_.ranges.push_back(r);
+			r.first   = int(mesh.data.size());
+			r.texture = weights ? 0 : modelTex_[std::size_t(mat)];
+			r.blend   = im.alpha == ImpMaterial::Blend && !weights;
+			mesh.ranges.push_back(r);
 			lastMat = mat;
 		}
 		for (int k = 0; k < 3; ++k) {
 			const SkinVertex& v = rig_.verts[t * 3 + std::size_t(k)];
 			Vec3 p = v.p, n = v.n;
-			if (animated) {
+			if (skin) {
 				p = n = Vec3 {};
 				for (int i = 0; i < 4; ++i) {
 					if (v.weight[i] <= 0) continue;
-					p += skin[std::size_t(v.joint[i])].point(v.p) * v.weight[i];
-					n += skin[std::size_t(v.joint[i])].dir(v.n) * v.weight[i];
+					p += (*skin)[std::size_t(v.joint[i])].point(v.p) * v.weight[i];
+					n += (*skin)[std::size_t(v.joint[i])].dir(v.n) * v.weight[i];
 				}
 				n = normalize(n);
-			} else if (t * 3 + std::size_t(k) < rig_.unbent.size()) {
+			} else if (unbent && t * 3 + std::size_t(k) < rig_.unbent.size()) {
 				p = rig_.unbent[t * 3 + std::size_t(k)];
 			}
 			GpuVertex g {};
 			g.p[0] = p.x, g.p[1] = p.y, g.p[2] = p.z;
 			g.n[0] = n.x, g.n[1] = n.y, g.n[2] = n.z;
 			g.uv[0] = v.uv.x, g.uv[1] = v.uv.y;
-			if (showWeights_) {
+			if (weights) {
 				for (int c = 0; c < 3; ++c) {
 					g.c[c] = 0;
 					for (int i = 0; i < 4; ++i) g.c[c] += kJointColour[v.joint[i]][c] * v.weight[i];
@@ -408,11 +425,11 @@ void App::fillMeshes()
 				for (int c = 0; c < 4; ++c) g.c[c] = im.color[c] * (useVertexColour ? v.col[c] : 1.0f);
 				if (im.alpha == ImpMaterial::Opaque) g.c[3] = 1;
 			}
-			modelMesh_.data.push_back(g);
+			mesh.data.push_back(g);
 		}
-		modelMesh_.ranges.back().count = int(modelMesh_.data.size()) - modelMesh_.ranges.back().first;
+		mesh.ranges.back().count = int(mesh.data.size()) - mesh.ranges.back().first;
 	}
-	modelMesh_.upload();
+	mesh.upload();
 }
 
 void App::frame()
@@ -686,6 +703,7 @@ void App::drawPanel(float width, float height)
 	if (fs::exists(fs::u8path(packPath()), ec)) {
 		if (ImGui::Button(L("Quitar mi modelo (volver al Olimar normal)", "Remove my model (back to normal Olimar)"), ImVec2(-1, 0))) removeCustom();
 	}
+	drawCharacters();
 	if (!status_.empty()) {
 		ImGui::Spacing();
 		ImGui::PushStyleColor(ImGuiCol_Text, statusError_ ? IM_COL32(240, 110, 90, 255) : IM_COL32(150, 220, 120, 255));
@@ -888,7 +906,13 @@ void App::drawOverlay(const std::vector<Mat34>& skin)
 	}
 }
 
-void App::dropFile(const std::string& path) { loadModel(path, false); }
+void App::dropFile(const std::string& path)
+{
+	std::string ext = fs::u8path(path).extension().u8string();
+	for (char& c : ext) c = char(std::tolower(static_cast<unsigned char>(c)));
+	if (ext == nectar::kCharacterExtension) installPack(path);
+	else loadModel(path, false);
+}
 
 void App::saveProject() const
 {
@@ -905,6 +929,8 @@ void App::saveProject() const
 	j["symmetry"]       = fit_.symmetry;
 	j["markersCustom"]  = fit_.markersCustom;
 	j["textureMax"]     = exportOpt_.textureMax;
+	j["charName"]       = std::string(charName_);
+	j["charAuthor"]     = std::string(charAuthor_);
 	json markers        = json::array();
 	for (const Vec3& m : fit_.markers) markers.push_back({ m.x, m.y, m.z });
 	j["markers"] = markers;
@@ -980,6 +1006,153 @@ void App::removeCustom()
 	fs::rename(fs::u8path(packPath()), fs::u8path(packPath() + ".off"), ec);
 	if (ec) say(ec.message(), true);
 	else say(L("Quitado: el juego vuelve a usar el Olimar normal.", "Removed: the game uses the normal Olimar again."));
+}
+
+// ── Personajes propios ──────────────────────────────────────────────────
+
+void App::refreshInstalled() { installed_ = nectar::listCharacters(cfg_.gameDir()); }
+
+// Tarjeta del selector: el modelo de frente y un poco girado, en reposo.
+bool App::renderPortrait(std::vector<std::uint8_t>& png)
+{
+	png.clear();
+	DynamicMesh mesh;
+	fillModelMesh(mesh, nullptr, false, false);
+	const Vec3 mn = rig_.min, mx = rig_.max;
+	const float h = mx.y - mn.y, w = std::max(mx.x - mn.x, mx.z - mn.z);
+	OrbitCamera cam;
+	cam.target   = (mn + mx) * 0.5f;
+	cam.yaw      = 0.35f;
+	cam.pitch    = 0.1f;
+	cam.fovY     = 0.6f;
+	cam.distance = std::max(h, w) * 0.55f / std::tan(cam.fovY * 0.5f) + std::max(h, w) * 0.2f;
+	nectar::Image img;
+	if (!view_.renderImage(256, 256, cam.projection(1.0f) * cam.view(), mesh, img)) return false;
+	std::error_code ec;
+	const fs::path tmp = fs::temp_directory_path(ec) / "nectar_modelmaker_portrait.png";
+	if (!nectar::writePng(tmp.u8string(), img)) return false;
+	std::ifstream f(tmp, std::ios::binary);
+	png.assign(std::istreambuf_iterator<char>(f), {});
+	fs::remove(tmp, ec);
+	return !png.empty();
+}
+
+bool App::characterFiles(nectar::CharacterFiles& files, std::string& error)
+{
+	if (exportDirty_) {
+		export_      = buildParts(model_, rig_, olimar_, fit_, exportOpt_);
+		exportDirty_ = false;
+	}
+	if (!buildNhm(export_, rig_, olimar_, files.nhm, error)) return false;
+	files.info        = nectar::CharacterInfo();
+	files.info.name   = charName_[0] ? charName_ : "Custom";
+	files.info.author = charAuthor_;
+	// Mismo nombre y autor: la misma carpeta (instalar otra vez lo reemplaza).
+	const std::string key = files.info.name + "\n" + files.info.author;
+	files.info.id         = nectar::characterId(files.info.name, std::vector<std::uint8_t>(key.begin(), key.end()));
+	renderPortrait(files.portrait);
+	saveProject();
+	return true;
+}
+
+void App::installAsCharacter()
+{
+	nectar::CharacterFiles files;
+	std::string error, dir;
+	if (!characterFiles(files, error) || !nectar::installCharacter(cfg_.gameDir(), files, dir, error)) {
+		say(std::string(L("No se pudo instalar: ", "Could not install: ")) + error, true);
+		return;
+	}
+	refreshInstalled();
+	say(std::string(L("\"", "\"")) + files.info.name
+	    + L("\" ya está en el selector de capitán del juego.", "\" is now in the game's captain selector."));
+}
+
+void App::exportCharacter()
+{
+	nectar::CharacterFiles files;
+	std::string error;
+	if (!characterFiles(files, error)) {
+		say(std::string(L("No se pudo exportar: ", "Could not export: ")) + error, true);
+		return;
+	}
+	const fs::path where = pikmin::launcher::platform::askForInstallDirectory(L("Carpeta donde guardar el personaje", "Folder to save the character in"));
+	if (where.empty()) return;
+	const fs::path path = where / (files.info.id + nectar::kCharacterExtension);
+	if (!nectar::writeCharacterPack(path.u8string(), files, error)) {
+		say(std::string(L("No se pudo exportar: ", "Could not export: ")) + error, true);
+		return;
+	}
+	say(std::string(L("Exportado: ", "Exported: ")) + path.u8string()
+	    + L(" (se instala con el launcher: botón Characters).", " (install it from the launcher: Characters button)."));
+}
+
+void App::installPack(const std::string& path)
+{
+	if (!gameReady_) {
+		say(L("Primero elige la carpeta del juego.", "Choose the game folder first."), true);
+		return;
+	}
+	nectar::CharacterInfo info;
+	std::string error;
+	if (!nectar::installCharacterPack(cfg_.gameDir(), path, info, error)) {
+		say(std::string(L("No se pudo instalar: ", "Could not install: ")) + error, true);
+		return;
+	}
+	refreshInstalled();
+	say(std::string("\"") + info.name + L("\" instalado: sale en el selector de capitán.", "\" installed: it is in the captain selector."));
+}
+
+void App::drawCharacters()
+{
+	stepHeader(6, L("Personaje propio", "Custom character"));
+	hint(L("Con su propio hueco en el selector de capitán, sin quitar a Olimar. Se puede compartir como archivo .nectarchar.",
+	       "With its own slot in the captain selector, keeping Olimar. It can be shared as a .nectarchar file."));
+	if (hasModel_) {
+		ImGui::SetNextItemWidth(-1);
+		ImGui::InputTextWithHint("##charname", L("Nombre en el selector", "Name in the selector"), charName_, sizeof(charName_));
+		ImGui::SetNextItemWidth(-1);
+		ImGui::InputTextWithHint("##charauthor", L("Autor (opcional)", "Author (optional)"), charAuthor_, sizeof(charAuthor_));
+		ImGui::BeginDisabled(exportDirty_ || !export_.ok() || working_);
+		if (bigButton(L("Instalar como personaje en el juego", "Install as a character in the game"))) installAsCharacter();
+		if (ImGui::Button(L("Exportar archivo .nectarchar…", "Export .nectarchar file…"), ImVec2(-1, 0))) exportCharacter();
+		ImGui::EndDisabled();
+	}
+	if (ImGui::Button(L("Instalar un personaje (.nectarchar)…", "Install a character (.nectarchar)…"), ImVec2(-1, 0))) {
+		const fs::path p = pikmin::launcher::platform::askForFile(L("Instalar personaje", "Install character"), L("Personaje", "Character"), "*.nectarchar");
+		if (!p.empty()) installPack(p.u8string());
+	}
+	if (installed_.empty()) return;
+	ImGui::TextUnformatted(L("Instalados:", "Installed:"));
+	for (const nectar::CharacterInfo& c : installed_) {
+		ImGui::PushID(c.id.c_str());
+		ImGui::Bullet();
+		ImGui::SameLine();
+		if (c.author.empty()) ImGui::TextUnformatted(c.name.c_str());
+		else ImGui::Text("%s  (%s)", c.name.c_str(), c.author.c_str());
+		ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - 70);
+		if (ImGui::SmallButton(L("Quitar", "Remove"))) {
+			removeId_ = c.id;
+			ImGui::OpenPopup("##removechar");
+		}
+		if (ImGui::BeginPopup("##removechar")) {
+			ImGui::Text(L("¿Quitar \"%s\" del juego?", "Remove \"%s\" from the game?"), c.name.c_str());
+			if (ImGui::Button(L("Sí, quitar", "Yes, remove"))) {
+				std::string error;
+				if (nectar::removeCharacter(cfg_.gameDir(), removeId_, error)) say(std::string(L("Quitado: ", "Removed: ")) + c.name);
+				else say(error, true);
+				ImGui::CloseCurrentPopup();
+				ImGui::EndPopup();
+				ImGui::PopID();
+				refreshInstalled();
+				return;
+			}
+			ImGui::SameLine();
+			if (ImGui::Button(L("No", "No"))) ImGui::CloseCurrentPopup();
+			ImGui::EndPopup();
+		}
+		ImGui::PopID();
+	}
 }
 
 } // namespace mm

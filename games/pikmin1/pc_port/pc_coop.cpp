@@ -60,6 +60,7 @@ int pc_captain_pikmin2_model(int captain)
 bool pc_captain_available(int captain)
 {
 	if (captain < 0 || captain >= PC_CAPTAIN_COUNT) return false;
+	if (pc_captain_is_custom(captain)) return captain - PC_CAPTAIN_CUSTOM_FIRST < pc_captain_custom_count();
 	if (captain < PC_CAPTAIN_FIRST_PIKMIN2 || captain == PC_CAPTAIN_PUFFMIN) return true;
 	std::error_code ec;
 	return pc_pikmin2_detected()

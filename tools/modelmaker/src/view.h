@@ -52,6 +52,10 @@ public:
 	void drawLines(const std::vector<Vec3>& pairs, const float colour[4]);
 	void end();
 
+	/// `mesh` en una imagen aparte, con fondo transparente (la tarjeta del
+	/// personaje en el selector de capitán).
+	bool renderImage(int w, int h, const nm::M4& viewProj, const DynamicMesh& mesh, nectar::Image& out);
+
 	~View();
 
 private:

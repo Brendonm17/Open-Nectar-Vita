@@ -32,7 +32,12 @@ enum PcCaptain {
 	// Puffmin (Pikmin seta de Pikmin 1): va en la segunda fila, pero no pide
 	// Pikmin 2; sin él es el único de esa fila.
 	PC_CAPTAIN_PUFFMIN = 9,
-	PC_CAPTAIN_COUNT
+	// Tercera fila: personajes propios instalados en Load/Characters (creador
+	// de modelos). Van sobre el esqueleto y la jugabilidad de Olimar; cada
+	// hueco es una carpeta, por nombre (pc_characters.cpp).
+	PC_CAPTAIN_CUSTOM_FIRST = 10,
+	PC_CAPTAIN_CUSTOM_MAX   = 15,
+	PC_CAPTAIN_COUNT        = PC_CAPTAIN_CUSTOM_FIRST + PC_CAPTAIN_CUSTOM_MAX
 };
 /// Primer capitán de la segunda fila (los de Pikmin 2).
 #define PC_CAPTAIN_FIRST_PIKMIN2 PC_CAPTAIN_PRESIDENT
@@ -45,8 +50,19 @@ bool pc_captain_is_pikmin(int captain);
 int pc_captain_skeleton_color(int captain);
 /// Modelo NHM (PcHdModelId) que dibuja a un capitán de Pikmin 2, o -1.
 int pc_captain_pikmin2_model(int captain);
-/// True si el capitán se puede elegir: los de Pikmin 2 piden tenerlo instalado.
+/// True si el capitán se puede elegir: los de Pikmin 2 piden tenerlo instalado
+/// y los propios, que haya un personaje en su hueco.
 bool pc_captain_available(int captain);
+/// Personajes propios (Load/Characters). Se vuelven a leer al abrir el
+/// selector de capitán, así un personaje recién instalado sale sin reiniciar.
+bool pc_captain_is_custom(int captain);
+void pc_captain_custom_refresh(void);
+int pc_captain_custom_count(void);
+/// Nombre (de su character.json), modelo (.nhm) y tarjeta ("@ruta" para
+/// pc_art, o nullptr sin portrait.png) de un capitán propio.
+const char* pc_captain_custom_name(int captain);
+const char* pc_captain_custom_model(int captain);
+const char* pc_captain_custom_portrait(int captain);
 void pc_coop_set_captain(int player, int captain);
 int pc_coop_captain(int player);
 /// Tinte de distinción de P2 cuando ambos llevan el mismo capitán:

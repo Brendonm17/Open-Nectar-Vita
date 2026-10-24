@@ -40,6 +40,10 @@ enum PcHdModelId {
 // (idle pastel pikis, the damage flash).
 bool pc_hd_model_draw_skinned(Graphics& gfx, BaseShape* shape, PcHdModelId id, GXColor tint, u8 whiten = 0);
 
+// Same, for a custom character's pack (Load/Characters/<id>/model.nhm, see
+// pc_characters.cpp) on Olimar's skeleton. Loaded on first use and kept.
+bool pc_hd_model_draw_custom(Graphics& gfx, BaseShape* shape, const char* path, GXColor tint, u8 whiten = 0);
+
 // Draws a rigid HD mesh placed with `mtx` (camera-relative, as returned by
 // BaseShape::getAnimMatrix). Returns true only when it replaced the draw.
 bool pc_hd_model_draw_rigid(Graphics& gfx, const Matrix4f& mtx, PcHdModelId id, GXColor tint, u8 whiten = 0);
