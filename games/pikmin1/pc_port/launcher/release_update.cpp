@@ -9,6 +9,12 @@
 #include <iterator>
 #include <vector>
 
+#ifdef _WIN32
+#include "stb_image.h"
+
+#include <cstdint>
+#endif
+
 #ifndef OPEN_NECTAR_VERSION
 #define OPEN_NECTAR_VERSION "0.0"
 #endif
@@ -162,6 +168,103 @@ bool fetchLatestRelease(ReleaseInfo& release, std::string& error)
     return true;
 }
 
+namespace {
+
+#ifdef _WIN32
+// Extrae el .zip de la release dentro del launcher, con el inflador de
+// stb_image: lanzar tar.exe oculto tras descargar es otro patrón que los
+// antivirus marcan como troyano.
+std::uint32_t zipCrc32(const std::uint8_t* data, std::size_t size)
+{
+    static std::uint32_t table[256];
+    if (!table[1]) {
+        for (std::uint32_t i = 0; i < 256; ++i) {
+            std::uint32_t c = i;
+            for (int k = 0; k < 8; ++k) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+            table[i] = c;
+        }
+    }
+    std::uint32_t crc = 0xFFFFFFFFu;
+    for (std::size_t i = 0; i < size; ++i) crc = table[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
+    return crc ^ 0xFFFFFFFFu;
+}
+
+bool extractZip(const fs::path& archive, const fs::path& destination, std::string& error)
+{
+    std::ifstream in(archive, std::ios::binary);
+    const std::vector<std::uint8_t> d((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    auto get16 = [&](std::size_t at) -> std::uint32_t { return at + 2 <= d.size() ? d[at] | (d[at + 1] << 8) : 0; };
+    auto get32 = [&](std::size_t at) -> std::uint32_t {
+        return at + 4 <= d.size() ? get16(at) | (get16(at + 2) << 16) : 0;
+    };
+    error = "damaged zip";
+    std::size_t eocd = std::string::npos;
+    for (std::size_t at = d.size() >= 22 ? d.size() - 22 : 0; d.size() >= 22; --at) {
+        if (get32(at) == 0x06054b50) {
+            eocd = at;
+            break;
+        }
+        if (at == 0 || d.size() - at > 22 + 0xFFFF) break;
+    }
+    if (eocd == std::string::npos) return false;
+    const std::uint32_t count = get16(eocd + 10);
+    std::size_t at = get32(eocd + 16);
+    for (std::uint32_t e = 0; e < count; ++e) {
+        if (get32(at) != 0x02014b50 || at + 46 > d.size()) return false;
+        const std::uint32_t method = get16(at + 10), crc = get32(at + 16), csize = get32(at + 20), usize = get32(at + 24);
+        const std::uint32_t nameLen = get16(at + 28), extraLen = get16(at + 30), commentLen = get16(at + 32);
+        const std::uint32_t local = get32(at + 42);
+        if (at + 46 + nameLen > d.size()) return false;
+        std::string name(reinterpret_cast<const char*>(&d[at + 46]), nameLen);
+        at += 46 + nameLen + extraLen + commentLen;
+        std::replace(name.begin(), name.end(), '\\', '/');
+        // Nada de rutas absolutas ni "..": todo queda dentro de destination.
+        const fs::path relative = fs::u8path(name).lexically_normal();
+        if (name.empty() || relative.is_absolute() || relative.has_root_name()
+            || (!relative.empty() && *relative.begin() == "..")) {
+            error = "unsafe path in zip: " + name;
+            return false;
+        }
+        const fs::path target = destination / relative;
+        std::error_code ec;
+        if (name.back() == '/') {
+            fs::create_directories(target, ec);
+            continue;
+        }
+        if (get32(local) != 0x04034b50) return false;
+        const std::size_t start = std::size_t(local) + 30 + get16(local + 26) + get16(local + 28);
+        if (start + csize > d.size() || usize > 0x7FFFFFFFu || csize > 0x7FFFFFFFu) return false;
+        std::vector<std::uint8_t> data;
+        if (method == 0) {
+            data.assign(d.begin() + std::ptrdiff_t(start), d.begin() + std::ptrdiff_t(start + csize));
+        } else if (method == 8) {
+            data.resize(usize);
+            const int got = stbi_zlib_decode_noheader_buffer(reinterpret_cast<char*>(data.data()), int(usize),
+                                                             reinterpret_cast<const char*>(&d[start]), int(csize));
+            if (got != int(usize)) return false;
+        } else {
+            error = "unsupported compression in zip (" + name + ")";
+            return false;
+        }
+        if (zipCrc32(data.data(), data.size()) != crc) {
+            error = "damaged zip (" + name + ")";
+            return false;
+        }
+        fs::create_directories(target.parent_path(), ec);
+        std::ofstream out(target, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(data.data()), std::streamsize(data.size()));
+        if (!out) {
+            error = "could not write " + target.string();
+            return false;
+        }
+    }
+    error.clear();
+    return true;
+}
+#endif
+
+} // namespace
+
 bool downloadRelease(const ReleaseInfo& release, const std::string& launcherName, fs::path& packageDirectory,
                      std::string& error)
 {
@@ -195,20 +298,19 @@ bool downloadRelease(const ReleaseInfo& release, const std::string& launcherName
         return true;
     }
 #endif
-    // tar viene con Linux y con Windows 10 y posteriores, y en Windows también
-    // abre los .zip.
 #ifdef _WIN32
-    const char* systemRoot = std::getenv("SystemRoot");
-    const fs::path tar = fs::path(systemRoot ? systemRoot : "C:\\Windows") / "System32" / "tar.exe";
-    const std::vector<std::string> arguments = { "-xf", archive.string(), "-C", (base / "extracted").string() };
-#else
-    const fs::path tar = "tar";
-    const std::vector<std::string> arguments = { "-xzf", archive.string(), "-C", (base / "extracted").string() };
-#endif
-    if (!platform::runAndCapture(tar, arguments, base, output, error)) {
+    if (!extractZip(archive, base / "extracted", error)) {
         error = "could not unpack " + release.assetName + " (" + error + ")";
         return false;
     }
+#else
+    // tar viene con cualquier Linux.
+    const std::vector<std::string> arguments = { "-xzf", archive.string(), "-C", (base / "extracted").string() };
+    if (!platform::runAndCapture("tar", arguments, base, output, error)) {
+        error = "could not unpack " + release.assetName + " (" + error + ")";
+        return false;
+    }
+#endif
     if (!findPackage(base / "extracted", launcherName, packageDirectory)) {
         error = "the downloaded package has no launcher in it";
         return false;

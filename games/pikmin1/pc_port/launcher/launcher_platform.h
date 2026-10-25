@@ -61,7 +61,7 @@ bool convertImage(const std::filesystem::path& converter,
 // Windows: %LOCALAPPDATA%\Open Nectar\cache.
 std::filesystem::path cacheDirectory();
 
-// Descarga `url` a `destination` con curl (incluido en Windows 10+ y en casi
+// Descarga `url` a `destination` (WinHTTP en Windows; curl en casi
 // cualquier Linux). Bloquea hasta terminar: llamarla desde un hilo aparte.
 // Escribe primero a un temporal, así que un corte nunca deja un fichero a medias.
 bool downloadFile(const std::string& url, const std::filesystem::path& destination, std::string& error);

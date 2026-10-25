@@ -611,6 +611,19 @@ else()
         target_sources(${NECTAR_GAME} PRIVATE packaging/windows/nectar.rc)
     endif()
 endif()
+if (WIN32)
+    # VERSIONINFO del .rc (juego y launcher): un .exe sin empresa ni versión
+    # tiene menos reputación ante Defender.
+    set(OPEN_NECTAR_VERSION "1.0.9" CACHE STRING "Open Nectar version of this build (GitHub release tag)")
+    string(REGEX MATCHALL "[0-9]+" _nectar_ver_parts "${OPEN_NECTAR_VERSION}")
+    list(APPEND _nectar_ver_parts 0 0 0 0)
+    list(SUBLIST _nectar_ver_parts 0 4 _nectar_ver_parts)
+    string(REPLACE ";" "," OPEN_NECTAR_VERSION_COMMAS "${_nectar_ver_parts}")
+    configure_file(packaging/windows/nectar_version.h.in
+                   "${CMAKE_BINARY_DIR}/generated/nectar_version.h" @ONLY)
+    set_source_files_properties(packaging/windows/nectar.rc PROPERTIES
+        INCLUDE_DIRECTORIES "${CMAKE_BINARY_DIR}/generated")
+endif()
 target_compile_options(${NECTAR_GAME} PRIVATE ${NATIVE_COMPILE_OPTIONS})
 target_link_libraries(${NECTAR_GAME} PRIVATE ${NECTAR_LEGACY})
 if(NECTAR_ONLINE)
@@ -969,7 +982,7 @@ if(ANDROID AND NOT TARGET nectar_launcher)
         "${LAUNCHER_EMBED_DIR}"
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb
         ${SDL2_INCLUDE_DIRS})
-    set(OPEN_NECTAR_VERSION "1.0.8" CACHE STRING "Open Nectar version of this build (GitHub release tag)")
+    set(OPEN_NECTAR_VERSION "1.0.9" CACHE STRING "Open Nectar version of this build (GitHub release tag)")
     target_compile_definitions(nectar_launcher PRIVATE OPEN_NECTAR_VERSION="${OPEN_NECTAR_VERSION}")
     target_compile_options(nectar_launcher PRIVATE ${NATIVE_COMPILE_OPTIONS})
     target_link_libraries(nectar_launcher PRIVATE launcher_imgui_android pikmin_disc_image ${SDL2_LIBRARIES} GLESv3 EGL log android)
@@ -1046,7 +1059,7 @@ if(PIKMIN_BUILD_LAUNCHER)
         INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann/include;${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb")
     # Versión que el launcher compara con el último release de GitHub para
     # avisar y actualizarse. Súbela en cada release (la etiqueta de GitHub).
-    set(OPEN_NECTAR_VERSION "1.0.8" CACHE STRING "Open Nectar version of this build (GitHub release tag)")
+    set(OPEN_NECTAR_VERSION "1.0.9" CACHE STRING "Open Nectar version of this build (GitHub release tag)")
     target_compile_definitions(pikmin_launcher PRIVATE OPEN_NECTAR_VERSION="${OPEN_NECTAR_VERSION}")
     if (WIN32)
         target_sources(pikmin_launcher PRIVATE packaging/windows/nectar.rc)
@@ -1062,7 +1075,7 @@ if(PIKMIN_BUILD_LAUNCHER)
     target_link_libraries(pikmin_launcher PRIVATE pikmin_disc_image ${SDL2_LIBRARIES} Threads::Threads)
     if (WIN32)
         # Diálogo de archivo clásico, selector de carpeta del shell y COM.
-        target_link_libraries(pikmin_launcher PRIVATE comdlg32 ole32 shell32 uuid)
+        target_link_libraries(pikmin_launcher PRIVATE comdlg32 ole32 shell32 uuid winhttp)
     endif()
     target_compile_options(pikmin_launcher PRIVATE ${NATIVE_COMPILE_OPTIONS})
     set_target_properties(pikmin_launcher PROPERTIES

@@ -69,7 +69,7 @@ cmake_common=(
     -DPIKMIN_STATIC_RUNTIME=ON
     # Portable: sin -march=native (issues #41 y #77).
     -DPIKMIN_NATIVE_OPTIMIZE=OFF
-    -DOPEN_NECTAR_VERSION="${OPEN_NECTAR_VERSION:-$(sed -n 's/.*set(OPEN_NECTAR_VERSION "\([^"]*\)".*/\1/p' "${repo_root}/CMakeLists.txt")}"
+    -DOPEN_NECTAR_VERSION="${OPEN_NECTAR_VERSION:-$(sed -n 's/.*set(OPEN_NECTAR_VERSION "\([^"]*\)".*/\1/p' "${repo_root}/CMakeLists.txt" | head -n1)}"
 )
 
 printf '%s\n' '[1/4] Configurando y compilando USA (Windows)...'

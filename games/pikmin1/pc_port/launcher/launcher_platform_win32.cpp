@@ -22,6 +22,7 @@
 #include <commdlg.h>
 #include <io.h>
 #include <shlobj.h>
+#include <winhttp.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -30,6 +31,13 @@
 #include <vector>
 
 namespace fs = std::filesystem;
+
+#ifndef OPEN_NECTAR_VERSION
+#define OPEN_NECTAR_VERSION "dev"
+#endif
+#define NECTAR_WIDEN2(x) L##x
+#define NECTAR_WIDEN(x) NECTAR_WIDEN2(x)
+#define OPEN_NECTAR_VERSION_W NECTAR_WIDEN(OPEN_NECTAR_VERSION)
 
 namespace pikmin {
 namespace launcher {
@@ -250,25 +258,91 @@ fs::path cacheDirectory()
 
 bool downloadFile(const std::string& url, const fs::path& destination, std::string& error)
 {
-    // curl.exe viene con Windows 10 1803 y posteriores, en System32.
+    // WinHTTP dentro del propio proceso: lanzar curl.exe oculto es justo el
+    // patrón de "downloader" que los antivirus marcan como troyano.
     const fs::path partial = destination.wstring() + L".part";
     const std::wstring wideUrl(url.begin(), url.end()); // las URL son ASCII
-    std::wstring command = L"curl.exe -fsSL --connect-timeout 30 --speed-limit 1024 --speed-time 60 -o \"" + partial.wstring() + L"\" \"" + wideUrl + L"\"";
-    STARTUPINFOW startup {};
-    startup.cb = sizeof(startup);
-    PROCESS_INFORMATION process {};
-    if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr,
-                        &startup, &process)) {
-        error = "curl.exe is not available";
+
+    URL_COMPONENTS parts {};
+    parts.dwStructSize = sizeof(parts);
+    parts.dwHostNameLength = static_cast<DWORD>(-1);
+    parts.dwUrlPathLength = static_cast<DWORD>(-1);
+    parts.dwExtraInfoLength = static_cast<DWORD>(-1);
+    if (!WinHttpCrackUrl(wideUrl.c_str(), 0, 0, &parts)) {
+        error = "invalid URL";
         return false;
     }
-    CloseHandle(process.hThread);
-    WaitForSingleObject(process.hProcess, INFINITE);
-    DWORD code = 1;
-    GetExitCodeProcess(process.hProcess, &code);
-    CloseHandle(process.hProcess);
+    const std::wstring host(parts.lpszHostName, parts.dwHostNameLength);
+    const std::wstring path = std::wstring(parts.lpszUrlPath, parts.dwUrlPathLength)
+                            + std::wstring(parts.lpszExtraInfo ? parts.lpszExtraInfo : L"", parts.dwExtraInfoLength);
+    const bool secure = parts.nScheme == INTERNET_SCHEME_HTTPS;
+
+    // GitHub exige User-Agent; las descargas de releases redirigen a otro
+    // host y WinHTTP sigue esas redirecciones por defecto.
+    HINTERNET session = WinHttpOpen(L"Open-Nectar-Launcher/" OPEN_NECTAR_VERSION_W,
+                                    WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
+                                    WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) {
+        session = WinHttpOpen(L"Open-Nectar-Launcher/" OPEN_NECTAR_VERSION_W, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                              WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    }
+    if (!session) {
+        error = "could not start WinHTTP";
+        return false;
+    }
+    WinHttpSetTimeouts(session, 30000, 30000, 60000, 60000);
+    HINTERNET connection = WinHttpConnect(session, host.c_str(), parts.nPort, 0);
+    HINTERNET request = connection
+        ? WinHttpOpenRequest(connection, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER,
+                             WINHTTP_DEFAULT_ACCEPT_TYPES, secure ? WINHTTP_FLAG_SECURE : 0)
+        : nullptr;
+    auto close = [&] {
+        if (request) WinHttpCloseHandle(request);
+        if (connection) WinHttpCloseHandle(connection);
+        WinHttpCloseHandle(session);
+    };
+
+    DWORD status = 0;
+    DWORD statusSize = sizeof(status);
+    if (!request
+        || !WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)
+        || !WinHttpReceiveResponse(request, nullptr)
+        || !WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSize, WINHTTP_NO_HEADER_INDEX)) {
+        error = "download failed (Windows error " + std::to_string(GetLastError()) + ")";
+        close();
+        return false;
+    }
+    if (status >= 400) {
+        error = "download failed (HTTP " + std::to_string(status) + ")";
+        close();
+        return false;
+    }
+
     std::error_code ec;
-    if (code != 0) {
+    FILE* out = _wfopen(partial.c_str(), L"wb");
+    if (!out) {
+        error = "could not write " + partial.string();
+        close();
+        return false;
+    }
+    std::vector<char> buffer(64 * 1024);
+    bool ok = true;
+    for (;;) {
+        DWORD read = 0;
+        if (!WinHttpReadData(request, buffer.data(), static_cast<DWORD>(buffer.size()), &read)) {
+            ok = false;
+            break;
+        }
+        if (read == 0) break;
+        if (std::fwrite(buffer.data(), 1, read, out) != read) {
+            ok = false;
+            break;
+        }
+    }
+    ok = std::fclose(out) == 0 && ok;
+    close();
+    if (!ok) {
         fs::remove(partial, ec);
         error = "download failed";
         return false;

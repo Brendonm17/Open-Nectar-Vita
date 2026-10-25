@@ -1,2 +1,33 @@
 // Icono del ejecutable (juego e instalador) en Windows.
 IDI_ICON1 ICON "../icon/nectar.ico"
+
+// Datos de versión: generados por CMake desde OPEN_NECTAR_VERSION.
+#include <winver.h>
+#include "nectar_version.h"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION NECTAR_VERSION_NUM
+ PRODUCTVERSION NECTAR_VERSION_NUM
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "Open Nectar Project"
+            VALUE "FileDescription", "Open Nectar"
+            VALUE "FileVersion", NECTAR_VERSION_STR
+            VALUE "LegalCopyright", "Open Nectar contributors"
+            VALUE "ProductName", "Open Nectar"
+            VALUE "ProductVersion", NECTAR_VERSION_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
