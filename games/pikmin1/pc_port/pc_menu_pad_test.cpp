@@ -87,6 +87,29 @@ int main()
 		expect((button & PC_MENU_PAD_START) != 0, 0, "menu left click is not Start");
 	}
 
+	// A click shorter than a frame is gone from the held buttons and lives
+	// only in the press mask. It still accepts, and a right-button press does
+	// not.
+	{
+		const std::uint32_t leftEdge = SDL_BUTTON(SDL_BUTTON_LEFT);
+		const std::uint32_t rightEdge = SDL_BUTTON(SDL_BUTTON_RIGHT);
+		expect(pc_menu_pad_click(0, leftEdge, SDL_BUTTON_LEFT), 1, "short left click counts");
+		expect(pc_menu_pad_click(leftEdge, 0, SDL_BUTTON_LEFT), 1, "held left click counts");
+		expect(pc_menu_pad_click(0, 0, SDL_BUTTON_LEFT), 0, "no left click");
+		expect(pc_menu_pad_click(0, rightEdge, SDL_BUTTON_RIGHT), 1, "short right click counts");
+		expect(pc_menu_pad_click(0, rightEdge, SDL_BUTTON_LEFT), 0, "right click is not left");
+
+		PcMenuPadKeys keys = keysNone();
+		keys.clickLeft = pc_menu_pad_click(0, leftEdge, SDL_BUTTON_LEFT);
+		keys.clickRight = pc_menu_pad_click(0, rightEdge, SDL_BUTTON_RIGHT);
+		std::uint16_t button = 0;
+		std::int8_t sx = 0, sy = 0;
+		apply(keys, true, false, startKey, 0, button, sx, sy);
+		expect((button & PC_MENU_PAD_A) != 0, 1, "short left click sets A");
+		expect((button & PC_MENU_PAD_B) != 0, 1, "short right click sets B");
+		expect((button & PC_MENU_PAD_START) != 0, 0, "short left click is not Start");
+	}
+
 	// A saved Shift binding still arrives as B from the keyboard layer. Menu
 	// mode takes it back off. Either Shift is the same.
 	{

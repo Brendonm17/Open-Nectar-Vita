@@ -1394,8 +1394,12 @@ void pc_window_poll_events(PADStatus* pad) {
         keys.keyD      = down(SDL_SCANCODE_D);
         keys.keyW      = down(SDL_SCANCODE_W);
         keys.keyS      = down(SDL_SCANCODE_S);
-        keys.clickLeft  = (boundMouse & SDL_BUTTON(SDL_BUTTON_LEFT)) != 0;
-        keys.clickRight = (boundMouse & SDL_BUTTON(SDL_BUTTON_RIGHT)) != 0;
+        // SDL_GetMouseState misses a click shorter than this sample. The press
+        // mask still has it. Leave that mask alone: pollMenuInput takes it
+        // later in this function for F1 and the other PC prompts, and consume
+        // then clears this pad so the game does not see the same click.
+        keys.clickLeft  = pc_menu_pad_click(boundMouse, sMousePressedMask, SDL_BUTTON_LEFT);
+        keys.clickRight = pc_menu_pad_click(boundMouse, sMousePressedMask, SDL_BUTTON_RIGHT);
         auto keyBindHeld = [&](int bind) {
             if (bind <= 0 || bind >= SDL_NUM_SCANCODES)
                 return false;

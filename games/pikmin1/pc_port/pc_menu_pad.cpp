@@ -61,3 +61,9 @@ void pc_menu_pad_apply(const PcMenuPadKeys& keys, bool menuMode, bool nonShiftB,
 	(void)keys.shiftL;
 	(void)keys.shiftR;
 }
+
+bool pc_menu_pad_click(std::uint32_t held, std::uint32_t pressed, int sdlButton)
+{
+	const std::uint32_t bit = SDL_BUTTON(sdlButton);
+	return (held & bit) != 0 || (pressed & bit) != 0;
+}

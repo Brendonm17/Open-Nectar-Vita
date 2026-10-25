@@ -45,6 +45,10 @@ void pc_menu_pad_apply(const PcMenuPadKeys& keys, bool menuMode, bool nonShiftB,
                        int bindStart, int bindStart2,
                        std::uint16_t& button, std::int8_t& stickX, std::int8_t& stickY);
 
+// A click that went down and up before the sample is absent from the held
+// mask and present only in the press mask. Either one is a click.
+bool pc_menu_pad_click(std::uint32_t held, std::uint32_t pressed, int sdlButton);
+
 // 1 while a modal is reading the pad. Free play, the gameplay HUD and photo
 // mode return 0. Defined by the game, not by the pure translator.
 int pc_menu_mode_active(void);
