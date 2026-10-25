@@ -889,7 +889,7 @@ static bool pcSkipCutsceneOnStart(Controller* controller)
 	if (pc_speedrun_active() || tutorialWindow || !gameflow.mMoviePlayer->mIsActive) {
 		return false;
 	}
-	if (controller->keyClick(KBBTN_START)) {
+	if (controller->keyClick(KBBTN_START | KBBTN_A)) {
 		gameflow.mMoviePlayer->skipScene(SCENESKIP_Skip);
 		return true;
 	}

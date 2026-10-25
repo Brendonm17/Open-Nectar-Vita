@@ -2530,10 +2530,9 @@ bool zen::DrawWorldMap::update(Controller* controller)
 				if (controller->keyClick(KBBTN_START)) {
 					mPause.start();
 					mCurrentMode = DrawWorldMapMode::Paused;
-#if PIKI_PC_TOUCH
-				} else if (pc_touch_visible() && controller->keyClick(KBBTN_B) && mCursorMgr->isMoveOK()) {
-					// Capa táctil: el botón "atrás" (B) sale del mapa al selector
-					// de partida; en el original B no hace nada aquí.
+#if defined(PIKI_PC_PORT)
+				} else if (controller->keyClick(KBBTN_B) && mCursorMgr->isMoveOK()) {
+					// B leaves the idle map for file select. A still lands.
 					SeSystem::playSysSe(SYSSE_CANCEL);
 					mCurrentMode  = DrawWorldMapMode::Null;
 					res           = true;

@@ -1390,7 +1390,15 @@ bool WorldMap::changeState()
 	const bool pcTapA = false, pcTapL = false, pcTapR = false;
 #endif
 
-	if (mInitArg.mController->isButtonDown(Controller::PRESS_START)) {
+	// B on the idle map opens the same return-to-title dialog as Start.
+	// While the rocket is still moving, B only aborts that move.
+#if defined(PIKI_PC_PORT)
+	const bool leaveMap = mInitArg.mController->isButtonDown(Controller::PRESS_START)
+	                   || (mCurrentState == WMAP_Idle && mInitArg.mController->isButtonDown(Controller::PRESS_B));
+#else
+	const bool leaveMap = mInitArg.mController->isButtonDown(Controller::PRESS_START);
+#endif
+	if (leaveMap) {
 		// Bring up "Return to Title Screen" popup
 
 		::Screen::gGame2DMgr->mScreenMgr->reset();

@@ -1685,6 +1685,51 @@ bool keyWentDown(SDL_Scancode sc) {
     return now && !prev;
 }
 
+// Left click sampled once per poll. pc_window_take_mouse_pressed is destructive.
+static Uint32 sMenuMouseEdge = 0;
+
+static bool menuBindingWentDown(int bind) {
+    if (bind <= 0 || bind >= SDL_NUM_SCANCODES) return false;
+    return keyWentDown(static_cast<SDL_Scancode>(bind));
+}
+
+bool menuAcceptClick() {
+    return (sMenuMouseEdge & SDL_BUTTON(SDL_BUTTON_LEFT)) != 0;
+}
+
+bool menuMouseNorm(float* nx, float* ny) {
+    int mx = 0, my = 0;
+    SDL_GetMouseState(&mx, &my);
+    SDL_Window* win = SDL_GetMouseFocus();
+    int ww = 0, wh = 0;
+    if (!win) return false;
+    SDL_GetWindowSize(win, &ww, &wh);
+    if (ww <= 0 || wh <= 0) return false;
+    *nx = float(mx) / float(ww);
+    *ny = float(my) / float(wh);
+    return true;
+}
+
+// Accept: Enter, numpad Enter, Space, left click, and a non-mouse A binding.
+// Cancel: Escape, Backspace, right click, and a B binding that is not Shift.
+// A text field keeps Backspace for delete and does not call menuCancelKey.
+bool menuOkKey() {
+    return keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_KP_ENTER)
+        || keyWentDown(SDL_SCANCODE_SPACE) || menuAcceptClick()
+        || menuBindingWentDown(pc_window_get_key_binding(PC_KEY_ACT_A))
+        || menuBindingWentDown(pc_window_get_key_binding2(PC_KEY_ACT_A));
+}
+static bool menuCancelBinding(int bind) {
+    if (bind == SDL_SCANCODE_LSHIFT || bind == SDL_SCANCODE_RSHIFT) return false;
+    return menuBindingWentDown(bind);
+}
+bool menuCancelKey() {
+    return keyWentDown(SDL_SCANCODE_ESCAPE) || keyWentDown(SDL_SCANCODE_BACKSPACE)
+        || (sMenuMouseEdge & SDL_BUTTON(SDL_BUTTON_RIGHT)) != 0
+        || menuCancelBinding(pc_window_get_key_binding(PC_KEY_ACT_B))
+        || menuCancelBinding(pc_window_get_key_binding2(PC_KEY_ACT_B));
+}
+
 void latchKeys() {
     int numKeys = 0;
     const Uint8* state = SDL_GetKeyboardState(&numKeys);
@@ -1878,6 +1923,7 @@ void pcVsEndScreenInput();
 bool vsEndScreenShown();
 
 void pollMenuInput() {
+    sMenuMouseEdge = pc_window_take_mouse_pressed();
     sTouchFrameButtons = sTouchButtons;
     sTouchButtons = 0;
     // Coop: el Select del mando de J2 también abre el menú, y entonces lo
@@ -2037,11 +2083,11 @@ void pollMenuInput() {
             revertVideoSettings();
             return;
         }
-        if (keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE) ||
+        if (menuOkKey() ||
             keyWentDown(SDL_SCANCODE_J) ||
             padNavA(ctl)) {
             confirmVideoSettings();
-        } else if (keyWentDown(SDL_SCANCODE_ESCAPE) || keyWentDown(SDL_SCANCODE_K) ||
+        } else if (menuCancelKey() || keyWentDown(SDL_SCANCODE_K) ||
                    keyWentDown(SDL_SCANCODE_B) ||
                    padNavB(ctl)) {
             revertVideoSettings();
@@ -2071,7 +2117,7 @@ void pollMenuInput() {
         bool down = keyWentDown(SDL_SCANCODE_DOWN) || keyWentDown(SDL_SCANCODE_S);
         bool left = keyWentDown(SDL_SCANCODE_LEFT) || keyWentDown(SDL_SCANCODE_A);
         bool right = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D);
-        bool ok = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
+        bool ok = menuOkKey();
 
         if (ctl || sTouchFrameButtons) {
             if (padNavUp(ctl))
@@ -2106,7 +2152,7 @@ void pollMenuInput() {
             return;
         }
         // B / ESC exits submenu.
-        if (keyWentDown(SDL_SCANCODE_ESCAPE) || keyWentDown(SDL_SCANCODE_K) ||
+        if (menuCancelKey() || keyWentDown(SDL_SCANCODE_K) ||
             keyWentDown(SDL_SCANCODE_B) || padNavB(ctl)) {
             sInControlsSubmenu = false;
             sWaitingForKey = false;
@@ -2124,7 +2170,7 @@ void pollMenuInput() {
         bool down = keyWentDown(SDL_SCANCODE_DOWN) || keyWentDown(SDL_SCANCODE_S);
         bool left = keyWentDown(SDL_SCANCODE_LEFT) || keyWentDown(SDL_SCANCODE_A);
         bool right = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D);
-        bool ok = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
+        bool ok = menuOkKey();
 
         if (ctl || sTouchFrameButtons) {
             if (padNavUp(ctl))
@@ -2156,7 +2202,7 @@ void pollMenuInput() {
             pendingPadBinds()[sGamepadSelection] = -1;
             return;
         }
-        if (keyWentDown(SDL_SCANCODE_ESCAPE) || keyWentDown(SDL_SCANCODE_K) ||
+        if (menuCancelKey() || keyWentDown(SDL_SCANCODE_K) ||
             keyWentDown(SDL_SCANCODE_B) || padNavB(ctl)) {
             sInGamepadSubmenu = false;
             sWaitingForButton = false;
@@ -2169,8 +2215,8 @@ void pollMenuInput() {
     if (sInResolutionSubmenu) {
         bool up = keyWentDown(SDL_SCANCODE_UP) || keyWentDown(SDL_SCANCODE_W);
         bool down = keyWentDown(SDL_SCANCODE_DOWN) || keyWentDown(SDL_SCANCODE_S);
-        bool ok = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
-        bool cancel = keyWentDown(SDL_SCANCODE_ESCAPE) || keyWentDown(SDL_SCANCODE_K) ||
+        bool ok = menuOkKey();
+        bool cancel = menuCancelKey() || keyWentDown(SDL_SCANCODE_K) ||
                       keyWentDown(SDL_SCANCODE_B);
 
         if (ctl || sTouchFrameButtons) {
@@ -2213,8 +2259,8 @@ void pollMenuInput() {
 
     // HD model restart prompt.
     if (sHdModelRestartPrompt) {
-        bool accept = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
-        bool cancel = keyWentDown(SDL_SCANCODE_ESCAPE) || keyWentDown(SDL_SCANCODE_K) ||
+        bool accept = menuOkKey();
+        bool cancel = menuCancelKey() || keyWentDown(SDL_SCANCODE_K) ||
                       keyWentDown(SDL_SCANCODE_B);
         if (ctl || sTouchFrameButtons) {
             if (padNavA(ctl)) accept = true;
@@ -2236,8 +2282,8 @@ void pollMenuInput() {
     if (sInHdModelsSubmenu) {
         bool up = keyWentDown(SDL_SCANCODE_UP) || keyWentDown(SDL_SCANCODE_W);
         bool down = keyWentDown(SDL_SCANCODE_DOWN) || keyWentDown(SDL_SCANCODE_S);
-        bool ok = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
-        bool cancel = keyWentDown(SDL_SCANCODE_ESCAPE) || keyWentDown(SDL_SCANCODE_K) ||
+        bool ok = menuOkKey();
+        bool cancel = menuCancelKey() || keyWentDown(SDL_SCANCODE_K) ||
                       keyWentDown(SDL_SCANCODE_B);
         if (ctl || sTouchFrameButtons) {
             if (padNavUp(ctl)) up = true;
@@ -2257,8 +2303,8 @@ void pollMenuInput() {
     // activating a pack asks for a restart, and the choice must not leak into
     // the pack list underneath as a stray press.
     if (sTexturePackRestartPrompt) {
-        bool accept = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
-        bool cancel = keyWentDown(SDL_SCANCODE_ESCAPE) || keyWentDown(SDL_SCANCODE_K) ||
+        bool accept = menuOkKey();
+        bool cancel = menuCancelKey() || keyWentDown(SDL_SCANCODE_K) ||
                       keyWentDown(SDL_SCANCODE_B);
         if (ctl || sTouchFrameButtons) {
             if (padNavA(ctl)) accept = true;
@@ -2284,8 +2330,8 @@ void pollMenuInput() {
         bool down = keyWentDown(SDL_SCANCODE_DOWN) || keyWentDown(SDL_SCANCODE_S);
         bool left = keyWentDown(SDL_SCANCODE_LEFT) || keyWentDown(SDL_SCANCODE_A);
         bool right = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D);
-        bool ok = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
-        bool cancel = keyWentDown(SDL_SCANCODE_ESCAPE) || keyWentDown(SDL_SCANCODE_K) ||
+        bool ok = menuOkKey();
+        bool cancel = menuCancelKey() || keyWentDown(SDL_SCANCODE_K) ||
                       keyWentDown(SDL_SCANCODE_B);
 
         if (ctl || sTouchFrameButtons) {
@@ -2320,16 +2366,15 @@ void pollMenuInput() {
     bool down = keyWentDown(SDL_SCANCODE_DOWN) || keyWentDown(SDL_SCANCODE_S);
     bool left = keyWentDown(SDL_SCANCODE_LEFT) || keyWentDown(SDL_SCANCODE_A);
     bool right = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D);
-    bool ok = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
-    bool cancel = keyWentDown(SDL_SCANCODE_ESCAPE) || keyWentDown(SDL_SCANCODE_K) ||
+    bool ok = menuOkKey();
+    bool cancel = menuCancelKey() || keyWentDown(SDL_SCANCODE_K) ||
                   keyWentDown(SDL_SCANCODE_B);
     bool tabPrev = keyWentDown(SDL_SCANCODE_Q) || keyWentDown(SDL_SCANCODE_PAGEUP);
     bool tabNext = keyWentDown(SDL_SCANCODE_E) || keyWentDown(SDL_SCANCODE_PAGEDOWN) ||
                    keyWentDown(SDL_SCANCODE_TAB);
-    // Ratón: rueda = arriba/abajo, botón derecho = atrás (el izquierdo llega
-    // como toque desde pc_window).
+    // Ratón: rueda = arriba/abajo. El clic derecho es B y el izquierdo es A
+    // (menuCancelKey / menuOkKey). El izquierdo también llega como toque.
     if (const int wheel = pc_window_take_wheel_steps()) (wheel > 0 ? up : down) = true;
-    if (pc_window_take_mouse_pressed() & SDL_BUTTON(SDL_BUTTON_RIGHT)) cancel = true;
     if (ctl || sTouchFrameButtons) {
         if (padNavUp(ctl)) up = true;
         if (padNavDown(ctl)) down = true;
@@ -2491,7 +2536,7 @@ void pollKeyCapture(SDL_GameController* ctl) {
     // game; buttons already held when capture opened are ignored.
     // Use the event edge mask so a click shorter than a frame counts.
     if (sWaitingForKey) {
-        const Uint32 mouseWent = pc_window_take_mouse_pressed() & ~sCapturePrevMouse;
+        const Uint32 mouseWent = sMenuMouseEdge & ~sCapturePrevMouse;
         sCapturePrevMouse = SDL_GetMouseState(NULL, NULL);
         for (int b = SDL_BUTTON_LEFT; b <= PC_BIND_MOUSE_LAST - PC_BIND_MOUSE_BASE; b++) {
             if (!(mouseWent & SDL_BUTTON(b))) continue;
@@ -3859,8 +3904,8 @@ void pcNewGamePromptInput() {
 
     bool left   = keyWentDown(SDL_SCANCODE_LEFT)  || keyWentDown(SDL_SCANCODE_A);
     bool right  = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D);
-    bool accept = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
-    bool cancel = keyWentDown(SDL_SCANCODE_ESCAPE);
+    bool accept = menuOkKey();
+    bool cancel = menuCancelKey();
 
     left |= (sTouchFrameButtons & PAD_BUTTON_LEFT) != 0;
     right |= (sTouchFrameButtons & PAD_BUTTON_RIGHT) != 0;
@@ -4037,8 +4082,8 @@ void pcPlayerCountPromptInput() {
 
     bool left   = keyWentDown(SDL_SCANCODE_LEFT)  || keyWentDown(SDL_SCANCODE_A);
     bool right  = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D);
-    bool accept = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
-    bool cancel = keyWentDown(SDL_SCANCODE_ESCAPE);
+    bool accept = menuOkKey();
+    bool cancel = menuCancelKey();
 
     left |= (sTouchFrameButtons & PAD_BUTTON_LEFT) != 0;
     right |= (sTouchFrameButtons & PAD_BUTTON_RIGHT) != 0;
@@ -4222,8 +4267,8 @@ int captainPickInput(int player, bool keyboardOk, SDL_GameController* ctl, int* 
     if (keyboardOk) {
         left   = keyWentDown(SDL_SCANCODE_LEFT)  || keyWentDown(SDL_SCANCODE_A);
         right  = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D);
-        accept = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
-        back   = keyWentDown(SDL_SCANCODE_ESCAPE);
+        accept = menuOkKey();
+        back   = menuCancelKey();
     }
     if (player == 0) {
         left |= (sTouchFrameButtons & PAD_BUTTON_LEFT) != 0;
@@ -4409,7 +4454,7 @@ void pcDevAssignPromptInput() {
 
     // Esc / B cancelan en cualquier paso (vuelven al selector 1P/2P). B se
     // acepta desde cualquier mando abierto, aún sin asignar.
-    bool cancel = keyWentDown(SDL_SCANCODE_ESCAPE);
+    bool cancel = menuCancelKey();
     cancel |= (sTouchFrameButtons & PAD_BUTTON_B) != 0;
 
     if (sDevAssignStep == DEVASSIGN_WaitP1 || sDevAssignStep == DEVASSIGN_WaitP2) {
@@ -4479,7 +4524,7 @@ void pcDevAssignPromptInput() {
     // Confirmación: navegable con teclado y con los dos mandos asignados.
     bool left   = keyWentDown(SDL_SCANCODE_LEFT)  || keyWentDown(SDL_SCANCODE_A);
     bool right  = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D);
-    bool accept = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
+    bool accept = menuOkKey();
     left |= (sTouchFrameButtons & PAD_BUTTON_LEFT) != 0;
     right |= (sTouchFrameButtons & PAD_BUTTON_RIGHT) != 0;
     accept |= (sTouchFrameButtons & PAD_BUTTON_A) != 0;
@@ -4644,7 +4689,7 @@ namespace {
 void pcErasedNoticeInput()
 {
     if (!sErasedNoticeOpen) return;
-    bool accept = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE)
+    bool accept = menuOkKey()
                || (sTouchFrameButtons & PAD_BUTTON_A) != 0;
     if (sTouchTapPending) {
         sTouchTapPending = false;
@@ -4933,7 +4978,8 @@ void ngrCancel()
 // Edición del código: Enter/A confirma, Esc/B cancela, Ctrl+V pega y aplica.
 void ngrShareInput()
 {
-    bool ok     = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_KP_ENTER);
+    bool ok     = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_KP_ENTER)
+               || keyWentDown(SDL_SCANCODE_SPACE) || menuAcceptClick();
     bool cancel = keyWentDown(SDL_SCANCODE_ESCAPE);
     if (sTouchTapPending) {
         sTouchTapPending = false;
@@ -4970,8 +5016,8 @@ void ngrInput()
     bool right  = !ctrl && (keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D));
     bool up     = keyWentDown(SDL_SCANCODE_UP) || keyWentDown(SDL_SCANCODE_W);
     bool down   = keyWentDown(SDL_SCANCODE_DOWN) || keyWentDown(SDL_SCANCODE_S);
-    bool accept = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
-    bool back   = keyWentDown(SDL_SCANCODE_ESCAPE);
+    bool accept = menuOkKey();
+    bool back   = menuCancelKey();
 
     left   |= (sTouchFrameButtons & PAD_BUTTON_LEFT) != 0;
     right  |= (sTouchFrameButtons & PAD_BUTTON_RIGHT) != 0;
@@ -5207,8 +5253,8 @@ void pcNewGamePromptInput()
     bool right  = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D);
     bool up     = keyWentDown(SDL_SCANCODE_UP)    || keyWentDown(SDL_SCANCODE_W);
     bool down   = keyWentDown(SDL_SCANCODE_DOWN)  || keyWentDown(SDL_SCANCODE_S);
-    bool accept = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
-    bool cancel = keyWentDown(SDL_SCANCODE_ESCAPE);
+    bool accept = menuOkKey();
+    bool cancel = menuCancelKey();
 
     left   |= (sTouchFrameButtons & PAD_BUTTON_LEFT) != 0;
     right  |= (sTouchFrameButtons & PAD_BUTTON_RIGHT) != 0;
@@ -5565,7 +5611,7 @@ void pcDevAssignPromptInput()
     if (!sDevAssignOpen) return;
 
     // Esc / B cancelan en cualquier paso (vuelven al selector 1P/2P).
-    bool cancel = keyWentDown(SDL_SCANCODE_ESCAPE);
+    bool cancel = menuCancelKey();
     cancel |= (sTouchFrameButtons & PAD_BUTTON_B) != 0;
 
     if (sDevAssignStep != COOPASSIGN_Confirm) {
@@ -5615,7 +5661,7 @@ void pcDevAssignPromptInput()
     // acción, no por mando: se combina el estado de los dos y se detecta una vez.
     bool left   = keyWentDown(SDL_SCANCODE_LEFT)  || keyWentDown(SDL_SCANCODE_A);
     bool right  = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D);
-    bool accept = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
+    bool accept = menuOkKey();
     left   |= (sTouchFrameButtons & PAD_BUTTON_LEFT) != 0;
     right  |= (sTouchFrameButtons & PAD_BUTTON_RIGHT) != 0;
     accept |= (sTouchFrameButtons & PAD_BUTTON_A) != 0;
@@ -5762,6 +5808,41 @@ int csCardY(int panelY, int index) { return csTop(panelY) + (index / kCsCols) * 
 int csStartX(int panelX) { return panelX + kCsPanelW / 2 - kCsStartW / 2; }
 int csStartY(int panelY) { return csTop(panelY) + kCsGridH + 14; }
 
+enum { CS_HIT_NONE = 0, CS_HIT_CARD, CS_HIT_SIDE, CS_HIT_START };
+
+// Same hit test as a touch, from a 0-1 window position.
+int csPointerHit(float nx, float ny, int* which)
+{
+    int sw = 640, sh = 480;
+    ngScreen(&sw, &sh);
+    float x = nx * float(sw);
+    float y = ny * float(sh);
+    const float window  = pc_gfx_get_window_aspect_ratio();
+    const float uiWidth = window > float(sw) / float(sh) ? (float(sw) / float(sh)) / window : 1.0f;
+    if (uiWidth > 0.0f)
+        x = (nx - (0.5f - uiWidth * 0.5f)) / uiWidth * float(sw);
+    const int panelX = sw / 2 - kCsPanelW / 2;
+    const int panelY = sh / 2 - kCsPanelH / 2;
+    for (int i = 0; i < PC_P2_CHAR_COUNT; ++i) {
+        const float cx = float(csCardX(panelX, i)), cy = float(csCardY(panelY, i));
+        if (x >= cx && x <= cx + kCsCardW && y >= cy && y <= cy + kCsCardH) {
+            *which = i;
+            return CS_HIT_CARD;
+        }
+    }
+    for (int captain = 0; captain < 2; ++captain) {
+        const float px = float(csSideX(panelX, captain)), py = float(csTop(panelY));
+        if (x >= px && x <= px + kCsSideW && y >= py && y <= py + kCsSideH) {
+            *which = captain;
+            return CS_HIT_SIDE;
+        }
+    }
+    const float sx = float(csStartX(panelX)), sy = float(csStartY(panelY));
+    if (x >= sx && x <= sx + kCsStartW && y >= sy && y <= sy + kCsStartH)
+        return CS_HIT_START;
+    return CS_HIT_NONE;
+}
+
 const char* csShortName(int character)
 {
     static const char* const kNames[PC_P2_CHAR_COUNT] = { "Olimar", "Louie", "Pres.", "Red", "Yellow", "Blue", "Purple", "White", "Bulbmin" };
@@ -5838,8 +5919,8 @@ void csCoopPressed(int player, bool pressed[CS_InputCount])
         pressed[CS_Right] = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D);
         pressed[CS_Up]    = keyWentDown(SDL_SCANCODE_UP) || keyWentDown(SDL_SCANCODE_W);
         pressed[CS_Down]  = keyWentDown(SDL_SCANCODE_DOWN) || keyWentDown(SDL_SCANCODE_S);
-        pressed[CS_A]     = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
-        pressed[CS_B]     = keyWentDown(SDL_SCANCODE_ESCAPE);
+        pressed[CS_A]     = menuOkKey();
+        pressed[CS_B]     = menuCancelKey();
         pressed[CS_Start] = keyWentDown(SDL_SCANCODE_TAB);
     }
     SDL_GameController* ctl = player == 0 ? pc_window_get_controller() : pc_window_get_controller_p2();
@@ -5873,6 +5954,14 @@ void csCoopStart()
 void pcCaptainSelectCoopInput()
 {
     sTouchTapPending = false;
+    if (menuAcceptClick()) {
+        float nx = 0.0f, ny = 0.0f;
+        int which = 0;
+        if (menuMouseNorm(&nx, &ny) && csPointerHit(nx, ny, &which) == CS_HIT_CARD) {
+            const int owner = pc_window_get_keyboard_owner() == 1 ? 1 : 0;
+            sCsCursor[owner] = which;
+        }
+    }
     bool pressed[2][CS_InputCount];
     for (int p = 0; p < 2; p++) csCoopPressed(p, pressed[p]);
     const bool bothReady = sCsReady[0] && sCsReady[1];
@@ -5930,8 +6019,8 @@ void pcCaptainSelectInput()
     bool right  = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D);
     bool up     = keyWentDown(SDL_SCANCODE_UP)    || keyWentDown(SDL_SCANCODE_W);
     bool down   = keyWentDown(SDL_SCANCODE_DOWN)  || keyWentDown(SDL_SCANCODE_S);
-    bool accept = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
-    bool cancel = keyWentDown(SDL_SCANCODE_ESCAPE);
+    bool accept = menuOkKey();
+    bool cancel = menuCancelKey();
     bool prevCaptain = keyWentDown(SDL_SCANCODE_Q);
     bool nextCaptain = keyWentDown(SDL_SCANCODE_E);
 
@@ -6021,6 +6110,27 @@ void pcCaptainSelectInput()
         if (down) {
             if (row < 2) sCapSelIndex += kCsCols;
             else sCapSelStart = true;
+        }
+    }
+
+    // A click on a card assigns that card. A click on Start, or on empty
+    // space, confirms. The generic click must not also assign the cursor.
+    if (menuAcceptClick()) {
+        accept = false;
+        float nx = 0.0f, ny = 0.0f;
+        int which = 0;
+        const int hit = menuMouseNorm(&nx, &ny) ? csPointerHit(nx, ny, &which) : CS_HIT_NONE;
+        if (hit == CS_HIT_CARD) {
+            sCapSelStart = false;
+            csAssign(which);
+        } else if (hit == CS_HIT_SIDE) {
+            sCapSelStart = false;
+            csSetActive(which);
+        } else if (hit == CS_HIT_START) {
+            sCapSelStart = true;
+            accept = true;
+        } else {
+            accept = true;
         }
     }
 
@@ -6299,8 +6409,8 @@ void pcSpeedrunMenuInput()
     bool right  = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D);
     bool up     = keyWentDown(SDL_SCANCODE_UP)    || keyWentDown(SDL_SCANCODE_W);
     bool down   = keyWentDown(SDL_SCANCODE_DOWN)  || keyWentDown(SDL_SCANCODE_S);
-    bool accept = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
-    bool cancel = keyWentDown(SDL_SCANCODE_ESCAPE);
+    bool accept = menuOkKey();
+    bool cancel = menuCancelKey();
     bool xPress = keyWentDown(SDL_SCANCODE_X);
     bool yPress = keyWentDown(SDL_SCANCODE_E);
 
@@ -6799,8 +6909,8 @@ void pcVsRulesInput()
     bool down   = keyWentDown(SDL_SCANCODE_DOWN) || keyWentDown(SDL_SCANCODE_S);
     bool left   = keyWentDown(SDL_SCANCODE_LEFT) || keyWentDown(SDL_SCANCODE_A);
     bool right  = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D);
-    bool accept = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
-    bool cancel = keyWentDown(SDL_SCANCODE_ESCAPE);
+    bool accept = menuOkKey();
+    bool cancel = menuCancelKey();
     up |= (sTouchFrameButtons & PAD_BUTTON_UP) != 0;
     down |= (sTouchFrameButtons & PAD_BUTTON_DOWN) != 0;
     left |= (sTouchFrameButtons & PAD_BUTTON_LEFT) != 0;
@@ -6839,7 +6949,7 @@ void pcVsEndScreenInput()
 {
     bool left   = keyWentDown(SDL_SCANCODE_LEFT) || keyWentDown(SDL_SCANCODE_A) || keyWentDown(SDL_SCANCODE_UP);
     bool right  = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D) || keyWentDown(SDL_SCANCODE_DOWN);
-    bool accept = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
+    bool accept = menuOkKey();
     left |= (sTouchFrameButtons & (PAD_BUTTON_LEFT | PAD_BUTTON_UP)) != 0;
     right |= (sTouchFrameButtons & (PAD_BUTTON_RIGHT | PAD_BUTTON_DOWN)) != 0;
     accept |= (sTouchFrameButtons & PAD_BUTTON_A) != 0;
@@ -8553,6 +8663,7 @@ void startKeyCapture(int action, bool second) {
     sCaptureSecond = second;
     sWaitingForKey = true;
     sCapturePrevMouse = SDL_GetMouseState(NULL, NULL);
+    sMenuMouseEdge = 0;
     pc_window_take_mouse_pressed(); // descartar clics de antes de la captura
     sCaptureWaitRelease = true;
 }
@@ -8894,8 +9005,8 @@ PcNavEdges pc_settings_read_nav_edges(void) {
     e.down   = padEdge(held(SDL_SCANCODE_DOWN, SDL_SCANCODE_S), 7);
     e.left   = padEdge(held(SDL_SCANCODE_LEFT, SDL_SCANCODE_A), 8);
     e.right  = padEdge(held(SDL_SCANCODE_RIGHT, SDL_SCANCODE_D), 9);
-    e.ok     = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
-    e.cancel = keyWentDown(SDL_SCANCODE_ESCAPE);
+    e.ok     = menuOkKey();
+    e.cancel = menuCancelKey();
     e.tabPrev = keyWentDown(SDL_SCANCODE_Q) || keyWentDown(SDL_SCANCODE_PAGEUP);
     e.tabNext = keyWentDown(SDL_SCANCODE_E) || keyWentDown(SDL_SCANCODE_PAGEDOWN) || keyWentDown(SDL_SCANCODE_TAB);
     SDL_GameController* ctl = pc_window_get_controller();
