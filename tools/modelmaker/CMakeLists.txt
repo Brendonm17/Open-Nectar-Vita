@@ -99,7 +99,7 @@ target_include_directories(nectar_modelmaker PRIVATE
     ${SDL2_INCLUDE_DIRS})
 target_link_libraries(nectar_modelmaker PRIVATE nectar_mapcore ${MM_IMGUI} ${SDL2_LIBRARIES} Threads::Threads)
 if(WIN32)
-    target_link_libraries(nectar_modelmaker PRIVATE comdlg32 ole32 shell32 uuid)
+    target_link_libraries(nectar_modelmaker PRIVATE comdlg32 ole32 shell32 uuid winhttp)
     set_target_properties(nectar_modelmaker PROPERTIES WIN32_EXECUTABLE ON)
 endif()
 if(NOT MSVC)

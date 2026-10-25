@@ -1123,7 +1123,7 @@ if(PIKMIN_BUILD_TESTS AND PIKMIN_BUILD_LAUNCHER)
     add_executable(prepared_image_test pc_port/launcher/prepared_image_test.cpp ${LAUNCHER_PLATFORM_SOURCE})
     target_compile_options(prepared_image_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
     if (WIN32)
-        target_link_libraries(prepared_image_test PRIVATE comdlg32 ole32 shell32 uuid)
+        target_link_libraries(prepared_image_test PRIVATE comdlg32 ole32 shell32 uuid winhttp)
     endif()
     add_test(NAME prepared_image_test COMMAND prepared_image_test)
 

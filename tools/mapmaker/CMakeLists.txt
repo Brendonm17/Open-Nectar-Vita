@@ -92,7 +92,7 @@ target_include_directories(nectar_mapmaker PRIVATE
     ${SDL2_INCLUDE_DIRS})
 target_link_libraries(nectar_mapmaker PRIVATE nectar_mapcore ${NM_IMGUI} ${SDL2_LIBRARIES} Threads::Threads)
 if(WIN32)
-    target_link_libraries(nectar_mapmaker PRIVATE comdlg32 ole32 shell32 uuid)
+    target_link_libraries(nectar_mapmaker PRIVATE comdlg32 ole32 shell32 uuid winhttp)
     set_target_properties(nectar_mapmaker PROPERTIES WIN32_EXECUTABLE ON)
 endif()
 if(NOT MSVC)
