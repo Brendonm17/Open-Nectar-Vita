@@ -67,3 +67,24 @@ bool pc_menu_pad_click(std::uint32_t held, std::uint32_t pressed, int sdlButton)
 	const std::uint32_t bit = SDL_BUTTON(sdlButton);
 	return (held & bit) != 0 || (pressed & bit) != 0;
 }
+
+bool pc_menu_pad_mouse_is_touch(std::uint32_t which)
+{
+	return which == SDL_TOUCH_MOUSEID;
+}
+
+void pc_menu_pad_note_mouse_button(std::uint32_t& held, std::uint32_t& pressed,
+                                   std::uint32_t which, int sdlButton, bool down)
+{
+	if (pc_menu_pad_mouse_is_touch(which))
+		return;
+	if (sdlButton < 1 || sdlButton > 8)
+		return;
+	const std::uint32_t bit = SDL_BUTTON(sdlButton);
+	if (down) {
+		held |= bit;
+		pressed |= bit;
+	} else {
+		held &= ~bit;
+	}
+}

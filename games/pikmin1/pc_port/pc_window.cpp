@@ -243,7 +243,8 @@ static int sLogicalRetraceInterval = 1;
 // is a discrete, edge-shaped input: events arrive once per notch and are gone,
 // so they have to be banked here until a logical tick collects them, exactly
 // like the pad's edge-shaped buttons.
-static Uint32 sMousePressedMask = 0; // buttons pressed since the last take
+static Uint32 sMousePressedMask = 0; // real presses since the last take
+static Uint32 sRealMouseButtons = 0; // real buttons still held
 static int sMouseWheelSteps = 0;
 // Steps that nothing consumes (title, pause, menus) must not pile up. Otherwise a
 // long scroll there changes the captain or the camera zoom once play resumes.
@@ -1169,10 +1170,17 @@ void pc_window_poll_events(PADStatus* pad) {
             }
 #endif
             case SDL_MOUSEBUTTONDOWN:
-                // Edge mask for binding capture: a click shorter than a frame
-                // is invisible to SDL_GetMouseState, so remember every press.
-                if (event.button.button >= 1 && event.button.button <= 8)
-                    sMousePressedMask |= SDL_BUTTON(event.button.button);
+            case SDL_MOUSEBUTTONUP:
+                // A finger is also a mouse event. Leave that out of the press
+                // mask: F1 and the other prompts take the mask, and a menu
+                // reads it as A or B. The touch layer already has the finger.
+                // A physical mouse, on the desktop or on Android, still counts,
+                // including a click that is up again before the next sample.
+                pc_menu_pad_note_mouse_button(sRealMouseButtons, sMousePressedMask,
+                                              event.button.which, event.button.button,
+                                              event.type == SDL_MOUSEBUTTONDOWN);
+                if (event.type != SDL_MOUSEBUTTONDOWN)
+                    break;
                 // Menú F1 abierto: el clic izquierdo es un toque (misma lógica
                 // que la pantalla táctil: seleccionar fila / pulsar la ya elegida).
                 // (También en el mapa de zonas de las campañas: elegir zona con el ratón.)
@@ -1218,6 +1226,9 @@ void pc_window_poll_events(PADStatus* pad) {
                     sMouseCursorDeltaX = 0.0f;
                     sMouseCursorDeltaY = 0.0f;
                 }
+                // The matching button-up can be dropped when the window loses focus.
+                if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST)
+                    sRealMouseButtons = 0;
                 // Some platforms release the relative-mode grab while the
                 // window is unfocused; put it back on return (issue #52).
                 if (event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED && !sSettingsMenuOpen) {
@@ -1297,8 +1308,9 @@ void pc_window_poll_events(PADStatus* pad) {
     }
 
     const Uint8* state = SDL_GetKeyboardState(NULL);
-    // Bindings may name a mouse button (issue #42); sample the mouse once here.
-    const Uint32 boundMouse = SDL_GetMouseState(NULL, NULL);
+    // Bindings may name a mouse button (issue #42). SDL_GetMouseState also
+    // reports a finger, so mouse-button bindings use the real-mouse mask.
+    const Uint32 boundMouse = sRealMouseButtons;
     // La segunda tecla con un clic solo cuenta fuera de Classic, como los clics
     // fijos que sustituye (en Classic el ratón no juega).
     const bool mouseSecondOk = effectiveControlMode() != PC_CONTROL_CLASSIC;
@@ -1394,12 +1406,11 @@ void pc_window_poll_events(PADStatus* pad) {
         keys.keyD      = down(SDL_SCANCODE_D);
         keys.keyW      = down(SDL_SCANCODE_W);
         keys.keyS      = down(SDL_SCANCODE_S);
-        // SDL_GetMouseState misses a click shorter than this sample. The press
-        // mask still has it. Leave that mask alone: pollMenuInput takes it
-        // later in this function for F1 and the other PC prompts, and consume
-        // then clears this pad so the game does not see the same click.
-        keys.clickLeft  = pc_menu_pad_click(boundMouse, sMousePressedMask, SDL_BUTTON_LEFT);
-        keys.clickRight = pc_menu_pad_click(boundMouse, sMousePressedMask, SDL_BUTTON_RIGHT);
+        // A click shorter than this sample is only in the press mask. Leave
+        // that mask alone: pollMenuInput takes it later for F1 and the other
+        // prompts, and consume then clears this pad. Both masks omit a finger.
+        keys.clickLeft  = pc_menu_pad_click(sRealMouseButtons, sMousePressedMask, SDL_BUTTON_LEFT);
+        keys.clickRight = pc_menu_pad_click(sRealMouseButtons, sMousePressedMask, SDL_BUTTON_RIGHT);
         auto keyBindHeld = [&](int bind) {
             if (bind <= 0 || bind >= SDL_NUM_SCANCODES)
                 return false;

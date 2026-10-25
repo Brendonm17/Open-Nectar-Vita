@@ -49,6 +49,16 @@ void pc_menu_pad_apply(const PcMenuPadKeys& keys, bool menuMode, bool nonShiftB,
 // mask and present only in the press mask. Either one is a click.
 bool pc_menu_pad_click(std::uint32_t held, std::uint32_t pressed, int sdlButton);
 
+// A finger is also delivered as a mouse event with this id. Menu clicks and
+// mouse-button bindings ignore it. A physical mouse keeps its own id.
+bool pc_menu_pad_mouse_is_touch(std::uint32_t which);
+
+// Fold one mouse-button event into the real-mouse masks. Touch events are
+// ignored. pressed keeps every real press until the caller takes it, including
+// one that was released before the sample. held is the buttons still down.
+void pc_menu_pad_note_mouse_button(std::uint32_t& held, std::uint32_t& pressed,
+                                   std::uint32_t which, int sdlButton, bool down);
+
 // 1 while a modal is reading the pad. Free play, the gameplay HUD and photo
 // mode return 0. Defined by the game, not by the pure translator.
 int pc_menu_mode_active(void);

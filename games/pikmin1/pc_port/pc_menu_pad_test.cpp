@@ -110,6 +110,28 @@ int main()
 		expect((button & PC_MENU_PAD_START) != 0, 0, "short left click is not Start");
 	}
 
+	// A finger is delivered again as a mouse event. That event must not become
+	// a menu click. A physical mouse, including one released before the sample,
+	// still does.
+	{
+		std::uint32_t held = 0, pressed = 0;
+		pc_menu_pad_note_mouse_button(held, pressed, SDL_TOUCH_MOUSEID, SDL_BUTTON_LEFT, true);
+		pc_menu_pad_note_mouse_button(held, pressed, SDL_TOUCH_MOUSEID, SDL_BUTTON_RIGHT, true);
+		expect(pc_menu_pad_mouse_is_touch(SDL_TOUCH_MOUSEID), 1, "touch mouse id is touch");
+		expect(pc_menu_pad_click(held, pressed, SDL_BUTTON_LEFT), 0, "finger is not a left click");
+		expect(pc_menu_pad_click(held, pressed, SDL_BUTTON_RIGHT), 0, "finger is not a right click");
+
+		pc_menu_pad_note_mouse_button(held, pressed, 0, SDL_BUTTON_LEFT, true);
+		expect(pc_menu_pad_click(held, pressed, SDL_BUTTON_LEFT), 1, "real mouse down is a left click");
+		pc_menu_pad_note_mouse_button(held, pressed, 0, SDL_BUTTON_LEFT, false);
+		expect(held == 0, 1, "real mouse up releases the button");
+		expect(pc_menu_pad_click(held, pressed, SDL_BUTTON_LEFT), 1, "short real click stays pressed");
+
+		pc_menu_pad_note_mouse_button(held, pressed, 3, SDL_BUTTON_RIGHT, true);
+		expect(pc_menu_pad_click(held, pressed, SDL_BUTTON_RIGHT), 1, "physical mouse id 3 is a right click");
+		expect(pc_menu_pad_mouse_is_touch(3), 0, "physical mouse id is not touch");
+	}
+
 	// A saved Shift binding still arrives as B from the keyboard layer. Menu
 	// mode takes it back off. Either Shift is the same.
 	{
