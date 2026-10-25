@@ -92,8 +92,10 @@ public:
     bool newerRelease(ReleaseInfo& release) const;
     // Modal con un mensaje y uno o dos botones (secundario vacío = solo uno).
     // Devuelve 0 si pulsa el principal, 1 el secundario, -1 si cierra la ventana.
+    // `cancel` no vacío añade un botón (y Esc) que cierra sin hacer nada: -1 (#172).
     int ask(const std::string& title, const std::string& text, const std::string& primary,
-            const std::string& secondary = std::string(), bool isError = false);
+            const std::string& secondary = std::string(), bool isError = false,
+            const std::string& cancel = std::string());
 
     bool choosePaths(const std::function<std::string()>& chooseRom,
                      const std::function<std::string()>& chooseInstallDirectory,
@@ -102,7 +104,7 @@ public:
                         const std::string& phase = "Extracting") override;
     void showError(const std::string& message) override;
     bool offerRetry(const std::string& message) override;
-    void showComplete(const std::string& installDirectory, bool willLaunch) override;
+    bool showComplete(const std::string& installDirectory, bool willLaunch) override;
 
 private:
     struct Impl;

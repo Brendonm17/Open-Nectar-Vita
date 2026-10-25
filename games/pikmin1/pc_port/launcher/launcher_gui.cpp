@@ -1804,7 +1804,7 @@ struct HubWindow::Impl {
     std::uint32_t percent = 0;
     std::string phase, currentFile;
     // Mensaje
-    std::string messageTitle, messageText, primaryLabel, secondaryLabel;
+    std::string messageTitle, messageText, primaryLabel, secondaryLabel, cancelLabel;
     bool messageIsError = false;
     int answer = -1; // 0 principal, 1 secundario
 
@@ -1960,6 +1960,13 @@ struct HubWindow::Impl {
             ImGui::SetCursorScreenPos(ImVec2(x, buttonsY));
             if (hub->glassButton(secondaryLabel.c_str(), ImVec2(secondaryW, 50.0f))) answer = 1;
         }
+        if (!cancelLabel.empty()) {
+            // A la izquierda, lejos de las acciones: cerrar sin elegir ninguna.
+            const float cancelW = std::max(130.0f, hub->fonts.body->CalcTextSizeA(21.0f, FLT_MAX, 0.0f, cancelLabel.c_str()).x + 50.0f);
+            ImGui::SetCursorScreenPos(ImVec2(at.x, buttonsY));
+            if (hub->glassButton(cancelLabel.c_str(), ImVec2(cancelW, 50.0f)) || ImGui::IsKeyPressed(ImGuiKey_Escape))
+                answer = 2;
+        }
         endModal();
     }
 
@@ -2025,9 +2032,10 @@ struct HubWindow::Impl {
 
     // Muestra un mensaje hasta que se pulsa un botón. -1 si se cierra la ventana.
     int message(const std::string& heading, const std::string& text, const std::string& primary,
-                const std::string& secondary, bool isError)
+                const std::string& secondary, bool isError, const std::string& cancel = std::string())
     {
         modal = Modal::Message;
+        cancelLabel = cancel;
         messageTitle = heading;
         messageText = text;
         primaryLabel = primary;
@@ -2036,7 +2044,8 @@ struct HubWindow::Impl {
         answer = -1;
         while (answer < 0 && !quitRequested) frame();
         modal = Modal::None;
-        return answer;
+        cancelLabel.clear();
+        return answer == 2 ? -1 : answer;
     }
 };
 
@@ -2197,10 +2206,10 @@ bool HubWindow::newerRelease(ReleaseInfo& release) const
 }
 
 int HubWindow::ask(const std::string& title, const std::string& text, const std::string& primary,
-                   const std::string& secondary, bool isError)
+                   const std::string& secondary, bool isError, const std::string& cancel)
 {
     Impl& m = *mImpl;
-    return m.message(title, text, primary, secondary, isError);
+    return m.message(title, text, primary, secondary, isError, cancel);
 }
 
 bool HubWindow::choosePaths(const std::function<std::string()>& chooseRom,
@@ -2282,7 +2291,7 @@ bool HubWindow::offerRetry(const std::string& message)
     return true;
 }
 
-void HubWindow::showComplete(const std::string& installDirectory, bool willLaunch)
+bool HubWindow::showComplete(const std::string& installDirectory, bool willLaunch)
 {
     Impl& m = *mImpl;
     m.state.games[0].installed = true;
@@ -2290,8 +2299,14 @@ void HubWindow::showComplete(const std::string& installDirectory, bool willLaunc
     const std::string text = "Pikmin is installed in:\n" + installDirectory
                            + "\n\nIn game, F1 opens graphics, controls and gameplay settings."
                              "\nOpen nectar-launcher from that folder to play again.";
-    m.message("Installation complete", text, willLaunch ? "Play now" : "OK", "", false);
+    const int answer = m.message("Installation complete", text, willLaunch ? "Play now" : "OK", willLaunch ? "Back" : "", false);
     m.quitRequested = false;
+    if (answer != 1) return true;
+    // Back (#172): a la pantalla principal, p. ej. para instalar Pikmin 2. Desde
+    // ahí jugar lanza el juego por su cuenta; si vuelve, es que pidió salir.
+    if (m.homeLoop) m.homeLoop();
+    else if (runHome().action == HubAction::Play) return true;
+    return false;
 }
 
 } // namespace launcher

@@ -3,6 +3,10 @@
 #include "wipe.h"
 #include "nans.h"
 
+#ifdef PIKI_PC_PORT
+extern bool gPcMovieHoldFrame; // section.cpp
+#endif
+
 /**
  * @note Address: 0x8042BD0C
  * @note Size: 0x5C
@@ -34,6 +38,16 @@ void WipeBase::start(f32 speed)
 void WipeBase::update()
 {
 	draw();
+#ifdef PIKI_PC_PORT
+	// Cinemáticas a 60/120: el tick original ya avanzó un periodo entero
+	// (deltaTime = PC_ORIG_PERIOD); sumar también los frames intermedios
+	// acababa el fundido antes de tiempo. El de fin de cinemática (1 s) se
+	// completaba antes de que MoviePlayer parase la demo (0,9 s) y, ya
+	// inactivo, dejaba ver otra vez el último plano (#164).
+	if (gPcMovieHoldFrame) {
+		return;
+	}
+#endif
 	if (mIsActive) {
 		mTimer += sys->mDeltaTime / mSpeed;
 		if (mTimer >= 1.0f) {

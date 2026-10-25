@@ -875,7 +875,8 @@ bool installPikmin2Assets(const fs::path& image, const fs::path& gameDirectory, 
         return false;
     }
     if (!fs::is_directory(partialAssets / "user") || !fs::is_regular_file(partialAssets / "AudioRes/Conductor.arc")
-        || !fs::is_directory(partialAssets / "AudioRes/Seqs")) {
+        || !fs::is_directory(partialAssets / "AudioRes/Seqs")
+        || !fs::is_regular_file(partialAssets / "message/font_foreign.szs")) { // #169
         fs::remove_all(partialAssets, ec);
         failure = "The image is incomplete or modified (missing Pikmin 2 files). Use a full, unmodified dump (not NKit or trimmed).";
         return false;
@@ -1066,6 +1067,45 @@ void rememberInstallDirectory(const fs::path& directory)
     platform::createDesktopShortcut(install / kLauncherExecutable);
 }
 
+// La ruta de dolphin-tool elegida también se recuerda (junto a pikmin2_dir):
+// instalar el otro juego más tarde no vuelve a pedirla (#171).
+fs::path converterFile()
+{
+    const fs::path pikmin2File = pikmin2DirFile();
+    return pikmin2File.empty() ? fs::path() : pikmin2File.parent_path() / "dolphin_tool";
+}
+
+// Recordada (si sigue existiendo), junto al launcher / en PATH, o la que elija
+// el usuario si `ask`. La encontrada se guarda para la próxima vez.
+fs::path locateConverter(bool ask)
+{
+    std::error_code ec;
+    const fs::path file = converterFile();
+    {
+        std::ifstream in(file);
+        std::string line;
+        if (in && std::getline(in, line)) {
+            while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) line.pop_back();
+            if (!line.empty() && fs::is_regular_file(fs::u8path(line), ec)) return fs::u8path(line);
+        }
+    }
+    fs::path converter = platform::findConverter();
+    if (converter.empty() && ask) converter = platform::askForConverter();
+    if (!converter.empty() && !file.empty()) {
+        fs::create_directories(file.parent_path(), ec);
+        std::ofstream out(file, std::ios::trunc);
+        if (out) out << fs::absolute(converter, ec).u8string() << '\n';
+    }
+    return converter;
+}
+
+// Tras una conversión fallida se vuelve a preguntar, como antes de recordarla.
+void forgetConverter()
+{
+    std::error_code ec;
+    if (const fs::path file = converterFile(); !file.empty()) fs::remove(file, ec);
+}
+
 // Instalación de Pikmin 2 desde la pantalla principal: pide disco y carpeta,
 // extrae y vuelve. `gameDirectory` queda con la carpeta del juego si se elige
 // jugar.
@@ -1085,8 +1125,7 @@ UpdateOutcome runPikmin2Install(pikmin::launcher::HubWindow& hub, const fs::path
         fs::path image = rom;
         pikmin::launcher::PreparedImage prepared;
         if (pikmin::launcher::isCompressedImage(image)) {
-            if (converter.empty()) converter = platform::findConverter();
-            if (converter.empty()) converter = platform::askForConverter();
+            if (converter.empty()) converter = locateConverter(true);
             if (converter.empty()) {
                 if (retry("Compressed images need dolphin-tool from a Dolphin installation. "
                           "Choose it when prompted, or select an ISO/GCM.")) continue;
@@ -1099,6 +1138,7 @@ UpdateOutcome runPikmin2Install(pikmin::launcher::HubWindow& hub, const fs::path
                     return platform::convertImage(converter, source, output, pump, f);
                 }, error)) {
                 converter.clear();
+                forgetConverter();
                 if (retry(error)) continue;
                 return UpdateOutcome::BackHome;
             }
@@ -1589,8 +1629,7 @@ int main(int argc, char** argv)
             }
             pikmin::launcher::PreparedImage prepared;
             if (pikmin::launcher::isCompressedImage(image)) {
-                if (converter.empty()) converter = platform::findConverter();
-                if (converter.empty() && installerWindow) converter = platform::askForConverter();
+                if (converter.empty()) converter = locateConverter(installerWindow != nullptr);
                 if (converter.empty()) {
                     if (reportError("Compressed images need dolphin-tool from a Dolphin installation. "
                                     "Choose it when prompted, or select an ISO/GCM. For command-line installs, "
@@ -1607,6 +1646,7 @@ int main(int argc, char** argv)
                         return platform::convertImage(converter, source, output, pump, failure);
                     }, error)) {
                     converter.clear();
+                    forgetConverter();
                     if (reportError(error)) continue;
                     return 1;
                 }
@@ -1662,7 +1702,12 @@ int main(int argc, char** argv)
         }
         rememberInstallDirectory(dataRoot);
         if (installedAssetsNow) {
-            if (installerWindow) installerWindow->showComplete(dataRoot.string(), !extractOnly);
+            // Back en el aviso final vuelve a la pantalla principal: que su
+            // portada de Pikmin ya juegue con lo recién instalado.
+            hubState.games[0].installed = true;
+            hubState.games[0].directory = dataRoot.string();
+            hubState.games[0].executable = gameBinaryFor(dataRoot).string();
+            if (installerWindow && !installerWindow->showComplete(dataRoot.string(), !extractOnly)) return 0;
             else std::cout << "Installed in: " << dataRoot << '\n'
                            << (extractOnly ? "" : "The game will start now.\n");
         }

@@ -24,7 +24,8 @@ public:
     virtual void showError(const std::string& message) = 0;
     // true = volver a elegir rutas e intentarlo de nuevo.
     virtual bool offerRetry(const std::string& message) = 0;
-    virtual void showComplete(const std::string& installDirectory, bool willLaunch) = 0;
+    // false = el jugador volvió a la pantalla principal en vez de jugar ya.
+    virtual bool showComplete(const std::string& installDirectory, bool willLaunch) = 0;
 };
 
 class InstallerWindow : public InstallerUi {
@@ -42,7 +43,7 @@ public:
                         const std::string& phase = "Extracting") override;
     void showError(const std::string& message) override;
     bool offerRetry(const std::string& message) override;
-    void showComplete(const std::string& installDirectory, bool willLaunch) override;
+    bool showComplete(const std::string& installDirectory, bool willLaunch) override;
 
 private:
     struct Impl;

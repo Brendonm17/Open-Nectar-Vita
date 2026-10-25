@@ -83,7 +83,8 @@ void runTexturePackDownload(HubWindow& hub, int game, const fs::path& gameDirect
                                        + " is the sharpest and needs a strong graphics card; "
                                        + packs[1].label + " is lighter.",
                                    std::string(packs[0].label) + " (" + sizeText(packs[0].bytes) + ")",
-                                   std::string(packs[1].label) + " (" + sizeText(packs[1].bytes) + ")");
+                                   std::string(packs[1].label) + " (" + sizeText(packs[1].bytes) + ")", false,
+                                   "Cancel");
         if (choice < 0) return;
         pick = std::size_t(choice);
     }

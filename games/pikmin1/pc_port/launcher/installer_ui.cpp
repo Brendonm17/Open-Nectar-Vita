@@ -351,7 +351,7 @@ void InstallerWindow::showError(const std::string& message)
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Open Nectar Installer", message.c_str(), mImpl->window);
 }
 
-void InstallerWindow::showComplete(const std::string& installDirectory, bool willLaunch)
+bool InstallerWindow::showComplete(const std::string& installDirectory, bool willLaunch)
 {
     mImpl->progress = 100;
     mImpl->status = "Installation complete";
@@ -361,6 +361,7 @@ void InstallerWindow::showComplete(const std::string& installDirectory, bool wil
                "\nRun nectar-launcher from this folder to play again.";
     if (willLaunch) message += "\n\nThe game will start now.";
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Installation complete", message.c_str(), mImpl->window);
+    return true;
 }
 
 } // namespace launcher

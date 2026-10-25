@@ -216,7 +216,8 @@ bool installFromFd(int fd, HubGame game, const fs::path& dir, HubWindow& hub, Ga
     const bool contentOk = game == HubGame::Pikmin1 ? fs::is_regular_file(partialAssets / "dataDir/parms/gamePrms.bin")
                                                     : fs::is_directory(partialAssets / "user")
                                                           && fs::is_regular_file(partialAssets / "AudioRes/Conductor.arc")
-                                                          && fs::is_directory(partialAssets / "AudioRes/Seqs");
+                                                          && fs::is_directory(partialAssets / "AudioRes/Seqs")
+                                                          && fs::is_regular_file(partialAssets / "message/font_foreign.szs"); // #169
     if (!contentOk) {
         fs::remove_all(partialAssets, ec);
         failure = "The image is incomplete or modified (missing game files). Use a full, unmodified ISO dump (not NKit or trimmed).";
