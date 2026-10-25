@@ -51,6 +51,9 @@ RenderModeInfo gPcRenderInfoStore = {};
 #include <filesystem>
 #include <algorithm>
 #if defined(_WIN32)
+// Dolphin/db.h define IsDebuggerPresent como dirección de GameCube: chocaría
+// con la función de Windows (debugapi.h).
+#undef IsDebuggerPresent
 #include <windows.h>
 #endif
 #include <pthread.h>
