@@ -240,7 +240,6 @@ void App::setTarget(int target)
 }
 
 std::string App::customDir() const { return (fs::path(cfg_.gameDir()) / "Load" / "Models" / "Custom").string(); }
-std::string App::packPath() const { return (fs::path(customDir()) / "olimar.nhm").string(); }
 std::string App::projectPath() const { return (fs::path(customDir()) / "olimar_project.json").string(); }
 
 void App::say(const std::string& text, bool error)
@@ -682,7 +681,7 @@ void App::drawPanel(float width, float height)
 	// ¿A quién reemplaza? Olimar (o un personaje propio) o los Pikmin.
 	{
 		ImGui::TextUnformatted(L("¿Qué quieres cambiar?", "What do you want to replace?"));
-		const char* targets[] = { L("Olimar / un capitán", "Olimar / a captain"), L("Pikmin rojos", "Red Pikmin"), L("Pikmin amarillos", "Yellow Pikmin"),
+		const char* targets[] = { L("Un capitán (con su propio hueco)", "A captain (its own slot)"), L("Pikmin rojos", "Red Pikmin"), L("Pikmin amarillos", "Yellow Pikmin"),
 			                      L("Pikmin azules", "Blue Pikmin"), L("Los tres Pikmin (se tiñe)", "All three Pikmin (tinted)") };
 		int t = target_;
 		ImGui::SetNextItemWidth(-1);
@@ -859,7 +858,7 @@ void App::drawPanel(float width, float height)
 	ImGui::Checkbox(L("Ver esqueleto", "Show skeleton"), &showSkeleton_);
 
 	// 5 · Guardar.
-	stepHeader(5, L("Guardar en el juego", "Save to the game"));
+	stepHeader(5, L("Comprobar", "Check"));
 	if (exportDirty_) hint(L("Comprobando…", "Checking…"));
 	for (const Check& c : export_.checks) {
 		ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -889,19 +888,6 @@ void App::drawPanel(float width, float height)
 			ImGui::PopID();
 		}
 		ImGui::TreePop();
-	}
-	// Olimar: se reemplaza a él mismo. Los Pikmin se guardan como pack (abajo).
-	if (!isPikmin()) {
-		ImGui::BeginDisabled(exportDirty_ || !export_.ok());
-		if (bigButton(L("Guardar mi Olimar", "Save my Olimar"), -1, 46)) save();
-		if (bigButton(L("Guardar y jugar", "Save and play"))) {
-			if (save()) playInGame();
-		}
-		ImGui::EndDisabled();
-		std::error_code ec;
-		if (fs::exists(fs::u8path(packPath()), ec)) {
-			if (ImGui::Button(L("Quitar mi modelo (volver al Olimar normal)", "Remove my model (back to normal Olimar)"), ImVec2(-1, 0))) removeCustom();
-		}
 	}
 	drawCharacters();
 	if (!status_.empty()) {
@@ -1288,10 +1274,12 @@ void App::drawCreations()
 {
 	if (!gameReady_) return;
 	std::error_code ec;
-	const bool olimar = fs::exists(fs::u8path(packPath()), ec);
+	// Olimar ya no se reemplaza; uno hecho antes se abre para guardarlo como
+	// personaje con su propio hueco.
+	const bool olimar = fs::exists(fs::path(customDir()) / "olimar.nhm", ec);
 	if (!ImGui::TreeNode(L("Abrir uno ya creado", "Open one you made"))) return;
 	hint(L("Para retocarlo: se abre con su modelo original y sus ajustes.", "To touch it up: it opens with its original model and settings."));
-	if (olimar && ImGui::Button(L("Mi Olimar", "My Olimar"), ImVec2(-1, 0))) {
+	if (olimar && ImGui::Button(L("Olimar propio antiguo (guárdalo como personaje)", "Old custom Olimar (save it as a character)"), ImVec2(-1, 0))) {
 		nectar::CharacterInfo info;
 		info.name = L("Mi Olimar", "My Olimar");
 		editCreation(customDir(), info, true);
@@ -1324,73 +1312,6 @@ bool App::loadProject(std::string& source, int& target)
 	}
 	std::error_code ec;
 	return !source.empty() && fs::exists(fs::u8path(source), ec);
-}
-
-bool App::save()
-{
-	if (exportDirty_) {
-		export_      = buildParts(model_, rig_, olimar_, fit_, exportOpt_);
-		exportDirty_ = false;
-	}
-	std::string error;
-	if (!writeNhm(packPath(), export_, rig_, olimar_, error)) {
-		say(std::string(L("No se pudo guardar: ", "Could not save: ")) + error, true);
-		return false;
-	}
-	saveProject();
-	// Su proyecto, para volver a editarlo (Abrir uno ya creado > Mi Olimar).
-	{
-		std::vector<std::pair<std::string, std::vector<std::uint8_t>>> project;
-		projectFiles(project);
-		const fs::path root = fs::u8path(customDir()) / "project";
-		std::error_code rm;
-		fs::remove_all(root, rm);
-		for (const auto& [rel, data] : project) {
-			const fs::path p = root / fs::u8path(rel);
-			fs::create_directories(p.parent_path(), rm);
-			std::ofstream o(p, std::ios::binary);
-			o.write(reinterpret_cast<const char*>(data.data()), std::streamsize(data.size()));
-		}
-	}
-	// Si estaba quitado, el apagado ya no vale.
-	std::error_code ec;
-	fs::remove(fs::u8path(packPath() + ".off"), ec);
-	char size[64];
-	std::snprintf(size, sizeof(size), " (%.1f MB)", double(export_.bytes) / (1024.0 * 1024.0));
-	say(std::string(L("¡Guardado! El juego usará tu Olimar la próxima vez que lo abras.", "Saved! The game will use your Olimar next time it starts.")) + size);
-	return true;
-}
-
-void App::playInGame()
-{
-	std::string exe = cfg_.gameExe;
-	std::error_code ec;
-	if (exe.empty() || !fs::exists(exe, ec)) exe = nm::guessGameExe();
-	if (exe.empty()) {
-		const fs::path guess = fs::path(cfg_.gameDir()) /
-#ifdef _WIN32
-		                       "nectar.exe";
-#else
-		                       "nectar";
-#endif
-		if (fs::exists(guess, ec)) exe = guess.string();
-	}
-	if (exe.empty()) {
-		say(L("Guardado. No encuentro el juego para abrirlo: ábrelo desde el launcher.", "Saved. Can't find the game to start it: open it from the launcher."), true);
-		return;
-	}
-	std::string error;
-	if (!nm::launchGame(exe, cfg_.gameDir(), {}, error)) say(error, true);
-	else say(L("Guardado y abriendo el juego…", "Saved, starting the game…"));
-}
-
-void App::removeCustom()
-{
-	// No se borra: se aparta, y "Guardar" lo vuelve a poner.
-	std::error_code ec;
-	fs::rename(fs::u8path(packPath()), fs::u8path(packPath() + ".off"), ec);
-	if (ec) say(ec.message(), true);
-	else say(L("Quitado: el juego vuelve a usar el Olimar normal.", "Removed: the game uses the normal Olimar again."));
 }
 
 // ── Personajes propios ──────────────────────────────────────────────────
@@ -1569,8 +1490,35 @@ void App::drawCharacters()
 		                         sizeof(charName_));
 		ImGui::SetNextItemWidth(-1);
 		ImGui::InputTextWithHint("##charauthor", L("Autor (opcional)", "Author (optional)"), charAuthor_, sizeof(charAuthor_));
+		// Dónde se guarda: un hueco nuevo o en lugar de uno propio ya instalado.
+		{
+			const char* newLabel = isPikmin() ? L("Modelo nuevo", "New model") : L("Hueco nuevo", "New slot");
+			std::string current  = newLabel;
+			for (const nectar::CharacterInfo& c : installed_)
+				if (c.id == editingId_) current = std::string(L("Reemplazar: ", "Replace: ")) + c.name;
+			ImGui::SetNextItemWidth(-1);
+			if (ImGui::BeginCombo("##slot", current.c_str())) {
+				if (ImGui::Selectable(newLabel, editingId_.empty())) {
+					editingId_.clear();
+					editingName_.clear();
+				}
+				for (const nectar::CharacterInfo& c : installed_) {
+					ImGui::PushID(c.id.c_str());
+					const std::string label = std::string(L("Reemplazar: ", "Replace: ")) + c.name + (c.isPikmin() ? std::string("  [") + targetLabel(c.target) + "]" : "");
+					if (ImGui::Selectable(label.c_str(), c.id == editingId_)) {
+						editingId_   = c.id;
+						editingName_ = c.name;
+					}
+					ImGui::PopID();
+				}
+				ImGui::EndCombo();
+			}
+		}
+		bool replacing = false;
+		for (const nectar::CharacterInfo& c : installed_) replacing = replacing || c.id == editingId_;
 		ImGui::BeginDisabled(exportDirty_ || !export_.ok() || working_);
-		if (bigButton(isPikmin() ? L("Instalar y usar ya", "Install and use now") : L("Instalar como personaje en el juego", "Install as a character in the game")))
+		if (bigButton(replacing ? (isPikmin() ? L("Reemplazar y usar ya", "Replace and use now") : L("Reemplazar ese personaje", "Replace that character"))
+		                        : (isPikmin() ? L("Instalar y usar ya", "Install and use now") : L("Instalar como personaje nuevo", "Install as a new character"))))
 			installAsCharacter();
 		if (ImGui::Button(L("Exportar archivo .nectarchar…", "Export .nectarchar file…"), ImVec2(-1, 0))) exportCharacter();
 		ImGui::EndDisabled();

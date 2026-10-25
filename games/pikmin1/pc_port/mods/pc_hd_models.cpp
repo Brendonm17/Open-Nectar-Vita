@@ -150,9 +150,6 @@ const Entry kEntries[PC_HD_MODEL_COUNT] = {
 	{ "Pikmin2", "piki_white.nhm", BIND_PACK, GX_CULL_FRONT, kNaviRig, 12 },
 	{ "Pikmin2", "piki_purple.nhm", BIND_PACK, GX_CULL_FRONT, kNaviRig, 12 },
 	{ "Pikmin2", "bulbmin.nhm", BIND_PACK, GX_CULL_FRONT, kNaviRig, 12 },
-	// Olimar propio del creador de modelos (nectar-modelmaker): va por delante
-	// del pack HD y del original cuando existe.
-	{ "Custom", "olimar.nhm", BIND_PACK, GX_CULL_FRONT, kNaviRig, 12 },
 };
 
 struct Model {
@@ -299,9 +296,7 @@ int settingsRow(PcHdModelId id)
 	case PC_HD_MODEL_PRESIDENT:
 	case PC_HD_MODEL_PIKI_WHITE:
 	case PC_HD_MODEL_PIKI_PURPLE:
-	case PC_HD_MODEL_BULBMIN:
-	// El Olimar propio se quita desde el creador de modelos.
-	case PC_HD_MODEL_OLIMAR_CUSTOM: return -1;
+	case PC_HD_MODEL_BULBMIN: return -1;
 	default: return 3;
 	}
 }

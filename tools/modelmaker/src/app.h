@@ -129,7 +129,6 @@ private:
 	void dragMarker(const ImVec2& mouse);
 
 	std::string customDir() const;
-	std::string packPath() const;
 	std::string projectPath() const;
 	void saveProject() const;
 	nlohmann::json projectJson(const std::string& source) const;
@@ -140,9 +139,6 @@ private:
 	void openPackForEdit(const std::string& path);
 	void drawCreations();
 	bool loadProject(std::string& source, int& target);
-	bool save();
-	void playInGame();
-	void removeCustom();
 
 	bool characterFiles(nectar::CharacterFiles& files, std::string& error);
 	bool renderPortrait(std::vector<std::uint8_t>& png);

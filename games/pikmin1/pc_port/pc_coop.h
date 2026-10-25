@@ -34,9 +34,10 @@ enum PcCaptain {
 	PC_CAPTAIN_PUFFMIN = 9,
 	// Tercera fila: personajes propios instalados en Load/Characters (creador
 	// de modelos). Van sobre el esqueleto y la jugabilidad de Olimar; cada
-	// hueco es una carpeta, por nombre (pc_characters.cpp).
+	// hueco es una carpeta, por nombre (pc_characters.cpp). Se ven de cinco en
+	// cinco: Q/E, LB/RB o las flechas táctiles cambian de página.
 	PC_CAPTAIN_CUSTOM_FIRST = 10,
-	PC_CAPTAIN_CUSTOM_MAX   = 15,
+	PC_CAPTAIN_CUSTOM_MAX   = 45, // 9 páginas de 5 en el selector
 	PC_CAPTAIN_COUNT        = PC_CAPTAIN_CUSTOM_FIRST + PC_CAPTAIN_CUSTOM_MAX
 };
 /// Primer capitán de la segunda fila (los de Pikmin 2).

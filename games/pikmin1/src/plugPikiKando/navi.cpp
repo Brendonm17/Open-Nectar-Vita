@@ -4177,8 +4177,7 @@ void Navi::demoDraw(Graphics& gfx, immut Matrix4f* mtx)
 	const bool tinted    = pcHasTint();
 	const GXColor hdTint = pcTint();
 	if (tinted) pc_gfx_set_mat_color_tint(hdTint);
-	// Louie: primero el pack HD de Pikmin 3, si no el de Pikmin 2; Olimar: el
-	// propio del creador de modelos, el HD o el original.
+	// Louie: primero el pack HD de Pikmin 3, si no el de Pikmin 2; Olimar HD o el original.
 	// Mod "First Person": la cámara está dentro de la cabeza del capitán, así
 	// que dibujarlo llena la pantalla con su nuca. Solo se oculta el que
 	// controla el jugador; en cooperativo el otro se sigue viendo. Se salta
@@ -4197,8 +4196,7 @@ void Navi::demoDraw(Graphics& gfx, immut Matrix4f* mtx)
 		// Personaje propio (Load/Characters); si falla su pack, Olimar normal.
 		drawn = pc_hd_model_draw_custom(gfx, mNaviShapeObject->mShape, pc_captain_custom_model(pcCaptain()), hdTint);
 	} else {
-		drawn = pc_hd_model_draw_skinned(gfx, mNaviShapeObject->mShape, PC_HD_MODEL_OLIMAR_CUSTOM, hdTint)
-		     || pc_hd_model_draw_skinned(gfx, mNaviShapeObject->mShape, PC_HD_MODEL_OLIMAR, hdTint);
+		drawn = pc_hd_model_draw_skinned(gfx, mNaviShapeObject->mShape, PC_HD_MODEL_OLIMAR, hdTint);
 	}
 	if (!drawn)
 #endif

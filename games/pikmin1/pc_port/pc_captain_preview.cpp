@@ -241,8 +241,6 @@ void pc_captain_preview_draw(int captain, int x, int y, int w, int h, int virtW,
 	if (captain == PC_CAPTAIN_LOUIE) {
 		drawn = pc_hd_model_draw_skinned(gfx, m->shape, PC_HD_MODEL_LOUIE_HD, white)
 		     || pc_hd_model_draw_skinned(gfx, m->shape, PC_HD_MODEL_LOUIE, white);
-	} else if (captain == PC_CAPTAIN_OLIMAR) {
-		drawn = pc_hd_model_draw_skinned(gfx, m->shape, PC_HD_MODEL_OLIMAR_CUSTOM, white);
 	} else if (pc_captain_is_custom(captain)) {
 		drawn = pc_hd_model_draw_custom(gfx, m->shape, pc_captain_custom_model(captain), white);
 	} else if (p2Model >= 0) {

@@ -5412,9 +5412,9 @@ constexpr int kCaptainBoxW = 104, kCaptainBoxGap = 9;
 // siempre está; 2 los personajes propios. Con las tres a la vista las
 // tarjetas son algo más bajas para caber en 480 de alto.
 constexpr int kCaptainBoxTall = 120, kCaptainBoxShort = 104;
-// Tarjetas a la vista por fila; la de los propios se desplaza si hay más.
+// Tarjetas a la vista por fila; los propios van por páginas de cinco.
 constexpr int kCaptainRowSlots = 5;
-int sCaptainCustomScroll = 0;
+int sCaptainCustomPage = 0;
 constexpr int captainRowLeft(int count) { return (620 - (count * kCaptainBoxW + (count - 1) * kCaptainBoxGap)) / 2; }
 int captainRowOf(int captain) {
     if (captain < PC_CAPTAIN_FIRST_PIKMIN2) return 0;
@@ -5463,21 +5463,47 @@ bool captainSecondRow() { return captainRowsShown() > 1; }
 int captainExtraH() {
     return (captainRowsShown() - 1) * (captainBoxH() + kCaptainBoxGap) - (kCaptainBoxTall - captainBoxH());
 }
-// Columna a la vista dentro de su fila (la de los propios, desplazada).
+int captainCustomPages() {
+    const int n = captainRowCount(2);
+    return n > 0 ? (n + kCaptainRowSlots - 1) / kCaptainRowSlots : 1;
+}
+// Columna a la vista dentro de su fila (la de los propios, en su página).
 int captainViewCol(int captain) {
     const int col = captainColOf(captain);
-    return captainRowOf(captain) == 2 ? col - sCaptainCustomScroll : col;
+    return captainRowOf(captain) == 2 ? col - sCaptainCustomPage * kCaptainRowSlots : col;
 }
-// La fila de los propios se mueve para que se vea el elegido.
+// La página de los propios es la del elegido (si está en esa fila).
 void captainKeepVisible(int captain) {
-    const int count = captainRowCount(2);
-    if (captainRowOf(captain) == 2) {
-        const int col = captainColOf(captain);
-        if (col < sCaptainCustomScroll) sCaptainCustomScroll = col;
-        if (col >= sCaptainCustomScroll + kCaptainRowSlots) sCaptainCustomScroll = col - kCaptainRowSlots + 1;
+    if (captainRowOf(captain) == 2) sCaptainCustomPage = captainColOf(captain) / kCaptainRowSlots;
+    const int pages = captainCustomPages();
+    if (sCaptainCustomPage >= pages) sCaptainCustomPage = pages - 1;
+    if (sCaptainCustomPage < 0) sCaptainCustomPage = 0;
+}
+// Página siguiente/anterior (da la vuelta). Con un propio elegido, pasa al de
+// la misma columna en la página nueva (o al último si es más corta).
+void captainTurnPage(int* captain, int dir) {
+    const int pages = captainCustomPages();
+    if (pages <= 1) return;
+    const int col       = captainRowOf(*captain) == 2 ? captainViewCol(*captain) : -1;
+    sCaptainCustomPage  = (sCaptainCustomPage + dir + pages) % pages;
+    if (col >= 0) {
+        const int count = captainRowCount(2);
+        const int at    = std::min(sCaptainCustomPage * kCaptainRowSlots + col, count - 1);
+        if (const int c = captainRowAt(2, at); c >= 0) *captain = c;
     }
-    if (sCaptainCustomScroll > count - kCaptainRowSlots) sCaptainCustomScroll = count - kCaptainRowSlots;
-    if (sCaptainCustomScroll < 0) sCaptainCustomScroll = 0;
+}
+// Flechas de página a los lados de la fila de los propios (táctil y dibujo).
+bool captainPageArrows(int panelX, int panelY, int* leftX, int* rightX, int* y, int* h) {
+    if (captainCustomPages() <= 1 || !captainRowShown(2)) return false;
+    const int shown = std::min(captainRowCount(2) - sCaptainCustomPage * kCaptainRowSlots, kCaptainRowSlots);
+    const int left  = panelX + captainRowLeft(std::min(captainRowCount(2), kCaptainRowSlots));
+    const int width = std::min(captainRowCount(2), kCaptainRowSlots) * (kCaptainBoxW + kCaptainBoxGap) - kCaptainBoxGap;
+    (void)shown;
+    *leftX  = left - 30;
+    *rightX = left + width + 6;
+    *y      = panelY + 84 + captainScreenRow(2) * (captainBoxH() + kCaptainBoxGap);
+    *h      = captainBoxH();
+    return true;
 }
 // Esquina de la tarjeta de un capitán dentro del panel; false si no se muestra.
 bool captainCardPos(int captain, int panelX, int panelY, int* x, int* y) {
@@ -5510,7 +5536,10 @@ const char* devAssignName(int player) {
 // coop y el de 1 jugador. Devuelve 0 nada, 1 aceptado, 2 atrás.
 int captainPickInput(int player, bool keyboardOk, SDL_GameController* ctl, int* captain, bool ignoreWindow) {
     bool left = false, right = false, up = false, down = false, accept = false, back = false;
+    bool pagePrev = false, pageNext = false; // páginas de los personajes propios
     if (keyboardOk) {
+        pagePrev = keyWentDown(SDL_SCANCODE_Q);
+        pageNext = keyWentDown(SDL_SCANCODE_E);
         left   = keyWentDown(SDL_SCANCODE_LEFT)  || keyWentDown(SDL_SCANCODE_A);
         right  = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D);
         up     = keyWentDown(SDL_SCANCODE_UP)    || keyWentDown(SDL_SCANCODE_W);
@@ -5534,6 +5563,11 @@ int captainPickInput(int player, bool keyboardOk, SDL_GameController* ctl, int* 
             const float screenW = aspect * 480.0f;
             const float x = sTouchTapX * screenW, y = sTouchTapY * 480.0f;
             const int panelX = int(screenW * 0.5f) - 310, panelY = 240 - (260 + captainExtraH()) / 2;
+            int arrowL = 0, arrowR = 0, arrowY = 0, arrowH = 0;
+            if (captainPageArrows(panelX, panelY, &arrowL, &arrowR, &arrowY, &arrowH) && y >= arrowY && y <= arrowY + arrowH) {
+                if (x >= arrowL - 8 && x <= arrowL + 32) pagePrev = true;
+                if (x >= arrowR - 8 && x <= arrowR + 32) pageNext = true;
+            }
             for (int i = 0; i < PC_CAPTAIN_COUNT; ++i) {
                 int boxX = 0, boxY = 0;
                 if (!captainCardPos(i, panelX, panelY, &boxX, &boxY) || !pc_captain_available(i)) continue;
@@ -5557,6 +5591,8 @@ int captainPickInput(int player, bool keyboardOk, SDL_GameController* ctl, int* 
         if (padEdge(hDown, 1)) down = true;
         if (padEdge(hA, 4))     accept = true;
         if (padEdge(hB, 5))     back   = true;
+        if (padEdge(SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_LEFTSHOULDER) != 0, 12)) pagePrev = true;
+        if (padEdge(SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) != 0, 13)) pageNext = true;
     }
     if (ignoreWindow) return 0;
     // Izquierda/derecha dan la vuelta dentro de la fila; arriba/abajo cambian
@@ -5574,13 +5610,17 @@ int captainPickInput(int player, bool keyboardOk, SDL_GameController* ctl, int* 
             int target = -1;
             for (int r = row + (down ? 1 : -1); r >= 0 && r <= 2 && target < 0; r += down ? 1 : -1) {
                 if (!captainRowShown(r)) continue;
-                const int col    = std::max(0, captainViewCol(*captain)) + (r == 2 ? sCaptainCustomScroll : 0);
+                const int col    = std::max(0, captainViewCol(*captain)) + (r == 2 ? sCaptainCustomPage * kCaptainRowSlots : 0);
                 const int oCount = captainRowCount(r);
                 target           = captainRowAt(r, col < oCount ? col : oCount - 1);
             }
             if (target >= 0) *captain = target;
         }
         captainKeepVisible(*captain);
+        if (pagePrev || pageNext) {
+            captainTurnPage(captain, pageNext ? 1 : -1);
+            captainKeepVisible(*captain);
+        }
     }
     if (accept && *captain == PC_CAPTAIN_LOUIE && !devAssignLouieInstalled()) {
         // Sin el modelo no se puede jugar con Louie: aviso y se queda.
@@ -5657,9 +5697,20 @@ void captainPickDraw(DGXGraphics* gfx, int panelX, int panelY, int panelW, int p
                         sel ? Colour(255, 229, 120, 255) : Colour(170, 180, 200, 255),
                         Colour(8, 12, 28, 255), captainName(i));
     }
+    // Flechas de página de los propios (también se tocan en el móvil).
+    int arrowL = 0, arrowR = 0, arrowY = 0, arrowH = 0;
+    char pageHelp[96] = "";
+    if (captainPageArrows(panelX, panelY, &arrowL, &arrowR, &arrowY, &arrowH)) {
+        const Colour gold(255, 229, 120, 255), ink(8, 12, 28, 255);
+        drawTextOutline(arrowL + 8, arrowY + arrowH / 2 - 10, "%s", gold, ink, "<");
+        drawTextOutline(arrowR + 8, arrowY + arrowH / 2 - 10, "%s", gold, ink, ">");
+        snprintf(pageHelp, sizeof(pageHelp), "Q/E or LB/RB: page %d/%d    A: confirm    B: back", sCaptainCustomPage + 1,
+                 captainCustomPages());
+    }
     const bool louieMissing = !devAssignLouieInstalled();
     const bool noticing = louieMissing && SDL_GetTicks() < sDevAssignLouieNoticeUntil;
     const char* help = noticing ? "Louie model not installed: Advanced Options > HD Models (Louie zip)."
+                     : pageHelp[0] ? pageHelp
                      : (louieMissing ? "Louie: model not installed (Advanced Options > HD Models)." : helpDefault);
     drawHelpLine(panelX + panelW / 2, panelY + 220 + captainExtraH(), help, noticing ? Colour(255, 160, 120, 255) : Colour(150, 165, 195, 255));
 }
@@ -5691,7 +5742,7 @@ void pcCaptainPromptInput() {
 
 void pc_captain_prompt_open(void) {
     pc_captain_custom_refresh(); // personajes instalados con el juego abierto
-    sCaptainCustomScroll = 0;
+    sCaptainCustomPage = 0;
     sCaptainPromptOpen   = true;
     sCaptainPromptChoice = PC_CAPTAIN_OLIMAR;
     sCaptainPromptResult = PC_DEVASSIGN_PENDING;
@@ -5740,7 +5791,7 @@ void pc_captain_prompt_draw(void) {
 
 void pc_devassign_prompt_open(void) {
     pc_captain_custom_refresh();
-    sCaptainCustomScroll = 0;
+    sCaptainCustomPage = 0;
     sDevAssignOpen   = true;
     sDevAssignChoice = 0;
     sDevAssignResult = PC_DEVASSIGN_PENDING;

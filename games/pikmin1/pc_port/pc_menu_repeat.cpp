@@ -6,7 +6,7 @@
 #include "pc_menu_repeat.h"
 
 namespace {
-constexpr int kSlots = 12; // 0-5 mando, 6-9 teclado (menú de cristal), 10-11 pestañas F1
+constexpr int kSlots = 14; // 0-5 mando, 6-9 teclado (menú de cristal), 10-11 pestañas F1, 12-13 páginas del selector de capitán
 bool sHeld[kSlots]                 = {};
 std::uint32_t sNextRepeat[kSlots]  = {};
 } // namespace
