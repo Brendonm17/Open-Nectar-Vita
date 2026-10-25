@@ -94,12 +94,18 @@ PcMenuClickResult pc_menu_click_resolve(int screen, float x, float y, const PcMe
 	if (!pc_menu_click_is_menu_screen(screen)) {
 		return result;
 	}
+	if (screen == PC_MENU_CLICK_TITLE) {
+		// Press Start: any left click in the window proceeds, not only a hit on the prompt.
+		result.action = PC_MENU_CLICK_PRESS_START;
+		result.index  = -1;
+		return result;
+	}
 	const int hit = pc_menu_click_hit(x, y, rects, active, count, margin);
 	if (hit < 0) {
 		return result;
 	}
-	result.index = hit;
-	result.action = (screen == PC_MENU_CLICK_TITLE) ? PC_MENU_CLICK_PRESS_START : PC_MENU_CLICK_ACTIVATE;
+	result.index  = hit;
+	result.action = PC_MENU_CLICK_ACTIVATE;
 	return result;
 }
 

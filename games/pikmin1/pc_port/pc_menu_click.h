@@ -52,8 +52,8 @@ int pc_menu_click_hit(float x, float y, const PcMenuClickRect* rects, const int*
 PcMenuClickResult pc_menu_click_hover(int screen, float x, float y, const PcMenuClickRect* rects, const int* active,
                                       int count, float margin);
 
-// Title: a click on a button presses Start. Main menu: a click activates that item.
-// Empty space does not activate. Any other screen ignores the point.
+// Title: any click presses Start (the whole window). Main menu: a click activates
+// that item; empty space does not. Any other screen ignores the point.
 PcMenuClickResult pc_menu_click_resolve(int screen, float x, float y, const PcMenuClickRect* rects, const int* active,
                                         int count, float margin);
 

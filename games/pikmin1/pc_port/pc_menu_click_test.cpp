@@ -51,25 +51,17 @@ int main()
 	check(pc_menu_click_is_button_rect(kTitleButtons[0], kRoot), "small pane is a button");
 	check(!pc_menu_click_is_button_rect(empty, kRoot), "empty pane is not a button");
 
-	// Title screen: either button presses Start. The gap between them does not.
+	// Title screen: any click in the window presses Start (Classic and Mouse Cursor).
 	const int titleActive[] = { 1, 1 };
 	PcMenuClickResult titleA
 	    = pc_menu_click_resolve(PC_MENU_CLICK_TITLE, 300.0f, 380.0f, kTitleButtons, titleActive, 2, kPcMenuClickMargin);
-	check(titleA.action == PC_MENU_CLICK_PRESS_START && titleA.index == 0, "title button 0 presses Start");
+	check(titleA.action == PC_MENU_CLICK_PRESS_START, "title button 0 presses Start");
 	PcMenuClickResult titleB
 	    = pc_menu_click_resolve(PC_MENU_CLICK_TITLE, 300.0f, 420.0f, kTitleButtons, titleActive, 2, kPcMenuClickMargin);
-	check(titleB.action == PC_MENU_CLICK_PRESS_START && titleB.index == 1, "title button 1 presses Start");
+	check(titleB.action == PC_MENU_CLICK_PRESS_START, "title button 1 presses Start");
 	PcMenuClickResult titleMiss
 	    = pc_menu_click_resolve(PC_MENU_CLICK_TITLE, 10.0f, 10.0f, kTitleButtons, titleActive, 2, kPcMenuClickMargin);
-	check(titleMiss.action == PC_MENU_CLICK_IGNORE && titleMiss.index == -1, "title background does not press Start");
-
-	// The 8px margin still counts. One pixel past it does not.
-	PcMenuClickResult marginHit
-	    = pc_menu_click_resolve(PC_MENU_CLICK_TITLE, 212.0f, 380.0f, kTitleButtons, titleActive, 2, kPcMenuClickMargin);
-	check(marginHit.action == PC_MENU_CLICK_PRESS_START, "click within the margin hits the title button");
-	PcMenuClickResult marginMiss
-	    = pc_menu_click_resolve(PC_MENU_CLICK_TITLE, 211.0f, 380.0f, kTitleButtons, titleActive, 2, kPcMenuClickMargin);
-	check(marginMiss.action == PC_MENU_CLICK_IGNORE, "click past the margin misses the title button");
+	check(titleMiss.action == PC_MENU_CLICK_PRESS_START, "title background also presses Start");
 
 	// Main menu: each active row activates itself. The locked row does not.
 	PcMenuClickResult main0
@@ -153,7 +145,7 @@ int main()
 	check(pc_menu_click_take(&nx, &ny) && nx == 0.5f, "the click is still pending after a bad menu size");
 
 	// Moving the pointer across buttons changes the highlight and does not activate.
-	// A later click on the highlighted button activates it. Empty space does not.
+	// A later click anywhere on Press Start still proceeds. Main menu empty space does not.
 	const int titleActiveFollow[] = { 1, 1 };
 	PcMenuClickResult titleHover0
 	    = pc_menu_click_hover(PC_MENU_CLICK_TITLE, 300.0f, 380.0f, kTitleButtons, titleActiveFollow, 2, kPcMenuClickMargin);
@@ -171,11 +163,10 @@ int main()
 	      "title pointer on empty space highlights no button");
 	PcMenuClickResult titleClick1
 	    = pc_menu_click_resolve(PC_MENU_CLICK_TITLE, 300.0f, 420.0f, kTitleButtons, titleActiveFollow, 2, kPcMenuClickMargin);
-	check(titleClick1.action == PC_MENU_CLICK_PRESS_START && titleClick1.index == 1,
-	      "a click activates the highlighted title button");
+	check(titleClick1.action == PC_MENU_CLICK_PRESS_START, "a title click over a button presses Start");
 	PcMenuClickResult titleClickGap
 	    = pc_menu_click_resolve(PC_MENU_CLICK_TITLE, 10.0f, 10.0f, kTitleButtons, titleActiveFollow, 2, kPcMenuClickMargin);
-	check(titleClickGap.action == PC_MENU_CLICK_IGNORE, "a title click on empty space does not activate");
+	check(titleClickGap.action == PC_MENU_CLICK_PRESS_START, "a title click on empty space presses Start");
 
 	int mainHighlight = -1;
 	PcMenuClickResult mainHover0

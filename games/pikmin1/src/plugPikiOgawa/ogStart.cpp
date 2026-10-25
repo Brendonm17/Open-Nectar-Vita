@@ -96,27 +96,12 @@ void pcBrightenTitleButton(P2DPane* pane)
 
 bool zen::ogScrStartMgr::pcPointerPressed()
 {
-	if (mState != START_Oscillate || !mRootPane) {
-		return false;
-	}
-	const PUTRect& rootBounds = mRootPane->getGlobalBounds();
-	const PcMenuClickRect root = { rootBounds.mMinX, rootBounds.mMinY, rootBounds.mMaxX, rootBounds.mMaxY };
-	constexpr int kMaxButtons = 16;
-	PcMenuClickRect rects[kMaxButtons];
-	int active[kMaxButtons];
-	int count = 0;
-	pcCollectTitleButtons(mRootPane, root, rects, active, nullptr, &count, kMaxButtons, true);
-	if (count == 0) {
+	if (mState != START_Oscillate) {
 		return false;
 	}
 	float x = 0.0f;
 	float y = 0.0f;
-	if (!pc_menu_click_take_graph(pc_gfx_menu_virt_width(), 480, &x, &y)) {
-		return false;
-	}
-	const PcMenuClickResult hit
-	    = pc_menu_click_resolve(PC_MENU_CLICK_TITLE, x, y, rects, active, count, kPcMenuClickMargin);
-	return hit.action == PC_MENU_CLICK_PRESS_START;
+	return pc_menu_click_take_graph(pc_gfx_menu_virt_width(), 480, &x, &y);
 }
 #endif
 
