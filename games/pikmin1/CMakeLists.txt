@@ -622,7 +622,8 @@ if (WIN32)
     configure_file(packaging/windows/nectar_version.h.in
                    "${CMAKE_BINARY_DIR}/generated/nectar_version.h" @ONLY)
     set_source_files_properties(packaging/windows/nectar.rc PROPERTIES
-        INCLUDE_DIRECTORIES "${CMAKE_BINARY_DIR}/generated")
+        INCLUDE_DIRECTORIES "${CMAKE_BINARY_DIR}/generated"
+        OBJECT_DEPENDS "${CMAKE_BINARY_DIR}/generated/nectar_version.h")
 endif()
 target_compile_options(${NECTAR_GAME} PRIVATE ${NATIVE_COMPILE_OPTIONS})
 target_link_libraries(${NECTAR_GAME} PRIVATE ${NECTAR_LEGACY})
