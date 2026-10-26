@@ -975,6 +975,8 @@ if(ANDROID AND NOT TARGET nectar_launcher)
     add_library(nectar_launcher SHARED
         pc_port/launcher/launcher_android_main.cpp
         pc_port/launcher/launcher_gui.cpp
+        pc_port/launcher/button_style.cpp
+        pc_port/launcher/button_layout.cpp
         pc_port/launcher/crash_report.cpp
         pc_port/launcher/bti_decode.cpp
         pc_port/launcher/settings_model.cpp
@@ -1046,6 +1048,8 @@ if(PIKMIN_BUILD_LAUNCHER)
         pc_port/launcher/launcher_gui.cpp
         pc_port/launcher/gci_save_import.cpp
         pc_port/dolphin_stubs/pc_card_save_root.cpp
+        pc_port/launcher/button_style.cpp
+        pc_port/launcher/button_layout.cpp
         pc_port/launcher/crash_report.cpp
         pc_port/launcher/bti_decode.cpp
         pc_port/launcher/settings_model.cpp
@@ -1170,6 +1174,25 @@ if(PIKMIN_BUILD_TESTS AND PIKMIN_BUILD_LAUNCHER)
     target_link_libraries(nectar_paths_test PRIVATE nectar_paths)
     target_compile_options(nectar_paths_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
     add_test(NAME nectar_paths_test COMMAND nectar_paths_test)
+
+    add_executable(button_style_test
+        pc_port/launcher/button_style_test.cpp
+        pc_port/launcher/button_style.cpp)
+    target_compile_options(button_style_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+    add_test(NAME button_style_test COMMAND button_style_test)
+
+    # Margen y anchos estándar de los botones: mide los textos reales con
+    # Fredoka (atlas en CPU, sin ventana) a 1x y 2x.
+    add_executable(button_layout_test
+        pc_port/launcher/button_layout_test.cpp
+        pc_port/launcher/button_layout.cpp
+        "${LAUNCHER_EMBED_DIR}/font_fredoka.h")
+    # Como el launcher: sin las cabeceras del juego (traen su propio float.h).
+    set_property(TARGET button_layout_test PROPERTY INCLUDE_DIRECTORIES "")
+    target_include_directories(button_layout_test PRIVATE ${PC_PORT_DIR} "${LAUNCHER_EMBED_DIR}")
+    target_link_libraries(button_layout_test PRIVATE launcher_imgui)
+    target_compile_options(button_layout_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+    add_test(NAME button_layout_test COMMAND button_layout_test)
 
     if(PIKMIN_NETPLAY_BUILD)
         # Host Co-op / Join Co-op flow with a fake game.
