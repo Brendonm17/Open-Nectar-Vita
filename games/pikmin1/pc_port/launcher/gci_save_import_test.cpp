@@ -16,18 +16,18 @@ using pikmin::launcher::kGciHeaderSize;
 
 namespace {
 
-void writeLe16(std::vector<std::uint8_t>& out, std::size_t offset, std::uint16_t value)
+void writeBe16(std::vector<std::uint8_t>& out, std::size_t offset, std::uint16_t value)
 {
-    out[offset] = static_cast<std::uint8_t>(value & 0xFF);
-    out[offset + 1] = static_cast<std::uint8_t>((value >> 8) & 0xFF);
+    out[offset] = static_cast<std::uint8_t>((value >> 8) & 0xFF);
+    out[offset + 1] = static_cast<std::uint8_t>(value & 0xFF);
 }
 
-void writeLe32(std::vector<std::uint8_t>& out, std::size_t offset, std::uint32_t value)
+void writeBe32(std::vector<std::uint8_t>& out, std::size_t offset, std::uint32_t value)
 {
-    out[offset] = static_cast<std::uint8_t>(value & 0xFF);
-    out[offset + 1] = static_cast<std::uint8_t>((value >> 8) & 0xFF);
-    out[offset + 2] = static_cast<std::uint8_t>((value >> 16) & 0xFF);
-    out[offset + 3] = static_cast<std::uint8_t>((value >> 24) & 0xFF);
+    out[offset] = static_cast<std::uint8_t>((value >> 24) & 0xFF);
+    out[offset + 1] = static_cast<std::uint8_t>((value >> 16) & 0xFF);
+    out[offset + 2] = static_cast<std::uint8_t>((value >> 8) & 0xFF);
+    out[offset + 3] = static_cast<std::uint8_t>(value & 0xFF);
 }
 
 std::vector<std::uint8_t> makeSyntheticGci()
@@ -37,8 +37,8 @@ std::vector<std::uint8_t> makeSyntheticGci()
     std::memcpy(file.data() + 4, "01", 2);
     const char name[] = "Pikmin dataFile";
     std::memcpy(file.data() + 8, name, sizeof(name));
-    writeLe32(file, 0x28, 123456u);
-    writeLe16(file, 0x38, 1); // one block
+    writeBe32(file, 0x28, 123456u);
+    writeBe16(file, 0x38, 1); // one block
     file[kGciHeaderSize] = 0xAB;
     file[kGciHeaderSize + 1] = 0xCD;
     return file;
@@ -61,7 +61,7 @@ int main()
         std::fprintf(stderr, "parse failed: %s\n", error.c_str());
         ++failures;
     } else if (parsed.gameId != "GPIE01" || parsed.saveFileName != "Pikmin dataFile"
-               || parsed.payload.size() != kCardBlockSize) {
+               || parsed.payload.size() != kCardBlockSize || parsed.dir.time != 123456u) {
         std::fprintf(stderr, "parse contents mismatch\n");
         ++failures;
     }

@@ -58,6 +58,22 @@ bool parseGciBytes(const std::vector<std::uint8_t>& bytes, ParsedGci& out, std::
         return false;
     }
     std::memcpy(&out.dir, bytes.data(), kGciHeaderSize);
+    // GCI headers are stored big-endian (GameCube byte order); convert to host order.
+    const auto be16 = [&](std::size_t o) {
+        return static_cast<std::uint16_t>((bytes[o] << 8) | bytes[o + 1]);
+    };
+    const auto be32 = [&](std::size_t o) {
+        return (static_cast<std::uint32_t>(bytes[o]) << 24) | (static_cast<std::uint32_t>(bytes[o + 1]) << 16)
+             | (static_cast<std::uint32_t>(bytes[o + 2]) << 8) | static_cast<std::uint32_t>(bytes[o + 3]);
+    };
+    out.dir.time = be32(0x28);
+    out.dir.iconAddr = be32(0x2C);
+    out.dir.iconFormat = be16(0x30);
+    out.dir.iconSpeed = be16(0x32);
+    out.dir.startBlock = be16(0x36);
+    out.dir.blockCount = be16(0x38);
+    out.dir.reserved3A = be16(0x3A);
+    out.dir.commentAddr = be32(0x3C);
     if (out.dir.blockCount == 0) {
         error = "The save header says it uses zero data blocks.";
         return false;
