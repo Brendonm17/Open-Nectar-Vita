@@ -3045,7 +3045,9 @@ bool HubWindow::open(const HubState& state, std::string& error)
         return false;
     }
 #ifndef __ANDROID__
-    SDL_SetWindowMinimumSize(window, 960, 700);
+    // Por debajo de esto las páginas pasarían a tener scroll (ver los tests
+    // de launcher_page_layout).
+    SDL_SetWindowMinimumSize(window, 800, 600);
     pc_icon_apply(window);
 #endif
     SDL_GLContext context = SDL_GL_CreateContext(window);

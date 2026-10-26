@@ -175,6 +175,22 @@ int main()
         const float logoAspect = 2172.0f / 476.0f; // assets/logo.png
         check(hubPageBottom(700.0f) <= 700.0f - kFooterTop - 6.0f, "pages end above the footer pill");
         check(near(hubContentTop(1180.0f, 780.0f, logoAspect, true), 18.0f + 660.8f / logoAspect + 10.0f + 42.0f), "content top at design size");
+        // Tamaño mínimo de la ventana (800x600): todo cabe sin scroll.
+        // Games: rejilla de #184, dos botones medianos (144) por fila, dos filas
+        // con los dos editores; las portadas se separan lo justo (gameCardGap).
+        const float gridW = 2.0f * 144.0f + 12.0f, gridGutter = 28.0f;
+        for (float w : { 800.0f, 960.0f })
+            for (float h : { 600.0f, 700.0f }) {
+                const float top = hubContentTop(w, h, logoAspect, true);
+                const float avail = hubPageBottom(h) - top;
+                const GamesLayout g = fitGames(w, avail, 2.0f, true);
+                check(!g.scroll, "games fits without scrolling");
+                const float gap = std::max(g.gap, gridW + gridGutter - g.columnW);
+                check(g.columnW + gap + gridW <= w, "both tool grids fit the window");
+                check(!fitPage(380.0f, avail, 30.0f, 12.0f).scroll, "move fits without scrolling");
+                const SettingsPanelFit s = fitSettingsPanel((h - 64.0f) - (top + 24.0f));
+                check(s.helpH > 0.0f && s.rowsH >= kSettingsRowsMin, "settings keeps its help box");
+            }
     }
 
     std::cout << "launcher_page_layout_test: ok\n";
