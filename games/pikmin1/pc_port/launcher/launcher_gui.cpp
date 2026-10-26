@@ -1383,11 +1383,18 @@ struct Hub {
         ImGui::TextColored(ImVec4(0.62f, 0.58f, 0.44f, 1.0f), "%s", savesStatus.c_str());
         ImGui::PopTextWrapPos();
         ImGui::Dummy(ImVec2(0, 10));
-        if (glassButton(filePickLabel("gci", "Import a save...").c_str(), ImVec2(300.0f, 46.0f), false,
+        // One shared width for every Saves-page button: wide enough for the longest label (including the
+        // "Waiting for file picker..." state), never below 240 px. Two buttons + gap fit the panel at 960 px.
+        float savesButtonW = 240.0f;
+        for (const char* label : {"Import a save...", "Open save folder", "Restore previous save", "Open backups folder",
+                                  "Waiting for file picker..."})
+            savesButtonW = std::max(savesButtonW, ImGui::CalcTextSize(label).x + 48.0f);
+        const ImVec2 savesButtonSize(savesButtonW, 46.0f);
+        if (glassButton(filePickLabel("gci", "Import a save...").c_str(), savesButtonSize, false,
                         busy || filePickOpen()))
             tryImportGciSave();
         ImGui::SameLine(0.0f, 12.0f);
-        if (glassButton("Open save folder", ImVec2(200.0f, 46.0f), false, !savesFolderExists)) openFolder(saveCardFolder());
+        if (glassButton("Open save folder", savesButtonSize, false, !savesFolderExists)) openFolder(saveCardFolder());
 
         ImGui::Dummy(ImVec2(0, 18));
         ImGui::PushFont(fonts.caption);
@@ -1404,13 +1411,12 @@ struct Hub {
         }
         ImGui::PopTextWrapPos();
         ImGui::Dummy(ImVec2(0, 10));
-        // 300 + 12 + 240 px: fits the rows panel at the 960 px minimum width.
         if (!savesBackupTime.empty()) {
-            if (glassButton("Restore previous save", ImVec2(300.0f, 46.0f), false, busy || filePickOpen()))
+            if (glassButton("Restore previous save", savesButtonSize, false, busy || filePickOpen()))
                 tryRestoreSave();
             ImGui::SameLine(0.0f, 12.0f);
         }
-        if (glassButton("Open backups folder", ImVec2(240.0f, 46.0f), false, !backupsFolderExists))
+        if (glassButton("Open backups folder", savesButtonSize, false, !backupsFolderExists))
             openFolder(cardBackupRoot(saveCardFolder()));
     }
 #endif
