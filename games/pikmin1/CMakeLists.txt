@@ -968,6 +968,7 @@ if(ANDROID AND NOT TARGET nectar_launcher)
         pc_port/launcher/launcher_android_main.cpp
         pc_port/launcher/launcher_gui.cpp
         pc_port/launcher/button_style.cpp
+        pc_port/launcher/button_layout.cpp
         pc_port/launcher/crash_report.cpp
         pc_port/launcher/bti_decode.cpp
         pc_port/launcher/settings_model.cpp
@@ -1038,6 +1039,7 @@ if(PIKMIN_BUILD_LAUNCHER)
         pc_port/launcher/launcher_main.cpp
         pc_port/launcher/launcher_gui.cpp
         pc_port/launcher/button_style.cpp
+        pc_port/launcher/button_layout.cpp
         pc_port/launcher/crash_report.cpp
         pc_port/launcher/bti_decode.cpp
         pc_port/launcher/settings_model.cpp
@@ -1134,6 +1136,19 @@ if(PIKMIN_BUILD_TESTS AND PIKMIN_BUILD_LAUNCHER)
         pc_port/launcher/button_style.cpp)
     target_compile_options(button_style_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
     add_test(NAME button_style_test COMMAND button_style_test)
+
+    # Margen y anchos estándar de los botones: mide los textos reales con
+    # Fredoka (atlas en CPU, sin ventana) a 1x y 2x.
+    add_executable(button_layout_test
+        pc_port/launcher/button_layout_test.cpp
+        pc_port/launcher/button_layout.cpp
+        "${LAUNCHER_EMBED_DIR}/font_fredoka.h")
+    # Como el launcher: sin las cabeceras del juego (traen su propio float.h).
+    set_property(TARGET button_layout_test PROPERTY INCLUDE_DIRECTORIES "")
+    target_include_directories(button_layout_test PRIVATE ${PC_PORT_DIR} "${LAUNCHER_EMBED_DIR}")
+    target_link_libraries(button_layout_test PRIVATE launcher_imgui)
+    target_compile_options(button_layout_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+    add_test(NAME button_layout_test COMMAND button_layout_test)
 
     if(PIKMIN_NETPLAY_BUILD)
         # Host Co-op / Join Co-op flow with a fake game.

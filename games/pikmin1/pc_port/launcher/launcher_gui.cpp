@@ -17,6 +17,7 @@
 #include "launcher_gui.h"
 
 #include "bti_decode.h"
+#include "button_layout.h"
 #include "button_style.h"
 #if PIKMIN_LAUNCHER_NETPLAY
 #include "launcher_coop.h"
@@ -52,6 +53,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -68,6 +70,9 @@ namespace fs = std::filesystem;
 namespace pikmin {
 namespace launcher {
 namespace {
+
+using buttons::ButtonSize;
+namespace role = buttons::role;
 
 // ── Paleta ──────────────────────────────────────────────────────────────────
 // Verde de hoja de Pikmin como color dominante; naranja del rótulo del logo
@@ -952,19 +957,53 @@ struct Hub {
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const ImVec2 b(at.x + size.x, at.y + size.y);
         const dewdrop::Layers layers = dewdropFrame(dl, id, at, b, hovered, held, selected, disabled);
-        dewdropText(dl, 21.0f, ImVec2(at.x + size.x * 0.5f, at.y + size.y * 0.5f), label, layers.textAlpha, layers.textDrop);
+        dewdropLabel(dl, at, size, label, buttons::kLabelSize, layers);
         return clicked && !disabled;
+    }
+
+    bool glassButton(const char* label, ButtonSize width, float height, bool selected = false, bool disabled = false)
+    {
+        return glassButton(label, ImVec2(buttons::buttonWidth(width), height), selected, disabled);
+    }
+
+    buttons::MeasureFn measureLabel() const
+    {
+        ImFont* font = fonts.body;
+        return [font](const std::string& text, float size) { return font->CalcTextSizeA(size, FLT_MAX, 0.0f, text.c_str()).x; };
+    }
+
+    // Tamaño estándar para un texto que llega de fuera (diálogos).
+    ButtonSize sizeFor(const std::string& label, float height, ButtonSize minimum = ButtonSize::Small) const
+    {
+        return buttons::sizeFor(label, height, measureLabel(), minimum);
+    }
+
+    // Texto de un botón: centrado en el rectángulo interior (dentro del borde,
+    // con el mismo margen en todos y sin pisar la curva de los extremos). Si
+    // no cabe, encoge la letra hasta un suelo y luego recorta con "..."; el
+    // recorte final al rectángulo interior impide pisar el borde pase lo que
+    // pase.
+    void dewdropLabel(ImDrawList* dl, ImVec2 at, ImVec2 size, const char* label, float baseSize, const dewdrop::Layers& layers)
+    {
+        const char* hidden = std::strstr(label, "##"); // como ImGui: lo que va tras ## es solo el id
+        const std::string text = hidden ? std::string(label, hidden) : std::string(label);
+        const buttons::FittedLabel fit = buttons::fitLabel(text, size.x, size.y, measureLabel(), baseSize);
+        const buttons::Rect inner = buttons::innerTextRect(size.x, size.y, fit.size);
+        dl->PushClipRect(ImVec2(at.x + inner.x0, at.y + inner.y0 - 1.0f), ImVec2(at.x + inner.x1, at.y + inner.y1 + 1.0f), true);
+        dewdropText(dl, fit.size, ImVec2(at.x + size.x * 0.5f, at.y + size.y * 0.5f), fit.text.c_str(), layers.textAlpha,
+                    layers.textDrop);
+        dl->PopClipRect();
     }
 
     void drawTabs(float y, float width)
     {
         const char* labels[] = { "Games", "Settings", "Move Install" };
-        const float tabW = 150.0f, tabH = 42.0f, gap = 14.0f;
+        const float tabW = buttons::buttonWidth(role::kTab), tabH = 42.0f, gap = 14.0f;
         const float total = 3.0f * tabW + 2.0f * gap;
         float x = (width - total) * 0.5f;
         for (int i = 0; i < 3; ++i) {
             ImGui::SetCursorScreenPos(ImVec2(x, y));
-            if (glassButton(labels[i], ImVec2(tabW, tabH), int(tab) == i)) tab = Tab(i);
+            if (glassButton(labels[i], role::kTab, tabH, int(tab) == i)) tab = Tab(i);
             x += tabW + gap;
         }
     }
@@ -1085,7 +1124,13 @@ struct Hub {
     {
         const float cardW = std::clamp(size.x * 0.19f, 190.0f, 280.0f);
         const float cardH = cardW * 1.40f;
-        const float gap = cardW * 0.42f;
+        // Bajo cada portada va una rejilla de dos botones medianos, más ancha
+        // que la portada en ventanas pequeñas: separa las portadas lo justo
+        // para que las dos rejillas no se toquen.
+        const float toolW = buttons::buttonWidth(role::kGameTool);
+        const float gridW = buttons::gameGridWidth();
+        const float gap = buttons::gameCardGap(cardW);
+        const float wideW = buttons::buttonWidth(role::kGameWide);
         const float startX = (size.x - (2.0f * cardW + gap)) * 0.5f;
         const float cardY = top + 24.0f;
         const char* names[] = { "Pikmin", "Pikmin 2" };
@@ -1103,46 +1148,50 @@ struct Hub {
             // Debajo de cada portada: Install o, ya instalado, HD textures
             // (y en Pikmin 1, Map editor a su lado).
             ImGui::PushID(i);
-            ImGui::SetCursorScreenPos(ImVec2(x, below + 38.0f));
+            // Columnas de la rejilla, centradas bajo la portada.
+            const float centre = x + cardW * 0.5f;
+            const float left = centre - gridW * 0.5f, right = left + toolW + buttons::kButtonGap;
             if (!installed) {
-                if (glassButton("Install", ImVec2(cardW, 44.0f))) choose(HubAction::Install, HubGame(i));
+                ImGui::SetCursorScreenPos(ImVec2(centre - wideW * 0.5f, below + 38.0f));
+                if (glassButton("Install", role::kGameWide, 44.0f)) choose(HubAction::Install, HubGame(i));
             } else {
                 const bool editor = !isPikmin2 && !state.mapEditor.empty();
                 const bool models = !isPikmin2 && !state.modelMaker.empty();
-                const float halfW = (cardW - 12.0f) * 0.5f;
                 if (editor && models) {
                     // Los dos editores arriba; HD textures y Characters (instalar
                     // un personaje del creador) en la segunda fila.
-                    if (glassButton("Map editor", ImVec2(halfW, 44.0f))) choose(HubAction::MapEditor, HubGame(i));
-                    ImGui::SetCursorScreenPos(ImVec2(x + halfW + 12.0f, below + 38.0f));
-                    if (glassButton("Model maker", ImVec2(halfW, 44.0f))) choose(HubAction::ModelMaker, HubGame(i));
-                    ImGui::SetCursorScreenPos(ImVec2(x, below + 38.0f + 44.0f + 10.0f));
-                    if (glassButton("HD textures", ImVec2(halfW, 44.0f))) choose(HubAction::TexturePack, HubGame(i));
-                    ImGui::SetCursorScreenPos(ImVec2(x + halfW + 12.0f, below + 38.0f + 44.0f + 10.0f));
-                    if (glassButton("Characters", ImVec2(halfW, 44.0f))) choose(HubAction::InstallCharacter, HubGame(i));
+                    ImGui::SetCursorScreenPos(ImVec2(left, below + 38.0f));
+                    if (glassButton("Map editor", role::kGameTool, 44.0f)) choose(HubAction::MapEditor, HubGame(i));
+                    ImGui::SetCursorScreenPos(ImVec2(right, below + 38.0f));
+                    if (glassButton("Model maker", role::kGameTool, 44.0f)) choose(HubAction::ModelMaker, HubGame(i));
+                    ImGui::SetCursorScreenPos(ImVec2(left, below + 38.0f + 44.0f + 10.0f));
+                    if (glassButton("HD textures", role::kGameTool, 44.0f)) choose(HubAction::TexturePack, HubGame(i));
+                    ImGui::SetCursorScreenPos(ImVec2(right, below + 38.0f + 44.0f + 10.0f));
+                    if (glassButton("Characters", role::kGameTool, 44.0f)) choose(HubAction::InstallCharacter, HubGame(i));
+                } else if (editor || models) {
+                    ImGui::SetCursorScreenPos(ImVec2(left, below + 38.0f));
+                    if (editor && glassButton("Map editor", role::kGameTool, 44.0f)) choose(HubAction::MapEditor, HubGame(i));
+                    if (models && glassButton("Model maker", role::kGameTool, 44.0f)) choose(HubAction::ModelMaker, HubGame(i));
+                    ImGui::SetCursorScreenPos(ImVec2(right, below + 38.0f));
+                    if (glassButton("HD textures", role::kGameTool, 44.0f)) choose(HubAction::TexturePack, HubGame(i));
                 } else {
-                    const bool one = editor || models;
-                    const float buttonW = one ? halfW : cardW;
-                    if (editor && glassButton("Map editor", ImVec2(buttonW, 44.0f))) choose(HubAction::MapEditor, HubGame(i));
-                    if (models && glassButton("Model maker", ImVec2(buttonW, 44.0f))) choose(HubAction::ModelMaker, HubGame(i));
-                    if (one) ImGui::SetCursorScreenPos(ImVec2(x + buttonW + 12.0f, below + 38.0f));
-                    if (glassButton("HD textures", ImVec2(buttonW, 44.0f))) choose(HubAction::TexturePack, HubGame(i));
+                    ImGui::SetCursorScreenPos(ImVec2(centre - wideW * 0.5f, below + 38.0f));
+                    if (glassButton("HD textures", role::kGameWide, 44.0f)) choose(HubAction::TexturePack, HubGame(i));
                 }
             }
 #if PIKMIN_LAUNCHER_NETPLAY
             // Online co-op: two captains on two PCs (netplay builds).
             if (installed && !isPikmin2 && state.netplay) {
-                const float coopW = (cardW - 12.0f) * 0.5f;
                 const float rows  = below + 38.0f + editorRows() * (44.0f + 10.0f);
-                ImGui::SetCursorScreenPos(ImVec2(x, rows));
-                if (glassButton("Host Co-op", ImVec2(coopW, 44.0f))) openCoop(true);
-                ImGui::SetCursorScreenPos(ImVec2(x + coopW + 12.0f, rows));
-                if (glassButton("Join Co-op", ImVec2(coopW, 44.0f))) openCoop(false);
+                ImGui::SetCursorScreenPos(ImVec2(left, rows));
+                if (glassButton("Host Co-op", role::kGameTool, 44.0f)) openCoop(true);
+                ImGui::SetCursorScreenPos(ImVec2(right, rows));
+                if (glassButton("Join Co-op", role::kGameTool, 44.0f)) openCoop(false);
                 // Online VS: a 1v1 match on two PCs, on the host's VS map.
-                ImGui::SetCursorScreenPos(ImVec2(x, rows + 44.0f + 10.0f));
-                if (glassButton("Host VS", ImVec2(coopW, 44.0f))) openCoop(true, true);
-                ImGui::SetCursorScreenPos(ImVec2(x + coopW + 12.0f, rows + 44.0f + 10.0f));
-                if (glassButton("Join VS", ImVec2(coopW, 44.0f))) openCoop(false, true);
+                ImGui::SetCursorScreenPos(ImVec2(left, rows + 44.0f + 10.0f));
+                if (glassButton("Host VS", role::kGameTool, 44.0f)) openCoop(true, true);
+                ImGui::SetCursorScreenPos(ImVec2(right, rows + 44.0f + 10.0f));
+                if (glassButton("Join VS", role::kGameTool, 44.0f)) openCoop(false, true);
             }
 #endif
             ImGui::PopID();
@@ -1160,8 +1209,8 @@ struct Hub {
                 std::lock_guard<std::mutex> lock(releaseCheck->mutex);
                 if (releaseCheck->newer) updateLabel = "Update to " + releaseCheck->latest.version;
             }
-            ImGui::SetCursorScreenPos(ImVec2((size.x - cardW) * 0.5f, y));
-            if (glassButton(updateLabel.c_str(), ImVec2(cardW, 44.0f), updateLabel != "Update"))
+            ImGui::SetCursorScreenPos(ImVec2((size.x - wideW) * 0.5f, y));
+            if (glassButton(updateLabel.c_str(), role::kGameWide, 44.0f, updateLabel != "Update"))
                 choose(HubAction::Update, HubGame::Pikmin1);
         }
     }
@@ -1207,7 +1256,7 @@ struct Hub {
         if (snap.texturePacks.empty()) ImGui::TextColored(ImVec4(0.62f, 0.58f, 0.44f, 1.0f), "No packs installed yet.");
         ImGui::EndDisabled();
         ImGui::Dummy(ImVec2(0, 10));
-        if (glassButton("Install a pack from a .zip", ImVec2(300.0f, 46.0f), false, busy)) {
+        if (glassButton("Install a pack from a .zip", role::kWide, 46.0f, false, busy)) {
             const fs::path zip = platform::askForFile("Choose the texture pack zip", "Texture pack zip", "*.zip *.ZIP");
             if (!zip.empty()) queue({ "--texpack-install", zip.string() }, "Installing the pack...");
         }
@@ -1216,7 +1265,7 @@ struct Hub {
     // Modelos HD: uno por fila, cada uno se instala desde su zip.
     void drawHdModels(const SettingsSnapshot& snap, bool busy)
     {
-        const float buttonW = 190.0f;
+        const float buttonW = buttons::buttonWidth(role::kSettingsRow);
         ImGui::PushFont(fonts.caption);
         ImGui::TextColored(kOrangeDeep, "HD MODELS");
         ImGui::PopFont();
@@ -1233,10 +1282,10 @@ struct Hub {
             ImGui::TextColored(ImVec4(1.0f, 0.93f, 0.80f, 1.0f), "%s", model.name.c_str());
             // Instalado: interruptor On/Off (apagar no borra nada, vuelve al
             // modelo original). Sin instalar: solo el aviso.
-            const float toggleW = 120.0f;
+            const float toggleW = buttons::buttonWidth(role::kToggle);
             ImGui::SameLine(ImGui::GetContentRegionMax().x - buttonW - toggleW - 12.0f);
             if (model.installed) {
-                if (glassButton(model.enabled ? "On" : "Off", ImVec2(toggleW, 40.0f), model.enabled, busy)) {
+                if (glassButton(model.enabled ? "On" : "Off", role::kToggle, 40.0f, model.enabled, busy)) {
                     queue({ "--hdmodel-enable", std::to_string(model.row), model.enabled ? "0" : "1" });
                 }
             } else {
@@ -1244,7 +1293,7 @@ struct Hub {
                 ImGui::TextColored(ImVec4(0.62f, 0.58f, 0.44f, 1.0f), "Not installed");
             }
             ImGui::SameLine(ImGui::GetContentRegionMax().x - buttonW);
-            if (glassButton(model.installed ? "Replace..." : "Install...", ImVec2(buttonW, 40.0f), false, busy)) {
+            if (glassButton(model.installed ? "Replace..." : "Install...", role::kSettingsRow, 40.0f, false, busy)) {
                 const fs::path zip = platform::askForFile("Choose the zip for " + model.name, "Model zip", "*.zip *.ZIP");
                 if (!zip.empty()) {
                     queue({ "--hdmodel-install", std::to_string(model.row), zip.string() },
@@ -1302,13 +1351,13 @@ struct Hub {
         ImDrawList* dl = ImGui::GetWindowDrawList();
         // Un apartado por juego: cada uno con sus propias opciones.
         const char* gameNames[kHubGameCount] = { "Pikmin", "Pikmin 2" };
-        const float pillW = 170.0f, pillGap = 12.0f;
+        const float pillW = buttons::buttonWidth(role::kSettingsGame), pillGap = buttons::kButtonGap;
         float pillX = (size.x - (float(kHubGameCount) * pillW + float(kHubGameCount - 1) * pillGap)) * 0.5f;
         for (int g = 0; g < kHubGameCount; ++g) {
             ImGui::SetCursorScreenPos(ImVec2(pillX, top + 16.0f));
             ImGui::PushID(1000 + g);
             const bool unavailable = !settingsClients[g];
-            if (glassButton(gameNames[g], ImVec2(pillW, 38.0f), g == settingsGame, unavailable) && g != settingsGame) {
+            if (glassButton(gameNames[g], role::kSettingsGame, 38.0f, g == settingsGame, unavailable) && g != settingsGame) {
                 settingsGame = g;
                 settingsGroup = 0;
                 optionOrder.clear();
@@ -1341,8 +1390,8 @@ struct Hub {
             centredText(dl, fonts.body, 21.0f, ImVec2(size.x * 0.5f, top + 80.0f), col(kOrange),
                         settings->error.empty() ? "Reading the game's settings..." : settings->error.c_str());
             if (!settings->error.empty() && !busy) {
-                ImGui::SetCursorScreenPos(ImVec2(size.x * 0.5f - 70.0f, top + 120.0f));
-                if (glassButton("Retry", ImVec2(140.0f, 44.0f))) queue({ "--settings-dump" });
+                ImGui::SetCursorScreenPos(ImVec2((size.x - buttons::buttonWidth(role::kSmallAction)) * 0.5f, top + 120.0f));
+                if (glassButton("Retry", role::kSmallAction, 44.0f)) queue({ "--settings-dump" });
             }
             return;
         }
@@ -1357,7 +1406,7 @@ struct Hub {
         settingsGroup = std::clamp(settingsGroup, 0, lastPage);
 
         const float margin = std::max(40.0f, (size.x - 1000.0f) * 0.5f);
-        const float listW = 180.0f;
+        const float listW = buttons::buttonWidth(role::kSettingsGroup);
         const float panelX = margin + listW + 18.0f;
         const float panelW = size.x - margin - panelX;
         const float bottom = size.y - 64.0f;
@@ -1370,13 +1419,13 @@ struct Hub {
             const char* name = g == packsPage ? "Texture Packs" : g == modelsPage ? "HD Models" : groups[size_t(g)].name.c_str();
             ImGui::SetCursorScreenPos(ImVec2(margin, top + 24.0f + float(g) * 50.0f));
             ImGui::PushID(g);
-            if (glassButton(name, ImVec2(listW, 40.0f), g == settingsGroup)) settingsGroup = g;
+            if (glassButton(name, role::kSettingsGroup, 40.0f, g == settingsGroup)) settingsGroup = g;
             ImGui::PopID();
         }
         // Restaurar: pide un segundo clic para confirmar.
         resetArmed = std::max(0.0f, resetArmed - dt);
         ImGui::SetCursorScreenPos(ImVec2(margin, bottom - 44.0f));
-        if (glassButton(resetArmed > 0.0f ? "Sure? Click" : "Reset all", ImVec2(listW, 44.0f), false, busy)) {
+        if (glassButton(resetArmed > 0.0f ? "Sure? Click" : "Reset all", role::kSettingsGroup, 44.0f, false, busy)) {
             if (resetArmed > 0.0f) {
                 resetArmed = 0.0f;
                 optionOrder.clear();
@@ -1518,9 +1567,11 @@ struct Hub {
 
         const int jobState = moveJob ? moveJob->state.load() : MoveJob::Idle;
         const bool running = jobState == MoveJob::Running;
-        pathBox(ImVec2(inner, y + 28.0f), ImVec2(inner + innerW - 132.0f, y + 72.0f), moveTarget, "No folder chosen");
-        ImGui::SetCursorScreenPos(ImVec2(inner + innerW - 120.0f, y + 28.0f));
-        if (glassButton("Browse", ImVec2(120.0f, 44.0f), false, running)) {
+        const float browseW = buttons::buttonWidth(role::kSmallAction), moveW = buttons::buttonWidth(role::kMove);
+        pathBox(ImVec2(inner, y + 28.0f), ImVec2(inner + innerW - browseW - buttons::kButtonGap, y + 72.0f), moveTarget,
+                "No folder chosen");
+        ImGui::SetCursorScreenPos(ImVec2(inner + innerW - browseW, y + 28.0f));
+        if (glassButton("Browse", role::kSmallAction, 44.0f, false, running)) {
             const fs::path chosen = platform::askForInstallDirectory();
             if (!chosen.empty()) {
                 fs::path target;
@@ -1533,7 +1584,7 @@ struct Hub {
 
         if (running) {
             // Barra de progreso de la copia.
-            const ImVec2 a(inner, y + 4.0f), b(inner + innerW - 190.0f, y + 34.0f);
+            const ImVec2 a(inner, y + 4.0f), b(inner + innerW - moveW - 20.0f, y + 34.0f);
             const float fill = std::max(b.y - a.y, (b.x - a.x) * moveJob->progress.load());
             dl->AddRectFilled(a, b, IM_COL32(4, 22, 8, 235), 15.0f);
             dl->AddRectFilled(ImVec2(a.x + 3, a.y + 3), ImVec2(a.x + fill - 3, b.y - 3), col(kLeafBright), 12.0f);
@@ -1544,10 +1595,10 @@ struct Hub {
         }
         if (!moveNote.empty() && !running) {
             dl->AddText(fonts.caption, 16.0f, ImVec2(inner, y + 10.0f), col(ImVec4(1.0f, 0.55f, 0.40f, 1.0f)), moveNote.c_str(),
-                        nullptr, innerW - 200.0f);
+                        nullptr, innerW - moveW - 30.0f);
         }
-        ImGui::SetCursorScreenPos(ImVec2(inner + innerW - 170.0f, y));
-        if (glassButton(running ? "Moving..." : "Move", ImVec2(170.0f, 44.0f), true, running || moveTarget.empty())) {
+        ImGui::SetCursorScreenPos(ImVec2(inner + innerW - moveW, y));
+        if (glassButton(running ? "Moving..." : "Move", role::kMove, 44.0f, true, running || moveTarget.empty())) {
             moveNote.clear();
             moveJob = std::make_shared<MoveJob>();
             moveJob->state = MoveJob::Running;
@@ -1576,8 +1627,9 @@ struct Hub {
             if (!releaseCheck->newer) return;
             text = "Open Nectar " + releaseCheck->latest.version + " is available";
         }
-        const ImVec2 extent = fonts.body->CalcTextSizeA(19.0f, FLT_MAX, 0.0f, text.c_str());
-        const ImVec2 b(size.x - 18.0f, 58.0f), a(b.x - extent.x - 40.0f, 18.0f);
+        // Píldora a la medida del texto, con el mismo margen que los botones.
+        const ImVec2 b(size.x - 18.0f, 58.0f);
+        const ImVec2 a(b.x - buttons::fitWidth(text, b.y - 18.0f, 19.0f, measureLabel()), 18.0f);
         ImGui::SetCursorScreenPos(a);
         const bool clicked = ImGui::InvisibleButton("##release", ImVec2(b.x - a.x, b.y - a.y));
         const ImGuiID id = ImGui::GetItemID();
@@ -1588,7 +1640,7 @@ struct Hub {
         const float pulse = 0.5f + 0.5f * std::sin(t * 3.0f);
         dl->AddRectFilled(ImVec2(a.x - 4, a.y - 4), ImVec2(b.x + 4, b.y + 4), col(kOrange, 0.10f + 0.12f * pulse), 24.0f);
         const dewdrop::Layers layers = dewdropFrame(dl, id, a, b, hovered, held, true, false);
-        dewdropText(dl, 19.0f, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), text.c_str(), layers.textAlpha, layers.textDrop);
+        dewdropLabel(dl, a, ImVec2(b.x - a.x, b.y - a.y), text.c_str(), 19.0f, layers);
         if (clicked) choose(HubAction::Update, HubGame::Pikmin1);
 
         // "What's new" a su izquierda, si el release trae notas.
@@ -1599,9 +1651,9 @@ struct Hub {
             version = releaseCheck->latest.version;
         }
         if (notes.empty()) return;
-        const float w = fonts.body->CalcTextSizeA(19.0f, FLT_MAX, 0.0f, "What's new").x + 50.0f;
-        ImGui::SetCursorScreenPos(ImVec2(a.x - w - 12.0f, a.y));
-        if (glassButton("What's new", ImVec2(w, b.y - a.y))) {
+        const float w = buttons::buttonWidth(role::kAction);
+        ImGui::SetCursorScreenPos(ImVec2(a.x - w - buttons::kButtonGap, a.y));
+        if (glassButton("What's new", role::kAction, b.y - a.y)) {
             whatsNewOpen = true;
             whatsNewVersion = version;
             whatsNewNotes = notes;
@@ -1733,15 +1785,16 @@ struct Hub {
         ImGui::EndChild();
 
         const std::string updateLabel = "Update to " + whatsNewVersion;
-        const float updateW = fonts.body->CalcTextSizeA(21.0f, FLT_MAX, 0.0f, updateLabel.c_str()).x + 50.0f;
-        const float closeW = 130.0f, y = b.y - buttonsH - 26.0f;
+        // Los dos botones de la fila, del mismo tamaño estándar.
+        const ButtonSize rowSize = sizeFor(updateLabel, buttonsH, role::kAction);
+        const float updateW = buttons::buttonWidth(rowSize), closeW = updateW, y = b.y - buttonsH - 26.0f;
         ImGui::SetCursorScreenPos(ImVec2(b.x - 34.0f - updateW, y));
-        if (glassButton(updateLabel.c_str(), ImVec2(updateW, buttonsH), true)) {
+        if (glassButton(updateLabel.c_str(), rowSize, buttonsH, true)) {
             whatsNewOpen = false;
             choose(HubAction::Update, HubGame::Pikmin1);
         }
         ImGui::SetCursorScreenPos(ImVec2(b.x - 34.0f - updateW - 14.0f - closeW, y));
-        if (glassButton("Close", ImVec2(closeW, buttonsH)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        if (glassButton("Close", rowSize, buttonsH) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
             whatsNewOpen = false;
         }
         ImGui::End();
@@ -1756,7 +1809,7 @@ struct Hub {
         shown.push_back('\0');
         ImGui::InputTextMultiline(id, shown.data(), shown.size(), ImVec2(width, 110.0f), ImGuiInputTextFlags_ReadOnly);
         ImGui::PopStyleColor();
-        if (glassButton("Copy code", ImVec2(170.0f, 44.0f))) {
+        if (glassButton("Copy code", role::kAction, 44.0f)) {
             SDL_SetClipboardText(code.c_str());
             notify("Code copied. Send it to the other player.");
         }
@@ -1808,14 +1861,14 @@ struct Hub {
         if (takesPaste) {
             ImGui::TextUnformatted(host ? "The other player's answer code:" : "The host's offer code:");
             ImGui::InputTextMultiline("##paste", coopInput.data(), coopInput.size(), ImVec2(innerW, 90.0f));
-            if (glassButton("Paste", ImVec2(130.0f, 44.0f))) {
+            if (glassButton("Paste", role::kAction, 44.0f)) {
                 if (char* clip = SDL_GetClipboardText()) {
                     std::snprintf(coopInput.data(), coopInput.size(), "%s", clip);
                     SDL_free(clip);
                 }
             }
             ImGui::SameLine();
-            if (glassButton(host ? "Connect" : "Join", ImVec2(150.0f, 44.0f), true)) {
+            if (glassButton(host ? "Connect" : "Join", role::kAction, 44.0f, true)) {
                 std::string err;
                 const bool ok = host ? flow.submitAnswer(coopInput.data(), err) : flow.submitOffer(coopInput.data(), err);
                 coopError = ok ? std::string() : err;
@@ -1835,9 +1888,9 @@ struct Hub {
         ImGui::PopTextWrapPos();
         ImGui::EndChild();
 
-        const float buttonsH = 50.0f, closeW = 130.0f, y = b.y - buttonsH - 26.0f;
+        const float buttonsH = 50.0f, closeW = buttons::buttonWidth(role::kSmallAction), y = b.y - buttonsH - 26.0f;
         ImGui::SetCursorScreenPos(ImVec2(b.x - 34.0f - closeW, y));
-        if (glassButton("Close", ImVec2(closeW, buttonsH)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        if (glassButton("Close", role::kSmallAction, buttonsH) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
             // The game keeps running; closing only hides the panel.
             coopOpen = false;
         }
@@ -2029,7 +2082,7 @@ struct HubWindow::Impl {
     {
         ImDrawList* dl = ImGui::GetWindowDrawList();
         dl->AddText(hub->fonts.body, 21.0f, at, col(kOrange), label);
-        const float y = at.y + 30.0f, h = 44.0f, buttonW = 120.0f;
+        const float y = at.y + 30.0f, h = 44.0f, buttonW = buttons::buttonWidth(role::kSmallAction);
         const ImVec2 a(at.x, y), b(at.x + width - buttonW - 12.0f, y + h);
         dl->AddRectFilled(a, b, IM_COL32(4, 22, 8, 235), 14.0f);
         dl->AddRect(a, b, col(kOrangeDeep, 0.8f), 14.0f, 0, 2.0f);
@@ -2039,7 +2092,7 @@ struct HubWindow::Impl {
                     shown.c_str());
         ImGui::SetCursorScreenPos(ImVec2(b.x + 12.0f, y));
         ImGui::PushID(id);
-        const bool clicked = hub->glassButton("Browse", ImVec2(buttonW, h));
+        const bool clicked = hub->glassButton("Browse", role::kSmallAction, h);
         ImGui::PopID();
         return clicked;
     }
@@ -2061,10 +2114,11 @@ struct HubWindow::Impl {
             dl->AddText(hub->fonts.caption, 16.0f, ImVec2(at.x, at.y + 262.0f), col(ImVec4(1.0f, 0.45f, 0.30f, 1.0f)), pathsNote.c_str());
         }
         const float buttonsY = at.y + panel.y - 110.0f;
-        ImGui::SetCursorScreenPos(ImVec2(at.x + width - 330.0f, buttonsY));
-        if (hub->glassButton("Cancel", ImVec2(150.0f, 50.0f))) pathsAction = 4;
-        ImGui::SetCursorScreenPos(ImVec2(at.x + width - 168.0f, buttonsY));
-        if (hub->glassButton("Install", ImVec2(168.0f, 50.0f), true, rom.empty() || installDirectory.empty())) pathsAction = 3;
+        const float actionW = buttons::buttonWidth(role::kAction);
+        ImGui::SetCursorScreenPos(ImVec2(at.x + width - 2.0f * actionW - 14.0f, buttonsY));
+        if (hub->glassButton("Cancel", role::kAction, 50.0f)) pathsAction = 4;
+        ImGui::SetCursorScreenPos(ImVec2(at.x + width - actionW, buttonsY));
+        if (hub->glassButton("Install", role::kAction, 50.0f, true, rom.empty() || installDirectory.empty())) pathsAction = 3;
         endModal();
     }
 
@@ -2120,22 +2174,24 @@ struct HubWindow::Impl {
                                             messageIsError ? col(ImVec4(1.0f, 0.78f, 0.62f, 1.0f)) : col(ImVec4(1.0f, 0.93f, 0.80f, 1.0f)),
                                             messageText.c_str(), nullptr, width);
         const float buttonsY = at.y + panel.y - 96.0f;
-        float x = at.x + width;
-        const float primaryW = std::max(150.0f, hub->fonts.body->CalcTextSizeA(21.0f, FLT_MAX, 0.0f, primaryLabel.c_str()).x + 50.0f);
-        x -= primaryW;
+        // Todos los botones del diálogo con el mismo tamaño estándar: el
+        // menor donde cabe el texto más largo.
+        ButtonSize rowSize = hub->sizeFor(primaryLabel, 50.0f, role::kAction);
+        for (const std::string* other : { &secondaryLabel, &cancelLabel })
+            if (!other->empty()) rowSize = std::max(rowSize, hub->sizeFor(*other, 50.0f, role::kAction));
+        const float rowW = buttons::buttonWidth(rowSize);
+        float x = at.x + width - rowW;
         ImGui::SetCursorScreenPos(ImVec2(x, buttonsY));
-        if (hub->glassButton(primaryLabel.c_str(), ImVec2(primaryW, 50.0f), true)) answer = 0;
+        if (hub->glassButton(primaryLabel.c_str(), rowSize, 50.0f, true)) answer = 0;
         if (!secondaryLabel.empty()) {
-            const float secondaryW = std::max(130.0f, hub->fonts.body->CalcTextSizeA(21.0f, FLT_MAX, 0.0f, secondaryLabel.c_str()).x + 50.0f);
-            x -= secondaryW + 14.0f;
+            x -= rowW + 14.0f;
             ImGui::SetCursorScreenPos(ImVec2(x, buttonsY));
-            if (hub->glassButton(secondaryLabel.c_str(), ImVec2(secondaryW, 50.0f))) answer = 1;
+            if (hub->glassButton(secondaryLabel.c_str(), rowSize, 50.0f)) answer = 1;
         }
         if (!cancelLabel.empty()) {
             // A la izquierda, lejos de las acciones: cerrar sin elegir ninguna.
-            const float cancelW = std::max(130.0f, hub->fonts.body->CalcTextSizeA(21.0f, FLT_MAX, 0.0f, cancelLabel.c_str()).x + 50.0f);
             ImGui::SetCursorScreenPos(ImVec2(at.x, buttonsY));
-            if (hub->glassButton(cancelLabel.c_str(), ImVec2(cancelW, 50.0f)) || ImGui::IsKeyPressed(ImGuiKey_Escape))
+            if (hub->glassButton(cancelLabel.c_str(), rowSize, 50.0f) || ImGui::IsKeyPressed(ImGuiKey_Escape))
                 answer = 2;
         }
         endModal();
