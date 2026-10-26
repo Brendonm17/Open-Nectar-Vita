@@ -1194,6 +1194,16 @@ if(PIKMIN_BUILD_TESTS AND PIKMIN_BUILD_LAUNCHER)
     target_compile_options(button_layout_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
     add_test(NAME button_layout_test COMMAND button_layout_test)
 
+    if(TARGET launcher_imgui)
+        # Mano sobre desplegables, entradas y botones de opción (ImGui sin ventana).
+        add_executable(launcher_cursor_test pc_port/launcher/launcher_cursor_test.cpp)
+        # Sin las cabeceras del juego, igual que launcher_imgui.
+        set_property(TARGET launcher_cursor_test PROPERTY INCLUDE_DIRECTORIES "")
+        target_compile_options(launcher_cursor_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+        target_link_libraries(launcher_cursor_test PRIVATE launcher_imgui)
+        add_test(NAME launcher_cursor_test COMMAND launcher_cursor_test)
+    endif()
+
     if(PIKMIN_NETPLAY_BUILD)
         # Host Co-op / Join Co-op flow with a fake game.
         add_executable(launcher_coop_test pc_port/launcher/launcher_coop_test.cpp pc_port/launcher/launcher_coop.cpp)
