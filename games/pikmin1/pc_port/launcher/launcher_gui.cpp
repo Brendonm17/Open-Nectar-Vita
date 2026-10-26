@@ -1233,6 +1233,16 @@ struct Hub {
             if (ImGui::IsMouseHoveringRect(rowMin, ImVec2(rowMin.x + ImGui::GetWindowWidth(), rowMin.y + rowH)))
                 help = "On: the launcher's settings and cache live inside the game folder, so they move with it. "
                        "Off: they live in your user folder. Switching copies them across; nothing is deleted.";
+            // Locked (portable.txt, NECTAR_PORTABLE, read-only folder...): say
+            // why right under the row, not only in the help bar.
+            if (!info.canChange && !info.note.empty()) {
+                ImGui::PushFont(fonts.caption);
+                ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x);
+                ImGui::TextColored(dim, "%s", info.note.c_str());
+                ImGui::PopTextWrapPos();
+                ImGui::PopFont();
+                ImGui::Dummy(ImVec2(0, 4));
+            }
         }
         {
             ImGui::AlignTextToFramePadding();
@@ -1253,7 +1263,8 @@ struct Hub {
         dl->AddRect(a, b, col(kOrangeDeep, 0.6f), 14.0f, 0, 1.5f);
         std::string note = info.note;
         ImVec4 noteColour(1.0f, 0.93f, 0.80f, 0.95f);
-        if (!help.empty()) note = help;
+        // While locked the reason stays first, even when hovering the row.
+        if (!help.empty()) note = info.canChange || note.empty() ? help : note + "\n" + help;
         else if (!launcherMessage.empty()) {
             note = launcherMessage;
             if (launcherMessageIsError) noteColour = ImVec4(1.0f, 0.55f, 0.40f, 1.0f);
