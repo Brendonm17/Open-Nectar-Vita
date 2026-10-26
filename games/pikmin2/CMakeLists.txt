@@ -374,6 +374,7 @@ if(PIKMIN2_ENABLE_PORT_LAYER)
         ${PC_PORT_DIR}/pc_p2_rules.cpp
         ${PC_PORT_DIR}/pc_p2_coop.cpp
         ${PC_PORT_DIR}/pc_p2_coop_movie_protagonist.cpp
+        ${PC_PORT_DIR}/pc_p2_coop_movie_helpers.cpp
         ${PC_PORT_DIR}/pc_p2_captains.cpp
         ${PC_PORT_DIR}/pc_speedrun.cpp
         ${PC_PORT_DIR}/randomizer/pc_randomizer.cpp

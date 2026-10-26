@@ -1722,7 +1722,13 @@ void Navi::update()
 		if (PC_ORIG_TICK()) mInvincibleTimer--;
 	}
 	mSoundObj->exec();
-	demoCheck();
+	if (demoCheck()) {
+#ifdef PIKI_PC_PORT
+		if (pc_p2_coop_active()) {
+			return;
+		}
+#endif
+	}
 	updateLook();
 	updateLookCreature();
 	updateKaisanDisable();
