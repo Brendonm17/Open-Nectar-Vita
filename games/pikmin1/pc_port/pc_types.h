@@ -163,8 +163,19 @@ static unsigned int __pc_rlwinm(unsigned int value, unsigned int shift, unsigned
 /* ──────────────────────────────────────────────
  *  Trap/unimplemented functions
  * ────────────────────────────────────────────── */
+/* Una advertencia por punto de llamada: el decomp tiene funciones vacías que
+ * se alcanzan cada frame. Con PIKI_TRAP_UNIMPLEMENTED_ABORT (build de
+ * diagnóstico) se aborta en la primera llamada. */
+#include <stdio.h>
+#include <stdlib.h>
+#ifdef PIKI_TRAP_UNIMPLEMENTED_ABORT
 #define TRAP_UNIMPLEMENTED \
-    do { fprintf(stderr, "Unimplemented function: %s at %s:%d\n", __func__, __FILE__, __LINE__); } while(0)
+    do { fprintf(stderr, "Unimplemented function: %s at %s:%d\n", __func__, __FILE__, __LINE__); abort(); } while(0)
+#else
+#define TRAP_UNIMPLEMENTED \
+    do { static int s_trapWarned_; if (!s_trapWarned_) { s_trapWarned_ = 1; \
+        fprintf(stderr, "Unimplemented function: %s at %s:%d\n", __func__, __FILE__, __LINE__); } } while(0)
+#endif
 
 /* ──────────────────────────────────────────────
  *  Single-precision C math under std:: (MinGW)

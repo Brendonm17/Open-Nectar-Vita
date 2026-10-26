@@ -45,7 +45,8 @@ endif()
 # Fase 2: ejecutable pikmin2_pc (pc_main → System/GameFlow). Los stubs Dolphin
 # (GX/OS/DVD/PAD) son Fase 3; el enlace puede fallar hasta entonces.
 option(PIKMIN2_ENABLE_PORT_LAYER "Compile the pc_port native layer (main + host)" ON)
-option(PIKMIN_NATIVE_JAUDIO "Drive audio with the original engine (WIP)" OFF)
+# PIKMIN_NATIVE_JAUDIO es solo de Pikmin 1 (src/jaudio). Pikmin 2 siempre usa
+# JSystem JAS/JAI + pc_dsp_host, así que aquí no hay opción de backend.
 option(PIKMIN2_ASAN "Build with AddressSanitizer: catches double free / use-after-free at the instant it happens" OFF)
 option(PIKMIN2_TSAN "Build with ThreadSanitizer: data races and lock-order inversions between game, audio and DVD threads" OFF)
 include(CTest)
@@ -637,12 +638,6 @@ if(PIKMIN2_ENABLE_PORT_LAYER)
             ${PC_PORT_DIR}/timing/pc_render_phase.cpp
         )
 
-        add_test(NAME p2_jaudio_integration_test COMMAND ${P2_GAME} --audio-self-test)
-        set_tests_properties(p2_jaudio_integration_test PROPERTIES
-            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-            SKIP_RETURN_CODE 77
-            TIMEOUT 60
-        )
     endif()
     message(STATUS "Port layer: ENABLED (Fase 4 — GX fifo → pc_gfx / OpenGL)")
 else()

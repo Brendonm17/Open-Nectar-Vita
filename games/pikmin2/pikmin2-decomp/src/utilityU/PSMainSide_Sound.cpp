@@ -1,4 +1,8 @@
 #include "P2Macros.h"
+#ifdef PIKI_PC_PORT
+#include "audio/pc_audio_drops.h"
+#include "JSystem/JAudio/JAI/JAIGlobalParameter.h"
+#endif
 #include "PSM/Creature.h"
 #include "PSM/ObjMgr.h"
 #include "PSGame/SoundTable.h"
@@ -138,6 +142,13 @@ f32 SeSound::setDistanceVolumeCommon(f32, u8 flag)
 		PSM::SceneBase* scene = static_cast<PSM::SceneBase*>(PSMGetSceneMgrCheck()->getEndScene());
 		P2ASSERTLINE(261, scene);
 		f32 calc = scene->getCamDistVol(mPlayerNum);
+#ifdef PIKI_PC_PORT
+		if (mState == SOUNDSTATE_Loaded && mIsPlayingWithActor && mCreatureObj && pc_audio_levels_enabled()) {
+			const bool uncalc = dist >= JAIGlobalParameter::getParamDistanceMax() * 9.99f;
+			const bool listed = static_cast<Creature*>(mCreatureObj)->getList() != nullptr;
+			pc_audio_se_probe(mSoundID, dist, uncalc, listed, calc);
+		}
+#endif
 		JUT_ASSERTLINE(269, calc != 0.0f, "\nSE called at invalid timming\n(%08x)\n", mSoundID);
 		dist2 *= calc;
 		f32 fx = static_cast<PSM::Scene_Cave*>(PSMGetChildScene())->getSceneFx();

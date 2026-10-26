@@ -89,15 +89,37 @@ bool decodeAst(const u8* data, u32 size)
 	if (channels == 0 || channels > 6 || format > 1 || rate == 0)
 		return false;
 
+	// Recorre los bloques BLCK con aritmética en size_t y sin sumas que puedan
+	// desbordar: ambas pasadas usan el mismo walker, así no pueden discrepar.
+	// Un bloque cuya carga no cabe en el archivo termina el stream (se toca el
+	// prefijo válido, igual que antes); nunca se lee fuera ni se repite bloque.
+	const size_t fileSize = size;
+	auto nextBlock = [&](size_t& off, size_t& blk) -> bool {
+		if (off > fileSize || fileSize - off < 0x20 || std::memcmp(data + off, "BLCK", 4) != 0)
+			return false;
+		blk = be32(data + off + 4);
+		const size_t payload = off + 0x20;
+		if (blk > (fileSize - payload) / channels) {
+			if (traceEnabled())
+				std::fprintf(stderr, "[PC AST] bloque truncado en 0x%zx (blk=%zu ch=%u size=%zu)\n", off, blk, channels, fileSize);
+			return false;
+		}
+		off = payload; // estrictamente mayor que el offset de la cabecera
+		return true;
+	};
+	auto blockSamples = [&](size_t blk) -> size_t { return (format == 0) ? (blk / 9) * 16 : blk / 2; };
+	// Tope de PCM por canal (~17 min a 32 kHz): un AST corrupto no puede
+	// pedir una reserva descontrolada.
+	constexpr size_t kMaxFrames = size_t(1) << 25;
+
 	// Primera pasada: cuenta muestras por canal para reservar de una vez.
-	u32 total = 0;
-	for (u32 off = 0x40; off + 0x20 <= size && std::memcmp(data + off, "BLCK", 4) == 0;) {
-		const u32 blk = be32(data + off + 4);
-		off += 0x20;
-		if (off + blk * channels > size)
-			break;
-		total += (format == 0) ? (blk / 9) * 16 : blk / 2;
-		off += blk * channels;
+	size_t total = 0;
+	for (size_t off = 0x40, blk = 0; nextBlock(off, blk);) {
+		const size_t add = blockSamples(blk);
+		if (add > kMaxFrames - total)
+			return false;
+		total += add;
+		off += blk * channels; // blk * channels <= fileSize - off: sin overflow
 	}
 	if (total == 0)
 		return false;
@@ -113,17 +135,13 @@ bool decodeAst(const u8* data, u32 size)
 	s16 h1[2]   = { 0, 0 }, h2[2] = { 0, 0 };
 	u32 n[2]    = { 0, 0 };
 	const u16 used = channels > 1 ? 2 : 1; // solo L/R
-	for (u32 off = 0x40; off + 0x20 <= size && std::memcmp(data + off, "BLCK", 4) == 0;) {
-		const u32 blk = be32(data + off + 4);
-		off += 0x20;
-		if (off + blk * channels > size)
-			break;
+	for (size_t off = 0x40, blk = 0; nextBlock(off, blk);) {
 		for (u16 c = 0; c < used; c++) {
 			const u8* src = data + off + blk * c;
 			if (format == 0) {
-				decodeAfc(src, blk / 9, h1[c], h2[c], ch[c], n[c]);
+				decodeAfc(src, u32(blk / 9), h1[c], h2[c], ch[c], n[c]);
 			} else {
-				for (u32 i = 0; i + 1 < blk; i += 2)
+				for (size_t i = 0; i + 1 < blk; i += 2)
 					ch[c][n[c]++] = s16(be16(src + i));
 			}
 		}

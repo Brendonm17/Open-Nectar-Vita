@@ -200,8 +200,18 @@ inline int adpcm_next_sample(AdpcmState& st)
 	return s;
 }
 
-void adpcm_decode_channel(const u8* src, u32 samples, const s16 coef[8][2], s16 yn1, s16 yn2, s16* dst, int step)
+// Bytes a channel needs for `samples`: 8-byte frames of 1 header + 14 nibbles.
+size_t adpcm_bytes_for(u32 samples)
 {
+	const size_t full = samples / 14, rest = samples % 14;
+	return full * 8 + (rest ? 1 + (rest + 1) / 2 : 0);
+}
+
+// Decodes from [src, end); refuses (without writing) a channel that is shorter
+// than `samples` needs, so a corrupt record can never read past its frame.
+bool adpcm_decode_channel(const u8* src, const u8* end, u32 samples, const s16 coef[8][2], s16 yn1, s16 yn2, s16* dst, int step)
+{
+	if (src > end || adpcm_bytes_for(samples) > size_t(end - src)) return false;
 	AdpcmState st;
 	st.data      = src;
 	st.nibble    = 2;
@@ -221,6 +231,7 @@ void adpcm_decode_channel(const u8* src, u32 samples, const s16 coef[8][2], s16 
 		yn2 = yn1;
 		yn1 = out;
 	}
+	return true;
 }
 
 // Decodes one THP audio record into interleaved stereo s16.
@@ -238,16 +249,24 @@ u32 decode_audio(const u8* rec, u32 recSize, HostVector<s16>& out)
 	}
 	const s16 lYn1 = s16(be16(rec + 72)), lYn2 = s16(be16(rec + 74));
 	const s16 rYn1 = s16(be16(rec + 76)), rYn2 = s16(be16(rec + 78));
-	const u8* left  = rec + 80;
-	const u8* right = left + offsetNextChannel;
 	if (sampleSize == 0 || sampleSize > 0x10000) return 0;
+	// Each channel is checked against its own range inside the record before
+	// anything is written, so a bad record leaves `out` (the last frame) as is.
+	const size_t payload = size_t(recSize) - 80;
+	if (offsetNextChannel > payload) return 0;
+	const size_t need    = adpcm_bytes_for(sampleSize);
+	const u8* left       = rec + 80;
+	const u8* leftEnd    = offsetNextChannel ? left + offsetNextChannel : rec + recSize;
+	const u8* right      = left + offsetNextChannel;
+	const u8* rightEnd   = rec + recSize;
+	if (need > size_t(leftEnd - left) || (offsetNextChannel && need > size_t(rightEnd - right))) return 0;
 	out.resize(size_t(sampleSize) * 2);
 	if (offsetNextChannel == 0) {
-		adpcm_decode_channel(left, sampleSize, lCoef, lYn1, lYn2, out.data(), 2);
+		adpcm_decode_channel(left, leftEnd, sampleSize, lCoef, lYn1, lYn2, out.data(), 2);
 		for (u32 i = 0; i < sampleSize; i++) out[i * 2 + 1] = out[i * 2];
 	} else {
-		adpcm_decode_channel(left, sampleSize, lCoef, lYn1, lYn2, out.data(), 2);
-		adpcm_decode_channel(right, sampleSize, rCoef, rYn1, rYn2, out.data() + 1, 2);
+		adpcm_decode_channel(left, leftEnd, sampleSize, lCoef, lYn1, lYn2, out.data(), 2);
+		adpcm_decode_channel(right, rightEnd, sampleSize, rCoef, rYn1, rYn2, out.data() + 1, 2);
 	}
 	return sampleSize;
 }
@@ -335,7 +354,9 @@ bool step_frame(bool wantVideo)
 	const u32 audioSize  = p.hasAudio ? be32(f + 12) : 0;
 	const u32 headerSize = 8 + 4 * (p.hasAudio ? 2 : 1);
 	const u8* image      = f + headerSize;
-	if (headerSize + imageSize + audioSize > p.nextSize) {
+	// Checked by subtraction: a u32 sum of the three sizes could wrap around.
+	const size_t frameSize = p.nextSize;
+	if (headerSize > frameSize || imageSize > frameSize - headerSize || audioSize > frameSize - headerSize - imageSize) {
 		printf("[PC THP] frame %u: bad sizes (%u/%u/%u)\n", p.nextIndex, headerSize, imageSize, audioSize);
 		return false;
 	}

@@ -1041,6 +1041,9 @@ bool pc_gfx_replay_captured_frame(void) {
 struct VertexArrayState {
     const u8* base = nullptr;
     u8 stride = 0;
+    // Fin de la memoria legible tras base: un índice fuera del array no puede
+    // leer más allá (en la GC devolvía basura; aquí sería SIGSEGV).
+    const u8* limit = nullptr;
 };struct VertexFormatState {
     GXCompCnt count = GX_COMPCNT_NULL;
     GXCompType type = GX_F32;
@@ -1266,8 +1269,25 @@ struct PcTlut {
     // activo: el hash de paleta de Dolphin se calcula sobre ellos.
     std::vector<u8> raw;
 };
+extern "C" size_t pc_host_readable_bytes(const void* p, size_t want);
+extern "C" const void* pc_host_readable_end(const void* p);
+
+// Copia `bytes` de memoria del juego sin leer más allá de lo legible; lo que
+// falte (el GPU de la GC habría leído basura) queda a cero.
+template <typename Vec>
+static void assign_guest_bytes(Vec& dst, const void* src, size_t bytes) {
+    const u8* p = static_cast<const u8*>(src);
+    const size_t readable = pc_host_readable_bytes(p, bytes);
+    dst.assign(p, p + readable);
+    dst.resize(bytes, 0);
+}
+
 struct PcCiTexture {
     const u8* image = nullptr;
+    // Copia con ceros cuando la imagen declarada excede la memoria legible;
+    // vacía en el caso normal (se lee directamente de `image`).
+    std::vector<u8> padded;
+    const u8* data() const { return padded.empty() ? image : padded.data(); }
     u16 width = 0;
     u16 height = 0;
     GXCITexFmt format = GX_TF_C4;
@@ -5647,8 +5667,7 @@ void pc_gfx_init_tex_obj(GXTexObj* obj, void* imagePtr, u16 width, u16 height, G
         if (rawBytes == 0) return; // unknown layout: the presentation pass inits it
         null_auth_invalidate(key);
         PcNullDeferredTex& def = sNullDeferred[key];
-        const u8* src = static_cast<const u8*>(imagePtr);
-        def.bytes.assign(src, src + rawBytes);
+        assign_guest_bytes(def.bytes, imagePtr, rawBytes);
         def.sigImage = imagePtr;
         def.width = width;
         def.height = height;
@@ -5661,6 +5680,20 @@ void pc_gfx_init_tex_obj(GXTexObj* obj, void* imagePtr, u16 width, u16 height, G
         return;
     }
     sNullDeferred.erase(key);
+
+    // Una imagen cuyo tamaño declarado excede la memoria legible se decodifica
+    // (y se nombra para el pack) desde una copia con ceros; la firma sigue
+    // apuntando al puntero del juego.
+    std::vector<u8> paddedSource;
+    if (const size_t rawBytes = gx_base_level_size(width, height, static_cast<u32>(format));
+        rawBytes && pc_host_readable_bytes(imagePtr, rawBytes) < rawBytes) {
+        static int reported = 0;
+        if (reported++ < 8)
+            fprintf(stderr, "[PC GFX] texture %p %ux%u fmt=%u exceeds readable memory, zero-padded\n", imagePtr,
+                    unsigned(width), unsigned(height), unsigned(format));
+        assign_guest_bytes(paddedSource, imagePtr, rawBytes);
+        imagePtr = paddedSource.data();
+    }
 
     if (sDumpTextureNames) {
         dump_dolphin_texture_name(static_cast<const u8*>(imagePtr), width, height,
@@ -5864,6 +5897,13 @@ void pc_gfx_init_tlut_obj(GXTlutObj* obj, void* lut, GXTlutFmt format, u16 numEn
     PcTlut decoded;
     decoded.rgba.resize(static_cast<size_t>(numEntries) * 4);
     const u8* source = static_cast<const u8*>(lut);
+    // A palette cut short by the end of readable memory decodes what is there;
+    // the missing entries read as zero.
+    std::vector<u8> padded;
+    if (pc_host_readable_bytes(source, size_t(numEntries) * 2) < size_t(numEntries) * 2) {
+        assign_guest_bytes(padded, source, size_t(numEntries) * 2);
+        source = padded.data();
+    }
     auto expand5 = [](u16 value) -> u8 { return (value << 3) | (value >> 2); };
     auto expand6 = [](u16 value) -> u8 { return (value << 2) | (value >> 4); };
     for (u16 i = 0; i < numEntries; ++i) {
@@ -5906,8 +5946,9 @@ static bool upload_ci_texture(GXTexObj* obj, const PcCiTexture& ci) {
     auto paletteIt = sLoadedTluts.find(ci.tlutName);
     if (!obj || !ci.image || paletteIt == sLoadedTluts.end() || paletteIt->second.rgba.empty()) return false;
     const PcTlut& palette = paletteIt->second;
+    const u8* ciImage = ci.data();
     if (sDumpTextureNames) {
-        dump_dolphin_texture_name(ci.image, ci.width, ci.height, static_cast<u32>(ci.format),
+        dump_dolphin_texture_name(ciImage, ci.width, ci.height, static_cast<u32>(ci.format),
                                   ci.mipmap,
                                   palette.raw.empty() ? nullptr : palette.raw.data(),
                                   palette.raw.size() / 2);
@@ -5924,13 +5965,13 @@ static bool upload_ci_texture(GXTexObj* obj, const PcCiTexture& ci) {
                     const int local = y * tileWidth + x;
                     u32 paletteIndex = 0;
                     if (ci.format == GX_TF_C4) {
-                        const u8 packed = ci.image[tileOffset + local / 2];
+                        const u8 packed = ciImage[tileOffset + local / 2];
                         paletteIndex = (local & 1) ? (packed & 0xF) : (packed >> 4);
                     } else if (ci.format == GX_TF_C8) {
-                        paletteIndex = ci.image[tileOffset + local];
+                        paletteIndex = ciImage[tileOffset + local];
                     } else {
-                        paletteIndex = ((u32(ci.image[tileOffset + local * 2]) << 8)
-                                      | ci.image[tileOffset + local * 2 + 1]) & 0x3FFF;
+                        paletteIndex = ((u32(ciImage[tileOffset + local * 2]) << 8)
+                                      | ciImage[tileOffset + local * 2 + 1]) & 0x3FFF;
                     }
                     const int dstX = tileX + x, dstY = tileY + y;
                     const size_t paletteOffset = static_cast<size_t>(paletteIndex) * 4;
@@ -5964,7 +6005,7 @@ static bool upload_ci_texture(GXTexObj* obj, const PcCiTexture& ci) {
         char texPackName[96];
         int glLevels = 0;
         size_t gpuBytes = 0;
-        if (compute_dolphin_name(ci.image, ci.width, ci.height, static_cast<u32>(ci.format),
+        if (compute_dolphin_name(ciImage, ci.width, ci.height, static_cast<u32>(ci.format),
                                  ci.mipmap,
                                  palette.raw.empty() ? nullptr : palette.raw.data(),
                                  palette.raw.size() / 2,
@@ -6000,9 +6041,12 @@ void pc_gfx_init_tex_obj_ci(GXTexObj* obj, void* imagePtr, u16 width, u16 height
         return;
     }
 
-    PcCiTexture ci { static_cast<const u8*>(imagePtr), width, height, format, wrapS, wrapT, tlutName,
-                     mipmap != GX_FALSE };
-    sCiTextures[key] = ci;
+    PcCiTexture& ci = sCiTextures[key];
+    ci = PcCiTexture { static_cast<const u8*>(imagePtr), {}, width, height, format, wrapS, wrapT, tlutName,
+                       mipmap != GX_FALSE };
+    if (const size_t rawBytes = gx_base_level_size(width, height, static_cast<u32>(format));
+        rawBytes && pc_host_readable_bytes(imagePtr, rawBytes) < rawBytes)
+        assign_guest_bytes(ci.padded, imagePtr, rawBytes);
     if (pc_gfx_null_skip()) {
         // Netplay authoritative pass: load_tex_obj uploads it on first
         // presentation use.
@@ -6121,7 +6165,8 @@ void pc_gfx_set_vtx_attr_fmt(GXVtxFmt fmt, GXAttr attr, GXCompCnt cnt, GXCompTyp
 }
 void pc_gfx_set_array(GXAttr attr, void* basePtr, u8 stride) {
     if (attr >= 0 && attr < GX_VA_MAX_ATTR) {
-        sVtxArrays[attr] = { static_cast<const u8*>(basePtr), stride };
+        sVtxArrays[attr] = { static_cast<const u8*>(basePtr), stride,
+                             static_cast<const u8*>(pc_host_readable_end(basePtr)) };
         sArraySetFrame[attr]  = sFrameSerial;
         sArraySetSerial[attr] = ++sArraySetCounter;
     }
@@ -7013,6 +7058,20 @@ static u8       sLastPosStride = 0;
 // handed us a buffer that was already garbage" and "the parser drifted part
 // way through a valid list". Reports the first few with context, then stops.
 static u8 attr_inline_size(GXAttr attr, const VertexFormatState& fmt);
+
+// Elemento `index` de un array de vértices, o ceros si se sale de la memoria
+// legible. La comprobación barata (64 >= mayor atributo, NBT F32 = 36 bytes)
+// deja el bucle caliente casi intacto. index <= 0xFFFF y stride <= 0xFF: el
+// producto no puede desbordar.
+static const u8 sZeroAttr[64] = {};
+static inline const u8* vtx_array_element(const VertexArrayState& array, u16 index, GXAttr attr,
+                                          const VertexFormatState& fmt) {
+    const u8* element = array.base + size_t(index) * array.stride;
+    if (!array.limit || element < array.base || element >= array.limit) return sZeroAttr;
+    const size_t left = size_t(array.limit - element);
+    if (left >= sizeof(sZeroAttr) || attr_inline_size(attr, fmt) <= left) return element;
+    return sZeroAttr;
+}
 static int sDesyncReports = 0;
 static void report_desync(const char* what, const void* list, size_t offset, u32 nbytes) {
     if (sDesyncReports >= 8) return;
@@ -8372,7 +8431,7 @@ static void fifo_imm_apply_attr(GXAttr attr, const u8* data)
         }
         const VertexArrayState& array = sVtxArrays[attr];
         if (!array.base || array.stride == 0) return;
-        element = array.base + size_t(index) * array.stride;
+        element = vtx_array_element(array, index, attr, sVtxFormats[sImmVtxFmt][attr]);
     }
 
     if (attr == GX_VA_POS) {
@@ -8437,6 +8496,25 @@ static void fifo_imm_byte(u8 val)
 // vertex descriptors (CP registers), matrices/lighting (XF registers) and even
 // nested display lists travel inline. Interpreting them here reproduces how
 // the game bakes per-material configuration before its geometry.
+
+// Indexed XF load (opcodes 0x20/0x28/0x30/0x38): copy `size` words from the
+// matching CP index array (POS/NRM/TEX matrix or light arrays) at `index`.
+// The arrays hold matrices the game computes at runtime, so they are host
+// words; whatever lies past readable memory loads as zero.
+static void handle_xf_regs(u32 addrBase, u32 numWords, const u32* words);
+static void handle_indexed_xf_load(u8 command, u32 header) {
+    const u32 index = header >> 16;
+    const u32 size = ((header >> 12) & 0xF) + 1;
+    const u32 addr = header & 0xFFF;
+    const VertexArrayState& array = sVtxArrays[GX_POS_MTX_ARRAY + ((command - GX_CMD_LOAD_INDX_A) >> 3)];
+    if (!array.base || array.stride == 0) return;
+    const u8* src = array.base + size_t(index) * array.stride;
+    u32 words[16] = {};
+    const size_t want = size * sizeof(u32); // size <= 16
+    if (array.limit && src >= array.base && src < array.limit)
+        memcpy(words, src, want < size_t(array.limit - src) ? want : size_t(array.limit - src));
+    handle_xf_regs(addr, size, words);
+}
 
 static bool read_be_u32(const u8*& cursor, const u8* end, u32& value) {
     if (end - cursor < 4) return false;
@@ -8822,6 +8900,15 @@ static void pc_gfx_call_display_list_impl(const void* list, u32 nbytes) {
     static bool reportedMalformedVertex = false;
     static bool reportedInvalidMatrix = false;
     if (!list || nbytes == 0) return;
+    // A declared size past the end of readable memory is cut there: the
+    // parser below reads eagerly, the GC's command processor did not care.
+    if (const size_t readable = pc_host_readable_bytes(list, nbytes); readable < nbytes) {
+        static int reported = 0;
+        if (reported++ < 8)
+            fprintf(stderr, "[PC GFX] display list %p: %u bytes declared, %zu readable\n", list, nbytes, readable);
+        nbytes = u32(readable);
+        if (nbytes == 0) return;
+    }
 
     // Capture display list if capture is active
     if (sCaptureActive) {
@@ -8920,20 +9007,33 @@ static void pc_gfx_call_display_list_impl(const void* list, u32 nbytes) {
             flushPendingStrip();
             u32 addr, size;
             if (!read_be_u32(cursor, end, addr) || !read_be_u32(cursor, end, size)) break;
-            // Nested display lists: the address is relative to a base pointer
-            // tracked by the game. For now we log and continue - the primary
-            // issue (flat materials) is fixed by XF/BP handlers above.
+            // The address is a GameCube physical address baked into the
+            // resource. Pikmin 1 never builds display lists at runtime
+            // (GXBeginDisplayList is a stub) and loads files at host
+            // addresses, so there is nothing it could resolve to: report it
+            // instead of dropping it silently. Never followed, so no recursion.
+            static int reportedNestedDl = 0;
+            if (reportedNestedDl++ < 4)
+                fprintf(stderr, "[PC GFX] CALL_DL inside display list %p (addr=%08X size=%u) not resolvable, skipped\n",
+                        list, addr, size);
             continue;
         }
-        if (command == GX_CMD_LOAD_CP_REG || command == GX_CMD_INVL_VC ||
-            (command >= GX_CMD_LOAD_INDX_A && command <= GX_CMD_LOAD_INDX_D + 0x07)) {
+        if (command == GX_CMD_INVL_VC) continue; // no payload
+        if (command == GX_CMD_LOAD_CP_REG) {
             building = false;
             flushPendingStrip();
-            // CP reg: 1 byte address + 4 byte value. Indexed loads: 4 byte
-            // header + payload. Both are safe to skip for rendering state we
-            // already track globally.
-            u32 skip;
-            if (!read_be_u32(cursor, end, skip)) break;
+            // 1 byte register + 4 byte value. The array bases and VAT it can
+            // set are tracked through the GX API entry points instead.
+            if (end - cursor < 5) break;
+            cursor += 5;
+            continue;
+        }
+        if (command >= GX_CMD_LOAD_INDX_A && command <= GX_CMD_LOAD_INDX_D + 0x07) {
+            building = false;
+            flushPendingStrip();
+            u32 header;
+            if (!read_be_u32(cursor, end, header)) break;
+            handle_indexed_xf_load(u8(command & 0xF8), header);
             continue;
         }
 
@@ -9041,8 +9141,8 @@ static void pc_gfx_call_display_list_impl(const void* list, u32 nbytes) {
                     }
                     const VertexArrayState& array = sVtxArrays[attr];
                     if (!array.base || array.stride == 0) continue;
-                    element = array.base + size_t(index) * array.stride;
-                    if (building) meshNoteRange(element, array.stride);
+                    element = vtx_array_element(array, index, GXAttr(attr), sVtxFormats[format][attr]);
+                    if (building && element != sZeroAttr) meshNoteRange(element, array.stride);
                     // Only the wild-vertex report below reads these, and this
                     // is the innermost loop in the whole renderer: three stores
                     // per vertex, hundreds of thousands of vertices a frame.

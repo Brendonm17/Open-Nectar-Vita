@@ -22,6 +22,22 @@ GXRenderModeObj GXEurgb60Hz480IntDf = {};
 GXRenderModeObj* sRenderMode = nullptr;
 volatile PPCWGPipe GXWGFifo;
 
+// GX state the renderer does not model. Each distinct (call, value) the game
+// actually uses is reported once, so a missing effect can be traced to it
+// instead of disappearing silently; values equal to what GL already does are
+// not reported.
+static void gx_note_unmodelled(const char* fn, unsigned value) {
+    static const char* seenFn[32];
+    static unsigned seenValue[32];
+    static int seen = 0;
+    for (int i = 0; i < seen; ++i)
+        if (seenFn[i] == fn && seenValue[i] == value) return;
+    if (seen == 32) return;
+    seenFn[seen] = fn;
+    seenValue[seen++] = value;
+    fprintf(stderr, "[PC GX] %s(%u) not modelled by the renderer, ignored\n", fn, value);
+}
+
 extern "C" {
 
 /* ── GX Init ── */
@@ -231,9 +247,11 @@ void GXSetAlphaUpdate(GXBool updateEnable)  { pc_gfx_set_alpha_update(updateEnab
 void GXSetZMode(GXBool compareEnable, GXCompare func, GXBool updateEnable) {
     pc_gfx_set_z_mode(compareEnable, func, updateEnable);
 }
-void GXSetZCompLoc(GXBool beforeTex)        { (void)beforeTex; }
-void GXSetDither(GXBool dither)             { (void)dither; }
-void GXSetDstAlpha(GXBool enable, u8 alpha) { (void)enable; (void)alpha; }
+// GL tests depth after the fragment shader (and its alpha discard), which
+// is GX z-after-texture; only "before" can differ.
+void GXSetZCompLoc(GXBool beforeTex)        { if (beforeTex) gx_note_unmodelled("GXSetZCompLoc", beforeTex); }
+void GXSetDither(GXBool dither)             { (void)dither; } // RGBA8 framebuffer: nothing to dither
+void GXSetDstAlpha(GXBool enable, u8 alpha) { if (enable) gx_note_unmodelled("GXSetDstAlpha", alpha); }
 void GXSetPixelFmt(GXPixelFmt pix_fmt, GXZFmt16 z_fmt) { (void)pix_fmt; (void)z_fmt; }
 void GXSetFog(GXFogType type, f32 startz, f32 endz, f32 nearz, f32 farz, GXColor color) {
     // The game sets fog per stage, with its own colour and distances, and this
@@ -251,9 +269,10 @@ void GXBegin(GXPrimitive type, GXVtxFmt vtxfmt, u16 nverts) { pc_gfx_begin(type,
 void __GXSendFlushPrim()                    { }
 /* GXEnd() is typically an inline/macro in GXHardware.h - we don't redefine it */
 void GXSetCullMode(GXCullMode mode)         { pc_gfx_set_cull_mode(mode); }
-void GXSetCoPlanar(GXBool doEnable)         { (void)doEnable; }
-void GXSetLineWidth(u8 width, GXTexOffset texOffset) { (void)width; (void)texOffset; }
-void GXSetPointSize(u8 size, GXTexOffset texOffset)  { (void)size; (void)texOffset; }
+void GXSetCoPlanar(GXBool doEnable)         { if (doEnable) gx_note_unmodelled("GXSetCoPlanar", doEnable); }
+// Widths are in 1/6 pixel: 6 is the 1-pixel line GL draws anyway.
+void GXSetLineWidth(u8 width, GXTexOffset texOffset) { (void)texOffset; if (width != 6) gx_note_unmodelled("GXSetLineWidth", width); }
+void GXSetPointSize(u8 size, GXTexOffset texOffset)  { (void)texOffset; if (size != 6) gx_note_unmodelled("GXSetPointSize", size); }
 void GXEnableTexOffsets(GXTexCoordID coord, GXBool lineOffset, GXBool pointOffset) {
     (void)coord; (void)lineOffset; (void)pointOffset;
 }

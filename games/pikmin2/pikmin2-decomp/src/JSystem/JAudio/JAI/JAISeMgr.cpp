@@ -13,6 +13,33 @@
 #include "JSystem/JSupport/JSUList.h"
 #include "types.h"
 
+#ifdef PIKI_PC_PORT
+// Diagnóstico (PIKMIN_AUDIO_DROPS): frame en que arrancó cada JAISe vivo, en
+// una tabla fija para no reservar en los heaps del juego. 0 = no arrancado.
+namespace {
+struct PcSeLife {
+	const void* se;
+	u32 startFrame;
+};
+PcSeLife sPcSeLives[512];
+u32 sPcSeFrame;
+PcSeLife* pcSeLife(const void* se, bool create)
+{
+	PcSeLife* empty = nullptr;
+	for (PcSeLife& life : sPcSeLives) {
+		if (life.se == se) return &life;
+		if (!empty && !life.se) empty = &life;
+	}
+	if (create && empty) {
+		empty->se         = se;
+		empty->startFrame = 0;
+		return empty;
+	}
+	return nullptr;
+}
+} // namespace
+#endif
+
 namespace JAInter {
 namespace SeMgr {
 
@@ -108,6 +135,9 @@ void processGFrameSe()
 	if (seHandle == nullptr) {
 		return;
 	}
+#ifdef PIKI_PC_PORT
+	sPcSeFrame++;
+#endif
 	checkNextFrameSe();
 	checkSeMovePara();
 	checkPlayingSe();
@@ -211,6 +241,9 @@ void checkNextFrameSe()
 				}
 
 				if (val2 > compF) {
+#ifdef PIKI_PC_PORT
+					pc_audio_se_event(PCSE_FarCut, sound->mSoundID);
+#endif
 					if (!(sound->mSoundID & 0xC00)) {
 						if (sound->mState != SOUNDSTATE_Stored && sound->_14 != 0xFF) {
 							u32 val3 = (((sound->_14 >> 4) & 0xF) + 0x20000000) + ((sound->_14 << 4) & 0xF0);
@@ -410,6 +443,14 @@ void checkPlayingSe()
 				track->writePortApp(val0 + 0x60000, JAIBasic::getInterface()->getMapInfoFxline(currSound->mMapInfoIndex));
 				track->writePortApp(val0 + 0x40000, offset);
 				track->writePortApp(val0, 1);
+#ifdef PIKI_PC_PORT
+				if (pc_audio_levels_enabled()) {
+					pc_audio_se_event(PCSE_Started, currSound->mSoundID);
+					pc_audio_se_start_volume(currSound->mSoundID, currSound->mSeParam.mVolumes[SOUNDPARAM_Distance].mCurrentValue,
+					                         seTrackUpdate[currSound->_14].mPlayingVolume);
+					if (PcSeLife* life = pcSeLife(currSound, true)) life->startFrame = sPcSeFrame + 1;
+				}
+#endif
 
 				if (currSound->mSoundID & 0xC00) {
 					currSound->mState = SOUNDSTATE_Playing;
@@ -417,6 +458,14 @@ void checkPlayingSe()
 					currSound->mState = SOUNDSTATE_Fadeout;
 				}
 			} else if (portApp0 == 0 && portApp1 != 1) {
+#ifdef PIKI_PC_PORT
+				if (pc_audio_levels_enabled()) {
+					pc_audio_se_event(PCSE_EndedBySeq, currSound->mSoundID);
+					const PcSeLife* life = pcSeLife(currSound, false);
+					if (life && life->startFrame && sPcSeFrame + 1 - life->startFrame <= 2)
+						pc_audio_se_event(PCSE_EndedFast, currSound->mSoundID);
+				}
+#endif
 				releaseSeRegist(currSound);
 			} else if (currSound->mState == SOUNDSTATE_Ready) {
 				if (currSound->mFadeCounter) {
@@ -615,6 +664,13 @@ u8 changeIDToCategory(u32 id)
  */
 void releaseSeRegist(JAISe* se)
 {
+#ifdef PIKI_PC_PORT
+	if (pc_audio_levels_enabled()) {
+		PcSeLife* life = pcSeLife(se, false);
+		if (!life || !life->startFrame) pc_audio_se_event(PCSE_Unstarted, se->mSoundID);
+		if (life) life->se = nullptr;
+	}
+#endif
 	if (seHandle) {
 		if (se->mState != SOUNDSTATE_Stored && se->_14 != 0xFF) {
 			u32 val0 = (((se->_14 & 0xF0) >> 4) + 0x20000000) + ((se->_14 & 0xF) << 4);
@@ -796,6 +852,12 @@ void storeSeBuffer(JAISe** soundHandlePtr, JAInter::Actor* actor, u32 soundID, u
 	if (soundHandlePtr) {
 		*soundHandlePtr = se;
 	}
+#ifdef PIKI_PC_PORT
+	if (pc_audio_levels_enabled()) {
+		pc_audio_se_event(PCSE_New, soundID);
+		if (PcSeLife* life = pcSeLife(se, true)) life->startFrame = 0;
+	}
+#endif
 }
 
 /**
@@ -808,6 +870,9 @@ void releaseSeBuffer(JAISe* se, u32 fadeCounter)
 	if (se->mState == SOUNDSTATE_Inactive) {
 		return;
 	}
+#ifdef PIKI_PC_PORT
+	pc_audio_se_event(PCSE_GameStop, se->mSoundID);
+#endif
 
 	if (fadeCounter == 0 || se->mState == SOUNDSTATE_Stored) {
 		releaseSeRegist(se);

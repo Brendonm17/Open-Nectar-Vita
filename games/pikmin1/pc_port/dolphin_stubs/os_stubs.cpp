@@ -406,6 +406,11 @@ static u8 sArenaMemory[256 * 1024 * 1024]; // 256 MB simulated arena
 static void* sArenaLo = sArenaMemory;
 static void* sArenaHi = sArenaMemory + sizeof(sArenaMemory);
 
+// Whole simulated arena, for pc_host_readable_end (pc_host_readable.cpp).
+extern "C" void pc_os_arena_range(const void** lo, const void** hi) {
+    *lo = sArenaMemory;
+    *hi = sArenaMemory + sizeof(sArenaMemory);
+}
 void* OSGetArenaLo()               { return sArenaLo; }
 void* OSGetArenaHi()               { return sArenaHi; }
 void  OSSetArenaLo(void* lo)       { sArenaLo = lo; }

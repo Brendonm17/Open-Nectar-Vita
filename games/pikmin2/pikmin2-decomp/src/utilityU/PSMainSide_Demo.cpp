@@ -572,6 +572,19 @@ void Demo::onDemoEnd()
 	SceneBase* scene = childScene->toSceneBase();
 
 	const char* name          = mCurrentDemoName;
+#ifdef PIKI_PC_PORT
+	// onDemoTop mutes enemies and pikmin for x01_gamestart and only
+	// onMessageEnd unmutes them, which runs just when its first text box
+	// closes the normal way (unsuspend(1, true)). If the movie finishes first
+	// (auto-advanced text, a skip, the port's demo skip) the box is closed
+	// through unsuspend(1, false) and the categories stayed muted for the rest
+	// of the session. The mute belongs to the demo: never let it outlive it.
+	if (!strcmp(name, "x01_gamestart")) {
+		PSGame::SoundTable::CategoryMgr* cat              = PSSystem::SingletonBase<PSGame::SoundTable::CategoryMgr>::getInstance();
+		PSSystem::getSoundCategoryInfo(cat, 5)->mDisabled = false;
+		PSSystem::getSoundCategoryInfo(cat, 2)->mDisabled = false;
+	}
+#endif
 	PSSystem::EnvSeMgr* envse = scene->getEnvSe();
 	if (envse) {
 		if (!strcmp(name, "s01_dayend") || !strcmp(name, "s02_dayend_result") || !strcmp(name, "s04_dayend_orimadown")

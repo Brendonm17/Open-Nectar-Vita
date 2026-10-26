@@ -261,13 +261,55 @@ CARDStat loadStat(s32 channel, const std::string& name)
 	return stat;
 }
 
+// Swap a fully written temp file over the save. POSIX rename() already
+// replaces the target atomically; on Windows rename refuses an existing
+// destination, so ReplaceFileW (or MoveFileExW on first write) does it. On
+// failure the previous save is untouched: the caller only drops the temp.
+bool replaceFile(const fs::path& tmp, const fs::path& target)
+{
+#if defined(_WIN32)
+	if (fs::exists(target)) {
+		if (ReplaceFileW(target.c_str(), tmp.c_str(), nullptr, REPLACEFILE_IGNORE_MERGE_ERRORS, nullptr, nullptr)) return true;
+	}
+	return MoveFileExW(tmp.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+	std::error_code error;
+	fs::rename(tmp, target, error);
+	return !error;
+#endif
+}
+
+// Writes a whole file image through a temp in the same folder plus
+// replaceFile(), so a crash or full disk mid-save leaves the old file intact.
+bool writeFileAtomic(const fs::path& path, const fs::path& tmp, const char* data, size_t size)
+{
+	{
+		std::ofstream output(tmp, std::ios::binary | std::ios::trunc);
+		bool ok = !!output;
+		if (ok && size) ok = !!output.write(data, std::streamsize(size));
+		if (ok) ok = !!output.flush();
+		output.close();
+		if (!ok || output.fail()) {
+			std::error_code ignored;
+			fs::remove(tmp, ignored);
+			return false;
+		}
+	}
+	if (!replaceFile(tmp, path)) {
+		std::error_code ignored;
+		fs::remove(tmp, ignored);
+		return false;
+	}
+	return true;
+}
+
 bool saveStat(s32 channel, const std::string& name, const CARDStat& source)
 {
 	CARDStat stat = source;
 	std::strncpy(stat.fileName, name.c_str(), CARD_FILENAME_MAX - 1);
 	stat.fileName[CARD_FILENAME_MAX - 1] = '\0';
-	std::ofstream output(metaPath(channel, name), std::ios::binary | std::ios::trunc);
-	return !!output.write(reinterpret_cast<const char*>(&stat), sizeof(stat));
+	return writeFileAtomic(metaPath(channel, name), root(channel) / (".tmp_.meta_" + name), reinterpret_cast<const char*>(&stat),
+	                       sizeof(stat));
 }
 
 // Card tracing (NECTAR_CARD_DEBUG=1). The save flow is create-temp, write,
@@ -402,11 +444,15 @@ s32 CARDCreate(s32 channel, const char* fileName, u32 size, CARDFileInfo* info)
 	s32 freeBytes = 0, freeFiles = 0;
 	CARDFreeBlocks(channel, &freeBytes, &freeFiles);
 	if (size > static_cast<u32>(freeBytes)) return finish(channel, CARD_RESULT_INSSPACE);
-	std::ofstream output(dataPath(channel, name), std::ios::binary | std::ios::trunc);
-	if (!output) return finish(channel, CARD_RESULT_IOERROR);
-	if (size) { output.seekp(size - 1); output.put('\0'); }
-	output.close();
-	CARDStat stat = defaultStat(channel, name); stat.length = size; saveStat(channel, name, stat);
+	const std::vector<char> blank(size, '\0');
+	if (!writeFileAtomic(dataPath(channel, name), root(channel) / (".tmp_" + name), blank.data(), blank.size()))
+		return finish(channel, CARD_RESULT_IOERROR);
+	CARDStat stat = defaultStat(channel, name); stat.length = size;
+	if (!saveStat(channel, name, stat)) {
+		std::error_code ignored;
+		fs::remove(dataPath(channel, name), ignored);
+		return finish(channel, CARD_RESULT_IOERROR);
+	}
 	return CARDOpen(channel, name.c_str(), info);
 }
 s32 CARDCreateAsync(s32 channel, const char* name, u32 size, CARDFileInfo* info, CARDCallback callback)
@@ -435,39 +481,27 @@ s32 CARDWrite(CARDFileInfo* info, void* address, s32 length, s32 offset)
 { CardHostAllocScope hostAlloc; cardtrace("CARDWrite", info ? info->fileNo : -1);
 	std::string name;
 	if (!address || length < 0 || offset < 0 || !resolve(info, name)) return finish(info ? info->chan : 0, CARD_RESULT_NOFILE);
-	// Copy, patch, rename: a crash or a window close in the middle of a save
+	// Copy, patch, swap: a crash or a window close in the middle of a save
 	// must leave either the old file or the new one, never a torn mix (the
 	// game's checksum would then reject the whole card). Save files are a few
 	// dozen KB, so rewriting one per call costs nothing.
+	const size_t end = size_t(offset) + size_t(length); // both >= 0 and < 2^31: no overflow
+	if (end > kCapacity) return finish(info->chan, CARD_RESULT_INSSPACE);
 	const fs::path path = dataPath(info->chan, name);
 	std::vector<char> image;
 	{
 		std::ifstream input(path, std::ios::binary);
 		if (!input) return finish(info->chan, CARD_RESULT_IOERROR);
 		image.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+		if (input.bad()) return finish(info->chan, CARD_RESULT_IOERROR);
 	}
-	if (image.size() < size_t(offset) + size_t(length)) image.resize(size_t(offset) + size_t(length), '\0');
+	if (image.size() < end) image.resize(end, '\0');
 	std::memcpy(image.data() + offset, address, size_t(length));
-	const fs::path tmp = root(info->chan) / (".tmp_" + name); // hidden from entries()
-	{
-		std::ofstream output(tmp, std::ios::binary | std::ios::trunc);
-		if (!output.write(image.data(), std::streamsize(image.size())) || !output.flush()) {
-			output.close();
-			std::error_code ignored;
-			fs::remove(tmp, ignored);
-			return finish(info->chan, CARD_RESULT_IOERROR);
-		}
-	}
-	{
-		std::error_code error;
-		fs::rename(tmp, path, error);
-		if (error) {
-			fs::remove(tmp, error);
-			return finish(info->chan, CARD_RESULT_IOERROR);
-		}
-	}
+	if (!writeFileAtomic(path, root(info->chan) / (".tmp_" + name), image.data(), image.size())) // .tmp_ hidden from entries()
+		return finish(info->chan, CARD_RESULT_IOERROR);
 	info->offset = offset + length; info->length = std::max(info->length, info->offset); sTransferred[info->chan] = length;
-	CARDStat stat = loadStat(info->chan, name); stat.length = info->length; stat.time = cardTimeNow(); saveStat(info->chan, name, stat);
+	CARDStat stat = loadStat(info->chan, name); stat.length = info->length; stat.time = cardTimeNow();
+	if (!saveStat(info->chan, name, stat)) return finish(info->chan, CARD_RESULT_IOERROR);
 	return finish(info->chan, CARD_RESULT_READY);
 }
 s32 CARDWriteAsync(CARDFileInfo* info, void* address, s32 length, s32 offset, CARDCallback callback)

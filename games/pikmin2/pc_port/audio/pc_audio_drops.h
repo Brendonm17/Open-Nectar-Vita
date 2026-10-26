@@ -40,6 +40,27 @@ void pc_audio_drop_wave(int reason, u32 waveId);
 /// Una vez por frame del DSP; imprime el resumen cada ~5 s.
 void pc_audio_drop_report();
 
+// Ciclo de vida de los efectos JAI (misma variable), por categoría del ID
+// ((id >> 12) & 0xFF: 0 navi, 1 sistema, 2 piki, 3 objeto, 4 entorno, 5
+// enemigo): dónde se queda un efecto aceptado que no llega a sonar.
+enum PcSeEvent {
+	PCSE_New,          ///< JAISe nuevo aceptado en storeSeBuffer
+	PCSE_Started,      ///< se manda a su pista (puerto = 1)
+	PCSE_EndedBySeq,   ///< la pista lo da por terminado
+	PCSE_EndedFast,    ///< ... en <= 2 frames tras arrancar
+	PCSE_Unstarted,    ///< liberado sin haber arrancado nunca
+	PCSE_FarCut,       ///< cortado por distancia (> distanceMax)
+	PCSE_GameStop,     ///< el juego lo para (releaseSeBuffer)
+	PCSE_Count
+};
+void pc_audio_se_event(int event, u32 soundId);
+/// Al arrancar: volumen por distancia y volumen final mandado a la pista.
+void pc_audio_se_start_volume(u32 soundId, float distanceVolume, float finalVolume);
+/// Al arrancar un efecto de criatura (SeSound::setDistanceVolumeCommon):
+/// distancia vista, si aún es la inicial sin calcular, si la criatura está
+/// en PSM::ObjMgr (la lista que calcula distancias) y el volumen de cámara.
+void pc_audio_se_probe(u32 soundId, float distance, bool uncalculated, bool listed, float camVolume);
+
 // Niveles (misma variable PIKMIN_AUDIO_DROPS): RMS y pico por fuente, para ver
 // si algo suena desproporcionado o si la suma satura.
 enum PcAudioLevel {

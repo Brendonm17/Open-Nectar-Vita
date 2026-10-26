@@ -390,6 +390,7 @@ set(PC_PORT_SOURCES
     pc_port/settings/pc_settings_p2d.cpp
     src/jaudio/pikiseq.c
     pc_port/dolphin_stubs/os_stubs.cpp
+    pc_port/dolphin_stubs/pc_host_readable.cpp
     pc_port/dolphin_stubs/gx_stubs.cpp
     pc_port/dolphin_stubs/dvd_stubs.cpp
     pc_port/dolphin_stubs/pad_stubs.cpp

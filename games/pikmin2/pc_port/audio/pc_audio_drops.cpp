@@ -113,6 +113,75 @@ void pc_audio_level_gain(int source, int gainQ15)
 	if (gainQ15 > sLevels[source].maxGain) sLevels[source].maxGain = gainQ15;
 }
 
+namespace {
+constexpr int kSeCats = 8; // 0..6 del juego; 7 = cualquier otra
+const char* const kSeCatNames[kSeCats] = { "navi", "sistema", "piki", "objeto", "entorno", "enemigo", "cat6", "otra" };
+const char* const kSeEventNames[PCSE_Count] = { "nuevos", "arrancan", "fin-pista", "fin<=2f", "sin-arrancar", "lejos", "parados" };
+const char* const kSeVolNames[5] = { "0", "<.1", "<.3", "<.6", ">=.6" };
+std::atomic<u32> sSeEvents[kSeCats][PCSE_Count];
+std::atomic<u32> sSeDistVol[kSeCats][5];
+std::atomic<u32> sSeFinalVol[kSeCats][5];
+// Sondas de arranque: sin-calcular, fuera-de-ObjMgr, camVol=0, y la distancia.
+enum { kProbeUncalc, kProbeUnlisted, kProbeCamZero, kProbeD300, kProbeD1000, kProbeD2600, kProbeFar, kProbeCount };
+const char* const kProbeNames[kProbeCount] = { "sin-calcular", "fuera-ObjMgr", "camVol=0", "d<300", "d<1000", "d<2600", "d>=2600" };
+std::atomic<u32> sSeProbe[kSeCats][kProbeCount];
+
+int seCategory(u32 soundId)
+{
+	const u32 cat = (soundId >> 12) & 0xFF;
+	return cat < kSeCats - 1 ? int(cat) : kSeCats - 1;
+}
+int volBucket(float v) { return v <= 0.0f ? 0 : v < 0.1f ? 1 : v < 0.3f ? 2 : v < 0.6f ? 3 : 4; }
+
+void reportSe()
+{
+	for (int c = 0; c < kSeCats; ++c) {
+		u32 ev[PCSE_Count], dv[5], fv[5];
+		bool any = false;
+		for (int e = 0; e < PCSE_Count; ++e) any |= (ev[e] = sSeEvents[c][e].exchange(0)) != 0;
+		for (int b = 0; b < 5; ++b) {
+			dv[b] = sSeDistVol[c][b].exchange(0);
+			fv[b] = sSeFinalVol[c][b].exchange(0);
+		}
+		if (!any) continue;
+		std::fprintf(stderr, "[audio-se] 5s %s:", kSeCatNames[c]);
+		for (int e = 0; e < PCSE_Count; ++e)
+			if (ev[e]) std::fprintf(stderr, " %s=%u", kSeEventNames[e], ev[e]);
+		std::fprintf(stderr, " | volDist");
+		for (int b = 0; b < 5; ++b) std::fprintf(stderr, " %s:%u", kSeVolNames[b], dv[b]);
+		std::fprintf(stderr, " | volFinal");
+		for (int b = 0; b < 5; ++b) std::fprintf(stderr, " %s:%u", kSeVolNames[b], fv[b]);
+		std::fprintf(stderr, " | sonda");
+		for (int k = 0; k < kProbeCount; ++k) std::fprintf(stderr, " %s:%u", kProbeNames[k], sSeProbe[c][k].exchange(0));
+		std::fprintf(stderr, "\n");
+	}
+}
+} // namespace
+
+void pc_audio_se_event(int event, u32 soundId)
+{
+	if (!enabled() || event < 0 || event >= PCSE_Count) return;
+	sSeEvents[seCategory(soundId)][event]++;
+}
+
+void pc_audio_se_start_volume(u32 soundId, float distanceVolume, float finalVolume)
+{
+	if (!enabled()) return;
+	const int c = seCategory(soundId);
+	sSeDistVol[c][volBucket(distanceVolume)]++;
+	sSeFinalVol[c][volBucket(finalVolume)]++;
+}
+
+void pc_audio_se_probe(u32 soundId, float distance, bool uncalculated, bool listed, float camVolume)
+{
+	if (!enabled()) return;
+	const int c = seCategory(soundId);
+	if (uncalculated) sSeProbe[c][kProbeUncalc]++;
+	if (!listed) sSeProbe[c][kProbeUnlisted]++;
+	if (camVolume == 0.0f) sSeProbe[c][kProbeCamZero]++;
+	sSeProbe[c][distance < 300.0f ? kProbeD300 : distance < 1000.0f ? kProbeD1000 : distance < 2600.0f ? kProbeD2600 : kProbeFar]++;
+}
+
 void pc_audio_drop_report()
 {
 	if (!enabled()) return;
@@ -138,5 +207,6 @@ void pc_audio_drop_report()
 		}
 	}
 	std::fprintf(stderr, "\n");
+	reportSe();
 	reportLevels();
 }

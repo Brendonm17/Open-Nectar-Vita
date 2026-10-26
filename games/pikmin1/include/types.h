@@ -352,7 +352,7 @@ inline void padStack(void)
 #define TRAP_UNIMPLEMENTED asm { trap } ((void)0)
 #elif defined(_MSC_VER)
 #define TRAP_UNIMPLEMENTED __asm { ud2 } __assume(0)
-#else
+#elif !defined(TRAP_UNIMPLEMENTED) // the PC port defines its own (pc_types.h)
 #define TRAP_UNIMPLEMENTED ((void)0) /* Replace me */
 #endif // clang-format on
 
