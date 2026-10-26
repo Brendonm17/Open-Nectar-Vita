@@ -20,6 +20,7 @@
 #if PIKMIN_LAUNCHER_NETPLAY
 #include "launcher_coop.h"
 #endif
+#include "gci_save_import.h"
 #include "launcher_platform.h"
 #include "settings_model.h"
 #include "release_update.h"
@@ -636,6 +637,12 @@ struct Hub {
     float toastTime = 0.0f;
     bool chosen = false;
     bool coopOpen = false;
+#ifndef __ANDROID__
+    std::function<int(const std::string&, const std::string&, const std::string&, const std::string&, bool,
+                      const std::string&)>
+        askModal;
+    std::string gciNote;
+#endif
 
     Hub(const HubState& s, HubResult& r) : state(s), result(r) {}
 
@@ -1127,6 +1134,80 @@ struct Hub {
         }
     }
 
+#ifndef __ANDROID__
+    void tryImportGciSave()
+    {
+        gciNote.clear();
+        const GameInstall& game = state.games[settingsGame];
+        if (!game.installed || game.directory.empty()) {
+            gciNote = "Install this game before importing a save.";
+            return;
+        }
+        if (!platform::hasGraphicalDialogs()) {
+            gciNote = "Import needs a graphical file picker (zenity or kdialog on Linux).";
+            return;
+        }
+        const fs::path picked =
+            platform::askForFile("Import GameCube save", "GameCube save (.gci)", "*.gci *.GCI");
+        if (picked.empty()) return;
+
+        ParsedGci parsed;
+        std::string error;
+        if (!parseGciFile(picked, parsed, error)) {
+            gciNote = error;
+            return;
+        }
+        const std::string discId = game.discId.empty() ? (settingsGame == 0 ? "GPIE01" : "GPVE01") : game.discId;
+        if (!gciMatchesInstalledGame(parsed.gameId, discId)) {
+            gciNote = "This save is for " + parsed.gameId + ", but this install is " + discId + ".";
+            return;
+        }
+
+        const fs::path card0 = card0DirectoryForInstall(fs::path(game.directory));
+        const fs::path dataPath = card0 / parsed.saveFileName;
+        bool overwrite = false;
+        if (fs::exists(dataPath)) {
+            if (!askModal) {
+                gciNote = "A save already exists; the launcher could not show a confirmation dialog.";
+                return;
+            }
+            const std::string prompt = "A save named \"" + parsed.saveFileName
+                                       + "\" is already on the memory card.\n\nReplace it with the imported file?";
+            const int answer = askModal("Replace save?", prompt, "Replace", "", false, "Cancel");
+            if (answer != 0) return;
+            overwrite = true;
+        }
+        if (!importGciToCard(parsed, card0, overwrite, error)) {
+            gciNote = error;
+            return;
+        }
+        toast = "Imported \"" + parsed.saveFileName + "\" to the memory card.";
+        toastTime = 4.5f;
+    }
+
+    void drawGciImport(float& top, ImVec2 size)
+    {
+        const GameInstall& game = state.games[settingsGame];
+        if (!game.installed) return;
+
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const float margin = std::max(40.0f, (size.x - 1000.0f) * 0.5f);
+        const float width = size.x - margin * 2.0f;
+        const ImVec2 panelA(margin, top), panelB(margin + width, top + 78.0f);
+        dl->AddRectFilled(panelA, panelB, IM_COL32(8, 32, 12, 215), 16.0f);
+        dl->AddRect(panelA, panelB, col(kOrangeDeep, 0.85f), 16.0f, 0, 2.0f);
+        dl->AddText(fonts.body, 19.0f, ImVec2(panelA.x + 16.0f, panelA.y + 12.0f), col(kOrange),
+                    "Bring a Dolphin or GameCube memory-card save into this install.");
+        ImGui::SetCursorScreenPos(ImVec2(panelB.x - 296.0f, panelA.y + 34.0f));
+        if (glassButton("Import GameCube save (.gci)", ImVec2(280.0f, 40.0f))) tryImportGciSave();
+        if (!gciNote.empty()) {
+            dl->AddText(fonts.caption, 16.0f, ImVec2(panelA.x + 16.0f, panelA.y + 52.0f),
+                        col(ImVec4(1.0f, 0.55f, 0.40f, 1.0f)), gciNote.c_str(), nullptr, width - 32.0f);
+        }
+        top += 92.0f;
+    }
+#endif
+
     void drawSettings(float top, ImVec2 size, float dt)
     {
         ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -1142,11 +1223,17 @@ struct Hub {
                 settingsGame = g;
                 settingsGroup = 0;
                 optionOrder.clear();
+#ifndef __ANDROID__
+                gciNote.clear();
+#endif
             }
             ImGui::PopID();
             pillX += pillW + pillGap;
         }
         top += 54.0f;
+#ifndef __ANDROID__
+        drawGciImport(top, size);
+#endif
         settings = settingsClients[settingsGame];
         if (!settings) {
             centredText(dl, fonts.body, 21.0f, ImVec2(size.x * 0.5f, top + 80.0f), col(kOrange),
@@ -2127,6 +2214,12 @@ bool HubWindow::open(const HubState& state, std::string& error)
 
     m.hub = std::make_unique<Hub>(m.state, m.result);
     Hub& hub = *m.hub;
+#ifndef __ANDROID__
+    hub.askModal = [&m](const std::string& title, const std::string& text, const std::string& primary,
+                        const std::string& secondary, bool isError, const std::string& cancel) {
+        return m.message(title, text, primary, secondary, isError, cancel);
+    };
+#endif
     loadFonts(hub.fonts);
     hub.logo = loadImageTexture(kLogoOpenNectar, kLogoOpenNectarSize, 160);
     hub.art.load(m.state.gameDataDirectory);
