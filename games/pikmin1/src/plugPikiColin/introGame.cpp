@@ -139,7 +139,12 @@ struct IntroModeState : public ModeState {
 		// Speedrun: vanilla, y en GameCube la intro del cohete no se salta.
 		canSkip = !pc_speedrun_active();
 #endif
+#if defined(PIKI_PC_PORT)
+		// Enter is A while a cutscene is up, so A skips as well as Start.
+		if (canSkip && gameflow.mMoviePlayer->mIsActive && mController->keyClick(KBBTN_START | KBBTN_A)) {
+#else
 		if (canSkip && gameflow.mMoviePlayer->mIsActive && mController->keyClick(KBBTN_START)) {
+#endif
 			gameflow.mMoviePlayer->skipScene(SCENESKIP_SkipAll);
 		}
 

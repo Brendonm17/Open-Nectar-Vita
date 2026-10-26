@@ -2,6 +2,13 @@
 #include "port/jaudio_host.h"
 #endif
 #include "pc_window.h"
+#include "pc_menu_pad.h"
+
+static_assert(PAD_BUTTON_LEFT == PC_MENU_PAD_LEFT && PAD_BUTTON_RIGHT == PC_MENU_PAD_RIGHT
+                  && PAD_BUTTON_DOWN == PC_MENU_PAD_DOWN && PAD_BUTTON_UP == PC_MENU_PAD_UP
+                  && PAD_BUTTON_A == PC_MENU_PAD_A && PAD_BUTTON_B == PC_MENU_PAD_B
+                  && PAD_BUTTON_START == PC_MENU_PAD_START,
+              "menu pad bits must match the GameCube pad");
 #include "pc_gyro.h"
 #include "pc_icon.h"
 #include "pc_speedrun.h"
@@ -181,7 +188,8 @@ static int sLogicalRetraceInterval = 1;
 // is a discrete, edge-shaped input: events arrive once per notch and are gone,
 // so they have to be banked here until a logical tick collects them, exactly
 // like the pad's edge-shaped buttons.
-static Uint32 sMousePressedMask = 0; // buttons pressed since the last take
+static Uint32 sMousePressedMask = 0; // real presses since the last take
+static Uint32 sRealMouseButtons = 0; // real buttons still held
 static int sMouseWheelSteps = 0;
 static float sTouchZoomDelta = 0.0f;
 // Co-op: giro y cabeceo de la cámara de cada jugador (docs/PLAN_COOP.md §6.7).
@@ -260,7 +268,7 @@ static float sMouseCursorDeltaY = 0.0f;
 // Default keyboard bindings (comfortable layout: mouse handles cursor/C-stick).
 const SDL_Scancode kDefaultKeyBindings[PC_KEY_ACT_COUNT] = {
     /* PC_KEY_ACT_A       */ SDL_SCANCODE_SPACE,      // A: Space / Left Click
-    /* PC_KEY_ACT_B       */ SDL_SCANCODE_LSHIFT,     // B: Shift / Right Click
+    /* PC_KEY_ACT_B       */ SDL_SCANCODE_LCTRL,      // B: Ctrl / Right Click
     /* PC_KEY_ACT_X       */ SDL_SCANCODE_X,          // X: X key
     /* PC_KEY_ACT_Y       */ SDL_SCANCODE_Y,          // Y: Y key
     /* PC_KEY_ACT_Z       */ SDL_SCANCODE_Z,          // Z: Z key / Mouse wheel click
@@ -1113,10 +1121,17 @@ void pc_window_poll_events(PADStatus* pad) {
             }
 #endif
             case SDL_MOUSEBUTTONDOWN:
-                // Edge mask for binding capture: a click shorter than a frame
-                // is invisible to SDL_GetMouseState, so remember every press.
-                if (event.button.button >= 1 && event.button.button <= 8)
-                    sMousePressedMask |= SDL_BUTTON(event.button.button);
+            case SDL_MOUSEBUTTONUP:
+                // A finger is also a mouse event. Leave that out of the press
+                // mask: F1 and the other prompts take the mask, and a menu
+                // reads it as A or B. The touch layer already has the finger.
+                // A physical mouse, on the desktop or on Android, still counts,
+                // including a click that is up again before the next sample.
+                pc_menu_pad_note_mouse_button(sRealMouseButtons, sMousePressedMask,
+                                              event.button.which, event.button.button,
+                                              event.type == SDL_MOUSEBUTTONDOWN);
+                if (event.type != SDL_MOUSEBUTTONDOWN)
+                    break;
                 // Issue #52: Escape (or the OS) can drop the mouse out of
                 // relative mode, which froze the cursor until the option was
                 // toggled. A click in the window takes it back.
@@ -1153,6 +1168,9 @@ void pc_window_poll_events(PADStatus* pad) {
                     sMouseCursorDeltaX = 0.0f;
                     sMouseCursorDeltaY = 0.0f;
                 }
+                // The matching button-up can be dropped when the window loses focus.
+                if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST)
+                    sRealMouseButtons = 0;
                 // Some platforms release the relative-mode grab while the
                 // window is unfocused; put it back on return (issue #52).
                 if (event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED && !sSettingsMenuOpen) {
@@ -1251,8 +1269,9 @@ void pc_window_poll_events(PADStatus* pad) {
     }
 
     const Uint8* state = SDL_GetKeyboardState(NULL);
-    // Bindings may name a mouse button (issue #42); sample the mouse once here.
-    const Uint32 boundMouse = SDL_GetMouseState(NULL, NULL);
+    // Bindings may name a mouse button (issue #42). SDL_GetMouseState also
+    // reports a finger, so mouse-button bindings use the real-mouse mask.
+    const Uint32 boundMouse = sRealMouseButtons;
     // La segunda tecla con un clic solo cuenta fuera de Classic, como los clics
     // fijos que sustituye (en Classic el ratón no juega).
     const bool mouseSecondOk = effectiveControlMode() != PC_CONTROL_CLASSIC;
@@ -1326,6 +1345,49 @@ void pc_window_poll_events(PADStatus* pad) {
 
     substickX = (s8)(cdirX * 127);
     substickY = (s8)(cdirY * 127);
+
+    // Menus share one mapping. Enter, Space and left click accept. Escape,
+    // Backspace and right click cancel. Arrows and WASD both move the cursor.
+    // Shift never cancels here. Free play keeps the bindings filled in above.
+    if (pc_menu_mode_active()) {
+        PcMenuPadKeys keys = {};
+        auto down = [&](SDL_Scancode sc) { return state[sc] != 0; };
+        keys.enter     = down(SDL_SCANCODE_RETURN);
+        keys.kpEnter   = down(SDL_SCANCODE_KP_ENTER);
+        keys.space     = down(SDL_SCANCODE_SPACE);
+        keys.escape    = down(SDL_SCANCODE_ESCAPE);
+        keys.backspace = down(SDL_SCANCODE_BACKSPACE);
+        keys.shiftL    = down(SDL_SCANCODE_LSHIFT);
+        keys.shiftR    = down(SDL_SCANCODE_RSHIFT);
+        keys.left      = down(SDL_SCANCODE_LEFT);
+        keys.right     = down(SDL_SCANCODE_RIGHT);
+        keys.up        = down(SDL_SCANCODE_UP);
+        keys.down      = down(SDL_SCANCODE_DOWN);
+        keys.keyA      = down(SDL_SCANCODE_A);
+        keys.keyD      = down(SDL_SCANCODE_D);
+        keys.keyW      = down(SDL_SCANCODE_W);
+        keys.keyS      = down(SDL_SCANCODE_S);
+        // A click shorter than this sample is only in the press mask. Leave
+        // that mask alone: pollMenuInput takes it later for F1 and the other
+        // prompts, and consume then clears this pad. Both masks omit a finger.
+        keys.clickLeft  = pc_menu_pad_click(sRealMouseButtons, sMousePressedMask, SDL_BUTTON_LEFT);
+        keys.clickRight = pc_menu_pad_click(sRealMouseButtons, sMousePressedMask, SDL_BUTTON_RIGHT);
+        auto keyBindHeld = [&](int bind) {
+            if (bind <= 0 || bind >= SDL_NUM_SCANCODES)
+                return false;
+            if (bind == SDL_SCANCODE_LSHIFT || bind == SDL_SCANCODE_RSHIFT)
+                return false;
+            return state[bind] != 0;
+        };
+        const bool nonShiftB = keyBindHeld(bindB1) || keyBindHeld(bindB2);
+        std::uint16_t bits = button;
+        std::int8_t sx = stickX;
+        std::int8_t sy = stickY;
+        pc_menu_pad_apply(keys, true, nonShiftB, sKeyBindings[PC_KEY_ACT_START], sKeyBindings2[PC_KEY_ACT_START], bits, sx, sy);
+        button = static_cast<u16>(bits);
+        stickX = static_cast<s8>(sx);
+        stickY = static_cast<s8>(sy);
+    }
 
     const bool usedKeyboard = button != 0 || dirX != 0 || dirY != 0 || cdirX != 0 || cdirY != 0;
     bool usedGamepad = false;

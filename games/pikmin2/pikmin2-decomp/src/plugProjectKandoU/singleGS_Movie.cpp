@@ -125,7 +125,12 @@ void MovieState::exec(SingleGameSection* gs)
 			}
 			break;
 		case true:
+#if defined(PIKI_PC_PORT)
+			// Enter is A while this movie is up, so A skips it too.
+			if ((mController->getButtonDown() & (Controller::PRESS_START | Controller::PRESS_A)) || mMoviePlayer->isFinishPlaying()) {
+#else
 			if ((mController->getButtonDown() & Controller::PRESS_START) || mMoviePlayer->isFinishPlaying()) { // skip the movie with start
+#endif
 				gs->mDisplayWiper = gs->mWipeInFader;
 				gs->mWipeInFader->start(4.0f);
 				gs->mCurrentCourseInfo = stageList->getCourseInfo(0);

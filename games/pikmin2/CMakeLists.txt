@@ -361,7 +361,10 @@ if(PIKMIN2_ENABLE_PORT_LAYER)
         ${PC_PORT_DIR}/pc_file_dialog.cpp
         ${PC_PORT_DIR}/mods/pc_hd_model_convert.cpp
         ${PC_PORT_DIR}/pc_pad_axis.cpp
+        ${PC_PORT_DIR}/pc_menu_pad.cpp
+        ${PC_PORT_DIR}/pc_menu_mode.cpp
         ${PC_PORT_DIR}/pc_menu_repeat.cpp
+        ${PC_PORT_DIR}/pc_photo_mode.cpp
         ${PC_PORT_DIR}/settings/pc_settings.cpp
         ${PC_PORT_DIR}/settings/pc_settings_p2_shim.cpp
         ${PC_PORT_DIR}/settings/pc_p2_glass_assets.cpp
@@ -600,6 +603,10 @@ if(PIKMIN2_ENABLE_PORT_LAYER)
         pikmin2_add_host_test(p2_pad_axis_test
             ${PC_PORT_DIR}/pc_pad_axis_test.cpp
             ${PC_PORT_DIR}/pc_pad_axis.cpp
+        )
+        pikmin2_add_host_test(p2_menu_pad_test
+            ${PC_PORT_DIR}/pc_menu_pad_test.cpp
+            ${PC_PORT_DIR}/pc_menu_pad.cpp
         )
         pikmin2_add_host_test(p2_photo_mode_test
             ${PC_PORT_DIR}/pc_photo_mode_test.cpp

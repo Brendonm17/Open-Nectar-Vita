@@ -313,6 +313,8 @@ set(PC_PORT_SOURCES
     pc_port/pc_keycaps.cpp
     pc_port/pc_gyro.cpp
     pc_port/pc_pad_axis.cpp
+    pc_port/pc_menu_pad.cpp
+    pc_port/pc_menu_mode.cpp
     pc_port/pc_menu_repeat.cpp
     pc_port/pc_photo_mode.cpp
     pc_port/pc_record.cpp
@@ -1210,6 +1212,12 @@ if(PIKMIN_BUILD_TESTS)
     target_include_directories(pc_pad_axis_test PRIVATE ${SDL2_INCLUDE_DIRS} pc_port)
     target_compile_options(pc_pad_axis_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
     add_test(NAME pc_pad_axis_test COMMAND pc_pad_axis_test)
+
+    # Menu pad translation (no window or controller needed)
+    add_executable(pc_menu_pad_test pc_port/pc_menu_pad_test.cpp pc_port/pc_menu_pad.cpp)
+    target_include_directories(pc_menu_pad_test PRIVATE ${SDL2_INCLUDE_DIRS} pc_port)
+    target_compile_options(pc_menu_pad_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+    add_test(NAME pc_menu_pad_test COMMAND pc_menu_pad_test)
 
     # Permadeath save block (no game needed)
     add_executable(pc_permadeath_test pc_port/pc_permadeath_test.cpp pc_port/pc_permadeath.cpp src/sysCommon/stream.cpp src/sysCommon/string.cpp)

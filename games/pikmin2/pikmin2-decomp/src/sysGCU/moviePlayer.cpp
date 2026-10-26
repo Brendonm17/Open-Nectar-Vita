@@ -869,12 +869,18 @@ bool MoviePlayer::update(Controller* input1, Controller* input2)
 				skip();
 
 			} else if (((input1->getButtonDown() & Controller::PRESS_START)
-			            || (input2 && (input2->getButtonDown() & Controller::PRESS_START)))
+			            || (input2 && (input2->getButtonDown() & Controller::PRESS_START))
 #ifdef PIKI_PC_PORT
-			           // Port: Start salta cualquier demo, como en Pikmin 1. El
-			           // vaciado de Finishing ejecuta el resto del guion, así que
-			           // nave, cebollas y capitanes quedan donde los deja el final.
-			           // En Speedrun, solo lo que se salta en GameCube.
+			            || (input1->getButtonDown() & Controller::PRESS_A)
+			            || (input2 && (input2->getButtonDown() & Controller::PRESS_A))
+#endif
+			               )
+#ifdef PIKI_PC_PORT
+			           // Port: Start or A skips any demo, as in Pikmin 1. Enter is
+			           // A while a cutscene is up, so it still skips. Finishing
+			           // runs the rest of the script, so the ship, onions and
+			           // captains end where the demo leaves them. Speedrun keeps
+			           // the GameCube rule.
 			           && (!pc_speedrun_active() || !mCurrentConfig->isNeverSkippable())) {
 #else
 			           && !mCurrentConfig->isNeverSkippable()) {
