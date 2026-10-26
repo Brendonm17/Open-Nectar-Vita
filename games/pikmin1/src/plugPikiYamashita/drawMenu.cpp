@@ -779,7 +779,11 @@ bool zen::DrawMenu::update(Controller* controller)
 					mState = STATUS_FadeOut;
 				}
 #if defined(PIKI_PC_PORT)
-				const bool pointerBack = mPointerBack && pc_menu_click_take_back();
+				// #178 makes a right click B on every menu. A pointer menu keeps mouse
+				// buttons off the pad, so it takes the right click here instead, wherever B
+				// can cancel it. A menu with no cancel key still ignores it.
+				const bool rightClickCancels = mPointerBack || (mPointerClicks && mKeyCancel != KBBTN_NONE);
+				const bool pointerBack       = rightClickCancels && pc_menu_click_take_back();
 #else
 				const bool pointerBack = false;
 #endif
