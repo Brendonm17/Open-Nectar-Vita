@@ -1795,7 +1795,20 @@ struct Hub {
 
         ImGui::SetCursorScreenPos(ImVec2(panelX, top + 24.0f));
         ImGui::BeginChild("launcherRows", ImVec2(panelW, panelFit.rowsH), ImGuiChildFlags_Borders);
-        const float controlW = std::min(300.0f, panelW * 0.45f);
+        const float innerW = ImGui::GetContentRegionAvail().x;
+        auto measure = [](const std::string& s) { return ImGui::CalcTextSize(s.c_str()).x; };
+        // Como en las filas de un juego: etiqueta encima del control si no cabe
+        // al lado (paneles estrechos) o recortada con "..." (anchos).
+        auto rowLabel = [&](const char* text, const ImVec4& colour) {
+            const SettingRowFit fit = fitSettingRow(innerW, measure(text));
+            const std::string shown = fit.mode == SettingRowMode::Inline ? std::string(text) : ellipsizeEnd(text, fit.labelMaxW, measure);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextColored(colour, "%s", shown.c_str());
+            if (shown != text && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("%s", text);
+            if (fit.mode == SettingRowMode::Stacked) ImGui::SetCursorPosX(ImGui::GetContentRegionMax().x - fit.controlW);
+            else ImGui::SameLine(ImGui::GetContentRegionMax().x - fit.controlW);
+            return fit.controlW;
+        };
         const ImVec4 label(1.0f, 0.93f, 0.80f, 1.0f), dim(0.62f, 0.58f, 0.44f, 1.0f);
         ImGui::Dummy(ImVec2(0, 4));
         ImGui::PushFont(fonts.caption);
@@ -1808,9 +1821,7 @@ struct Hub {
         const char* options[2] = { "Off", "On" };
         {
             const float rowY = ImGui::GetCursorPosY();
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextColored(info.canChange ? label : dim, "%s", "Keep settings in the game folder");
-            ImGui::SameLine(ImGui::GetContentRegionMax().x - controlW);
+            const float controlW = rowLabel("Keep settings in the game folder", info.canChange ? label : dim);
             ImGui::SetNextItemWidth(controlW);
             ImGui::BeginDisabled(!info.canChange);
             const int current = info.keepInGameFolder ? 1 : 0;
@@ -1839,9 +1850,7 @@ struct Hub {
             }
         }
         {
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextColored(label, "%s", "Settings folder");
-            ImGui::SameLine(ImGui::GetContentRegionMax().x - controlW);
+            const float controlW = rowLabel("Settings folder", label);
             const std::string shown = fitTail(ImGui::GetFont(), ImGui::GetFontSize(), info.folder, controlW);
             ImGui::TextColored(dim, "%s", shown.c_str());
         }
@@ -1977,7 +1986,8 @@ struct Hub {
 #endif
         if (shownGroup) {
         const SettingsGroup& group = *shownGroup;
-        const float controlW = std::min(300.0f, panelW * 0.45f);
+        const float innerW = ImGui::GetContentRegionAvail().x;
+        auto measure = [](const std::string& s) { return ImGui::CalcTextSize(s.c_str()).x; };
         for (const SettingsRow& row : group.rows) {
             if (!row.section.empty()) {
                 ImGui::Dummy(ImVec2(0, 4));
@@ -1988,10 +1998,20 @@ struct Hub {
             }
             ImGui::PushID(row.row);
             const float rowY = ImGui::GetCursorPosY();
+            // La etiqueta nunca queda debajo del control: encima de él en
+            // paneles estrechos, recortada con "..." (entera al pasar el ratón)
+            // en los anchos.
+            const SettingRowFit fit = fitSettingRow(innerW, measure(row.label));
+            const float controlW = fit.controlW;
+            const std::string label = fit.mode == SettingRowMode::Inline ? row.label
+                                                                        : ellipsizeEnd(row.label, fit.labelMaxW, measure);
             ImGui::AlignTextToFramePadding();
             ImGui::TextColored(row.enabled ? ImVec4(1.0f, 0.93f, 0.80f, 1.0f) : ImVec4(0.62f, 0.58f, 0.44f, 1.0f), "%s",
-                               row.label.c_str());
-            ImGui::SameLine(ImGui::GetContentRegionMax().x - controlW);
+                               label.c_str());
+            if (label != row.label && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("%s", row.label.c_str());
+            if (fit.mode == SettingRowMode::Stacked) ImGui::SetCursorPosX(ImGui::GetContentRegionMax().x - controlW);
+            else ImGui::SameLine(ImGui::GetContentRegionMax().x - controlW);
             ImGui::SetNextItemWidth(controlW);
             if (row.editable()) {
                 ImGui::BeginDisabled(busy);
@@ -2011,7 +2031,11 @@ struct Hub {
                 // Sin lista: se enseña el valor y, si hace falta, dónde cambiarlo.
                 std::string shown = row.value;
                 if (row.enabled && (row.picker || row.action)) shown += "   (in game: F1)";
-                ImGui::TextColored(ImVec4(0.62f, 0.58f, 0.44f, 1.0f), "%s", shown.c_str());
+                const std::string fitted = ellipsizeEnd(shown, controlW, measure);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextColored(ImVec4(0.62f, 0.58f, 0.44f, 1.0f), "%s", fitted.c_str());
+                if (fitted != shown && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("%s", shown.c_str());
             }
             // Ayuda de la fila bajo el ratón.
             const float rowH = ImGui::GetCursorPosY() - rowY;
@@ -2733,31 +2757,40 @@ struct HubWindow::Impl {
     {
         const float width = std::min(size.x - 80.0f, 640.0f) - 68.0f;
         const float textH = hub->fonts.body->CalcTextSizeA(20.0f, FLT_MAX, width, messageText.c_str()).y;
-        const ImVec2 panel(width + 68.0f, 170.0f + textH);
+        // Todos los botones del diálogo con el mismo tamaño estándar: el
+        // menor donde cabe el texto más largo. Si no caben en una fila, en dos
+        // (o más).
+        ButtonSize rowSize = hub->sizeFor(primaryLabel, 50.0f, role::kAction);
+        for (const std::string* other : { &secondaryLabel, &cancelLabel })
+            if (!other->empty()) rowSize = std::max(rowSize, hub->sizeFor(*other, 50.0f, role::kAction));
+        const float rowW = buttons::buttonWidth(rowSize);
+        std::vector<float> widths;
+        std::vector<int> answers;
+        if (!secondaryLabel.empty()) { widths.push_back(rowW); answers.push_back(1); }
+        widths.push_back(rowW);
+        answers.push_back(0);
+        const float cancelW = cancelLabel.empty() ? 0.0f : rowW;
+        int rows = 1;
+        const std::vector<DialogButton> placed = fitDialogButtons(widths, cancelW, width, rows);
+        const float rowStep = 50.0f + 12.0f;
+        const ImVec2 panel(width + 68.0f, 170.0f + textH + float(rows - 1) * rowStep);
         const ImVec2 at = beginModal(size, panel);
         title(at, messageTitle.c_str());
         ImGui::GetWindowDrawList()->AddText(hub->fonts.body, 20.0f, ImVec2(at.x, at.y + 52.0f),
                                             messageIsError ? col(ImVec4(1.0f, 0.78f, 0.62f, 1.0f)) : col(ImVec4(1.0f, 0.93f, 0.80f, 1.0f)),
                                             messageText.c_str(), nullptr, width);
-        const float buttonsY = at.y + panel.y - 96.0f;
-        // Todos los botones del diálogo con el mismo tamaño estándar: el
-        // menor donde cabe el texto más largo.
-        ButtonSize rowSize = hub->sizeFor(primaryLabel, 50.0f, role::kAction);
-        for (const std::string* other : { &secondaryLabel, &cancelLabel })
-            if (!other->empty()) rowSize = std::max(rowSize, hub->sizeFor(*other, 50.0f, role::kAction));
-        const float rowW = buttons::buttonWidth(rowSize);
-        float x = at.x + width - rowW;
-        ImGui::SetCursorScreenPos(ImVec2(x, buttonsY));
-        if (hub->glassButton(primaryLabel.c_str(), rowSize, 50.0f, true)) answer = 0;
-        if (!secondaryLabel.empty()) {
-            x -= rowW + 14.0f;
-            ImGui::SetCursorScreenPos(ImVec2(x, buttonsY));
-            if (hub->glassButton(secondaryLabel.c_str(), rowSize, 50.0f)) answer = 1;
+        const float buttonsY = at.y + panel.y - 96.0f - float(rows - 1) * rowStep;
+        for (std::size_t k = 0; k < answers.size(); ++k) {
+            const DialogButton& b = placed[k];
+            ImGui::SetCursorScreenPos(ImVec2(at.x + b.x, buttonsY + float(b.row) * rowStep));
+            const std::string& label = answers[k] == 0 ? primaryLabel : secondaryLabel;
+            if (hub->glassButton(label.c_str(), ImVec2(b.w, 50.0f), answers[k] == 0)) answer = answers[k];
         }
         if (!cancelLabel.empty()) {
-            // A la izquierda, lejos de las acciones: cerrar sin elegir ninguna.
-            ImGui::SetCursorScreenPos(ImVec2(at.x, buttonsY));
-            if (hub->glassButton(cancelLabel.c_str(), rowSize, 50.0f) || ImGui::IsKeyPressed(ImGuiKey_Escape))
+            // A la izquierda (o debajo), lejos de las acciones: cerrar sin elegir ninguna.
+            const DialogButton& b = placed.back();
+            ImGui::SetCursorScreenPos(ImVec2(at.x + b.x, buttonsY + float(b.row) * rowStep));
+            if (hub->glassButton(cancelLabel.c_str(), ImVec2(b.w, 50.0f)) || ImGui::IsKeyPressed(ImGuiKey_Escape))
                 answer = 2;
         }
         endModal();

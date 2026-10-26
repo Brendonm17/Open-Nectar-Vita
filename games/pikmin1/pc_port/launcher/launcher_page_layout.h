@@ -1,6 +1,8 @@
 #pragma once
 
 #include <algorithm>
+#include <string>
+#include <vector>
 
 namespace pikmin::launcher {
 
@@ -126,6 +128,106 @@ inline SettingsPanelFit fitSettingsPanel(float total)
     }
     out.helpH = std::clamp(total - kSettingsGap - kSettingsRowsComfort, kSettingsHelpMin, kSettingsHelpFull);
     out.rowsH = total - kSettingsGap - out.helpH;
+    return out;
+}
+
+// ── Anchos estrechos ───────────────────────────────────────────────────────
+
+// Una fila de ajustes: etiqueta a la izquierda y control a la derecha. Si la
+// etiqueta no cabe, en paneles estrechos va encima del control; en los anchos
+// se recorta con "..." (y la fila enseña la etiqueta entera al pasar el ratón).
+// Nunca queda debajo del control.
+enum class SettingRowMode { Inline, Ellipsized, Stacked };
+
+struct SettingRowFit {
+    SettingRowMode mode = SettingRowMode::Inline;
+    float controlW = 0.0f;
+    float labelMaxW = 0.0f; // ancho para la etiqueta (recortarla si no cabe)
+};
+
+inline constexpr float kSettingControlMaxW = 300.0f;
+inline constexpr float kSettingLabelGap = 12.0f;
+inline constexpr float kSettingStackBelowW = 520.0f; // ancho interior del panel
+
+inline SettingRowFit fitSettingRow(float innerW, float labelW)
+{
+    SettingRowFit out;
+    innerW = std::max(1.0f, innerW);
+    out.controlW = std::min(kSettingControlMaxW, innerW * 0.45f);
+    out.labelMaxW = std::max(1.0f, innerW - out.controlW - kSettingLabelGap);
+    if (labelW <= out.labelMaxW) return out;
+    if (innerW < kSettingStackBelowW) {
+        out.mode = SettingRowMode::Stacked;
+        out.controlW = std::min(kSettingControlMaxW, innerW);
+        out.labelMaxW = innerW;
+    } else {
+        out.mode = SettingRowMode::Ellipsized;
+    }
+    return out;
+}
+
+// Recorta `text` por el final con "..." para que mida como mucho `maxW`.
+// `measure(std::string)` devuelve el ancho de un texto.
+template <class Measure>
+std::string ellipsizeEnd(const std::string& text, float maxW, Measure measure)
+{
+    if (measure(text) <= maxW) return text;
+    const std::string dots = "...";
+    // Corta en límites de carácter UTF-8.
+    std::size_t keep = text.size();
+    while (keep > 0) {
+        do { --keep; } while (keep > 0 && (static_cast<unsigned char>(text[keep]) & 0xC0) == 0x80);
+        std::string shown = text.substr(0, keep);
+        while (!shown.empty() && shown.back() == ' ') shown.pop_back();
+        shown += dots;
+        if (measure(shown) <= maxW) return shown;
+    }
+    return dots;
+}
+
+// Botones de un diálogo: Cancelar a la izquierda, las acciones a la derecha.
+// Si no caben en una fila, las acciones van arriba repartidas a partes iguales
+// y Cancelar debajo; si ni así, una por fila a todo el ancho.
+struct DialogButton {
+    float x = 0.0f;
+    float w = 0.0f;
+    int row = 0;
+};
+
+inline constexpr float kDialogGap = 14.0f;
+inline constexpr float kDialogCancelGap = 32.0f; // mínimo entre Cancelar y las acciones
+
+// widths: anchos deseados de las acciones (de izquierda a derecha); cancelW 0 = sin Cancelar.
+inline std::vector<DialogButton> fitDialogButtons(const std::vector<float>& widths, float cancelW, float innerW, int& rows)
+{
+    std::vector<DialogButton> out;
+    float actions = 0.0f;
+    for (float w : widths) actions += w;
+    actions += kDialogGap * float(widths.empty() ? 0 : widths.size() - 1);
+    const float oneRow = actions + (cancelW > 0.0f ? cancelW + kDialogCancelGap : 0.0f);
+    if (oneRow <= innerW) {
+        float x = innerW - actions;
+        for (float w : widths) { out.push_back({ x, w, 0 }); x += w + kDialogGap; }
+        if (cancelW > 0.0f) out.push_back({ 0.0f, cancelW, 0 });
+        rows = 1;
+        return out;
+    }
+    int row = 0;
+    const float n = float(widths.size());
+    const float even = (innerW - kDialogGap * (n - 1.0f)) / std::max(1.0f, n);
+    float widest = 0.0f;
+    for (float w : widths) widest = std::max(widest, w);
+    if (widest <= even) {
+        float x = 0.0f;
+        for (std::size_t i = 0; i < widths.size(); ++i) { out.push_back({ x, even, 0 }); x += even + kDialogGap; }
+        row = 1;
+    } else {
+        // Una por fila: la principal (la de más a la derecha) arriba.
+        for (std::size_t i = 0; i < widths.size(); ++i) out.push_back({ 0.0f, innerW, int(widths.size() - 1 - i) });
+        row = int(widths.size());
+    }
+    if (cancelW > 0.0f) out.push_back({ 0.0f, std::min(cancelW, innerW), row++ });
+    rows = row;
     return out;
 }
 

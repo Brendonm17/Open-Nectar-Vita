@@ -3,6 +3,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <string>
+#include <vector>
 
 using namespace pikmin::launcher;
 
@@ -95,6 +97,49 @@ int main()
         check(s.rowsH >= kSettingsRowsMin - 0.01f && s.rowsH + 0.01f >= lastRows, "settings: rows grow with the height");
         check(near(s.rowsH + kSettingsGap + s.helpH, total), "settings: fills the space");
         lastRows = s.rowsH;
+    }
+
+    // ── Anchos estrechos ──
+    {
+        auto measure = [](const std::string& s) { return 10.0f * float(s.size()); };
+        // Panel de 640x700: interior ~340. "Instant Whistle Response" (240) no
+        // cabe al lado del control: va encima, nunca debajo.
+        SettingRowFit r = fitSettingRow(340.0f, 240.0f);
+        check(r.mode == SettingRowMode::Stacked && near(r.controlW, 300.0f), "narrow panel stacks the label");
+        r = fitSettingRow(340.0f, 120.0f);
+        check(r.mode == SettingRowMode::Inline && 120.0f + kSettingLabelGap + r.controlW <= 340.0f, "short label stays inline");
+        r = fitSettingRow(600.0f, 400.0f);
+        check(r.mode == SettingRowMode::Ellipsized && r.labelMaxW + kSettingLabelGap + r.controlW <= 600.01f, "wide panel ellipsizes");
+        for (float w = 100.0f; w <= 900.0f; w += 7.0f)
+            for (float lw = 10.0f; lw <= 600.0f; lw += 13.0f) {
+                const SettingRowFit f = fitSettingRow(w, lw);
+                if (f.mode == SettingRowMode::Inline) check(lw + kSettingLabelGap + f.controlW <= w + 0.01f, "inline never overlaps");
+                if (f.mode == SettingRowMode::Ellipsized) check(f.labelMaxW + kSettingLabelGap + f.controlW <= w + 0.01f, "cut label never overlaps");
+                if (f.mode == SettingRowMode::Stacked) check(f.controlW <= w + 0.01f, "stacked control fits");
+            }
+        check(ellipsizeEnd("Better Pathfinding", 500.0f, measure) == "Better Pathfinding", "fitting text unchanged");
+        const std::string cut = ellipsizeEnd("Chain Pikmin Actions", 120.0f, measure);
+        check(measure(cut) <= 120.0f && cut.size() > 3 && cut.substr(cut.size() - 3) == "...", "ellipsized fits");
+        check(cut == "Chain Pik...", "cut keeps as much as fits");
+        check(ellipsizeEnd("Chain Pikmin Actions", 90.0f, measure) == "Chain...", "cut drops trailing spaces");
+        check(ellipsizeEnd("abc", 5.0f, measure) == "...", "nothing fits: dots");
+        const std::string utf = ellipsizeEnd("Ñandú corriendo", 60.0f, [](const std::string& s) { return 5.0f * float(s.size()); });
+        check((static_cast<unsigned char>(utf[utf.size() - 4]) & 0xC0) != 0xC0, "never cut inside a UTF-8 character");
+    }
+    {
+        // Botones del diálogo.
+        int rows = 0;
+        auto b = fitDialogButtons({ 180.0f, 150.0f }, 130.0f, 572.0f, rows);
+        check(rows == 1 && b.size() == 3 && near(b[1].x + b[1].w, 572.0f) && near(b[2].x, 0.0f), "dialog: one row when it fits");
+        check(b[0].x + b[0].w + kDialogGap <= b[1].x + 0.01f && b[2].w + kDialogCancelGap <= b[0].x + 0.01f, "dialog: no overlap");
+        b = fitDialogButtons({ 220.0f, 200.0f }, 130.0f, 480.0f, rows);
+        check(rows == 2 && near(b[0].w, b[1].w) && b[0].row == 0 && b[2].row == 1, "dialog: actions split evenly, cancel below");
+        check(near(b[1].x + b[1].w, 480.0f), "dialog: even split fills the row");
+        b = fitDialogButtons({ 300.0f, 260.0f }, 130.0f, 400.0f, rows);
+        check(rows == 3 && b[1].row == 0 && b[0].row == 1 && b[2].row == 2, "dialog: one per row, primary on top");
+        for (const DialogButton& d : b) check(d.x + d.w <= 400.01f, "dialog: stacked buttons fit");
+        b = fitDialogButtons({ 150.0f }, 0.0f, 300.0f, rows);
+        check(rows == 1 && b.size() == 1, "dialog: single button");
     }
 
     std::cout << "launcher_page_layout_test: ok\n";
