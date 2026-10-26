@@ -103,6 +103,9 @@ Style styleFor(Look look)
         s.glow = selected ? 0.25f : 0.3f;
     }
     if (look == Look::Disabled) s.disabled = true;
+    // En reposo el brillo molesta: se atenúa. Al pulsar ya es más pequeño y
+    // oscuro (highlightScale), y seleccionado se queda entero.
+    if (look == Look::Normal || look == Look::Disabled) s.specular = kRestingSpecular;
     return s;
 }
 
@@ -113,9 +116,10 @@ void glintCentre(float w, float h, float& x, float& y)
     y = h * 0.33f;
 }
 
-Bitmap render(Look look, float w, float h, float scale)
+Bitmap render(Look look, float w, float h, float scale) { return render(styleFor(look), w, h, scale); }
+
+Bitmap render(const Style& st, float w, float h, float scale)
 {
-    const Style st = styleFor(look);
     Bitmap out;
     out.width = std::max(1, int(std::ceil((w + 2 * kPad) * scale)));
     out.height = std::max(1, int(std::ceil((h + 2 * kPad) * scale)));
@@ -158,6 +162,10 @@ Bitmap render(Look look, float w, float h, float scale)
                     const float rx = (x - hx) / (w * 0.85f), ry = (y - hy) / (h * 1.3f);
                     const float rr = clamp01(std::sqrt(rx * rx + ry * ry));
                     p.over(mix(st.bodyLight, st.bodyDark, std::pow(rr, 0.8f)), body);
+                    // Brillo especular: se pinta entero y luego se funde con
+                    // el cuerpo según st.specular, para que atenuarlo baje
+                    // también la parte que satura a blanco.
+                    const Px unlit = p;
                     // Punto brillante suave.
                     const float hot = std::exp(-(std::pow((x - (left + r * 1.05f)) / (r * 0.95f * (0.6f + 0.4f * hs)), 2.0f)
                                                  + std::pow((y - (top + h * 0.34f)) / (h * 0.26f * (0.6f + 0.4f * hs)), 2.0f)));
@@ -177,6 +185,12 @@ Bitmap render(Look look, float w, float h, float scale)
                     const float fl = gauss((y - gy) / line) * gauss((x - gx) / (gs * 3.2f))
                                    + gauss((x - gx) / line) * gauss((y - gy) / (gs * 2.4f));
                     p.light(kWhite, fl * 0.55f * body * st.flare);
+                    if (st.specular < 1.0f) {
+                        const float k = std::max(0.0f, st.specular);
+                        p.r = unlit.r + (p.r - unlit.r) * k;
+                        p.g = unlit.g + (p.g - unlit.g) * k;
+                        p.b = unlit.b + (p.b - unlit.b) * k;
+                    }
                     // Luz refractada abajo a la derecha.
                     p.light(kRim, gauss((d + b + 1.5f) / 1.25f) * clamp01((lx - 0.55f) / 0.45f) * clamp01((ly - 0.5f) / 0.5f) * body * 0.25f);
                     if (st.innerGlow > 0) p.light(kBorderHover, std::exp(-std::max(-(d + b), 0.0f) / 3.5f) * body * st.innerGlow);

@@ -32,6 +32,10 @@ struct Style {
     float glint = 1.0f;      // tamaño relativo del destello
     float flare = 0.7f;      // brillo de la cruz del destello
     float highlightScale = 1.0f; // encoge el brillo al pulsar
+    // Cuánto se ve el brillo especular (punto, destello con su cruz y veta):
+    // 1 = todo. En reposo y apagado se atenúa a kRestingSpecular; al pasar el
+    // ratón vuelve a 1 fundiendo los aspectos, así que la subida es suave.
+    float specular = 1.0f;
     float glow = 0;          // halo dorado exterior
     float glowSigma = 8;
     float innerGlow = 0;     // brillo dorado interior (seleccionado)
@@ -39,6 +43,8 @@ struct Style {
     float bodyOffsetY = 0;   // el botón baja al pulsarlo
     bool disabled = false;
 };
+
+constexpr float kRestingSpecular = 0.75f;
 
 Style styleFor(Look look);
 
@@ -53,6 +59,7 @@ struct Bitmap {
 // Hornea el botón de w x h unidades lógicas a `scale` píxeles por unidad. La
 // textura empieza kPad unidades arriba a la izquierda del botón.
 Bitmap render(Look look, float w, float h, float scale);
+Bitmap render(const Style& style, float w, float h, float scale);
 inline int pixels(float logical, float scale) { return int(logical * scale + 0.5f); }
 
 // Destello en cruz para el centelleo al entrar el ratón (blanco con alfa).

@@ -3,6 +3,7 @@
 // de las capas, los parámetros de cada aspecto y el contraste del texto.
 #include "button_style.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
@@ -51,6 +52,23 @@ Rgba at(const Bitmap& b, int x, int y)
     return { p[0] / 255.0f, p[1] / 255.0f, p[2] / 255.0f, p[3] / 255.0f };
 }
 float brightness(Rgba c) { return luminance({ c.r, c.g, c.b }); }
+
+// Lo más que el brillo especular aclara el botón: el aspecto contra el mismo
+// aspecto sin brillo.
+float specularPeak(Style st, float w, float h, float scale)
+{
+    const Bitmap lit = render(st, w, h, scale);
+    st.specular = 0;
+    const Bitmap bare = render(st, w, h, scale);
+    float peak = 0;
+    for (int y = 0; y < lit.height; ++y)
+        for (int x = 0; x < lit.width; ++x) {
+            // Media de los canales: la mezcla es lineal en ellos (la luminancia no).
+            const Rgba a = at(lit, x, y), b = at(bare, x, y);
+            peak = std::max(peak, ((a.r - b.r) + (a.g - b.g) + (a.b - b.b)) / 3.0f);
+        }
+    return peak;
+}
 
 } // namespace
 
@@ -179,6 +197,42 @@ int main()
         check(p.shadowY < n.shadowY && p.bodyOffsetY > 0, "pressed sits lower with a shorter shadow");
         check(s.borderWidth > n.borderWidth && s.innerGlow > 0, "selected has a thicker border and inner glow");
         check(styleFor(Look::Disabled).disabled, "disabled look is flagged");
+        check(n.specular < 1 && styleFor(Look::Disabled).specular == n.specular, "resting and disabled highlights are dimmed");
+        check(h.specular == 1 && p.specular == 1 && s.specular == 1 && styleFor(Look::SelectedHovered).specular == 1
+                && styleFor(Look::SelectedPressed).specular == 1,
+            "hover, press and selected keep the full highlight");
+    }
+
+    // ── Brillo especular atenuado en reposo ──────────────────────────────────
+    {
+        const float w = 144, h = 44;
+        for (float scale : { 1.0f, 2.0f }) {
+            const float normal = specularPeak(styleFor(Look::Normal), w, h, scale);
+            const float selected = specularPeak(styleFor(Look::Selected), w, h, scale);
+            const float hovered = specularPeak(styleFor(Look::Hovered), w, h, scale);
+            Style full = styleFor(Look::Normal);
+            full.specular = 1;
+            const float undimmed = specularPeak(full, w, h, scale);
+            check(normal > 0.05f, "resting button still has a highlight");
+            check(std::fabs(normal / undimmed - kRestingSpecular) < 0.03f, "resting highlight peak is 75% of undimmed");
+            check(std::fabs(normal / selected - 0.75f) < 0.06f, "resting highlight peak is ~75% of selected");
+            check(hovered >= selected * 0.98f, "hover highlight is back at full strength");
+            Style dis = styleFor(Look::Disabled);
+            const float disabled = specularPeak(dis, w, h, scale);
+            dis.specular = 1;
+            check(disabled < specularPeak(dis, w, h, scale) * 0.8f, "disabled highlight is dimmed too");
+        }
+        // A mitad del hover el brillo queda entre los dos aspectos (sin saltos ni acumulación).
+        const Bitmap n = render(Look::Normal, w, h, 2), hv = render(Look::Hovered, w, h, 2);
+        const Bitmap* looks[kLookCount] = { &n, &hv };
+        float half[kLookCount] = { 0.5f, 0.5f };
+        Bitmap mid;
+        composite(looks, half, mid);
+        float gx, gy;
+        glintCentre(w, h, gx, gy);
+        const int px = int((kPad + gx + 3) * 2), py = int((kPad + gy + 3) * 2);
+        const float a = brightness(at(n, px, py)), b = brightness(at(hv, px, py)), m = brightness(at(mid, px, py));
+        check(a < b && m >= a - 0.01f && m <= b + 0.01f, "hover fade brightens the highlight smoothly");
     }
 
     // ── Mapa de bits ─────────────────────────────────────────────────────────
