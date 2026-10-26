@@ -110,7 +110,9 @@ void runTexturePackDownload(HubWindow& hub, int game, const fs::path& gameDirect
     // El zip que el jugador ya tiene (Google Drive tiene un límite diario de
     // descargas; issue #128). Mismo instalador que el de la descarga.
     const auto installLocalZip = [&]() {
-        const fs::path local = platform::askForFile("Choose the texture pack zip", "Texture pack zip", "*.zip *.ZIP");
+        const fs::path local = fs::u8path(hub.runDialog([] {
+            return platform::askForFile("Choose the texture pack zip", "Texture pack zip", "*.zip *.ZIP").u8string();
+        }, "file picker"));
         if (local.empty()) return;
         std::string localError;
         const bool done = runPainting(hub, "Installing HD textures", [&] {

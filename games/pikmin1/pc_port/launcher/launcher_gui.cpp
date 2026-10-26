@@ -20,6 +20,7 @@
 #if PIKMIN_LAUNCHER_NETPLAY
 #include "launcher_coop.h"
 #endif
+#include "gci_save_import.h"
 #include "launcher_platform.h"
 #include "settings_model.h"
 #include "release_update.h"
@@ -620,6 +621,11 @@ struct Hub {
     std::shared_ptr<SettingsClient> settings;
     int settingsGame = 0;
     int settingsGroup = 0;
+    // Page that asked for the request whose result is in snap.message: the
+    // result only shows on that page, so it does not follow you to another.
+    int messageGame = -1;
+    int messageGroup = -1;
+    int pickGame = -1, pickGroup = -1; // page that opened the file pick
     // Orden de las opciones tal como se vieron la primera vez: el juego lista
     // las cíclicas empezando por el valor actual, y el desplegable no debe
     // reordenarse cada vez que se cambia algo.
@@ -636,8 +642,100 @@ struct Hub {
     float toastTime = 0.0f;
     bool chosen = false;
     bool coopOpen = false;
+#ifndef __ANDROID__
+    std::function<int(const std::string&, const std::string&, const std::string&, const std::string&, bool,
+                      const std::string&)>
+        askModal;
+    // Saves page: result of the last import (shown in the help box) and what
+    // is on this game's memory card, re-read every couple of seconds.
+    std::string gciNote;
+    bool gciNoteIsError = false;
+    std::string savesStatus;
+    bool savesFolderExists = false;
+    bool backupsFolderExists = false;
+    int savesStatusGame = -1;
+    float savesStatusAge = 0.0f;
+    std::string savesBackupTime; // newest backup, "Oct 25, 8:37 PM"; empty when none
+#endif
+    // Work that may open a modal (which runs its own frame loop), queued from
+    // inside a frame and run by HubWindow between frames.
+    std::function<void()> betweenFrames;
+
+    // A file or folder picker runs on its own thread so the window keeps
+    // drawing while the dialog is open. The worker only calls the platform
+    // dialog and writes `path`; everything else stays on the main thread. The
+    // thread holds its own reference, so it may outlive the hub if the
+    // launcher quits (HubWindow then closes the dialog, see ~Impl).
+    struct FilePick {
+        std::atomic<bool> done { false };
+        fs::path path; // written by the worker before `done`
+    };
+    std::shared_ptr<FilePick> filePick;
+    std::string filePickFor; // which button opened it, for its label
+    std::function<void(const fs::path&)> filePickThen;
 
     Hub(const HubState& s, HubResult& r) : state(s), result(r) {}
+
+    bool filePickOpen() const { return filePick != nullptr; }
+
+    std::string filePickLabel(const std::string& owner, const char* label,
+                              const char* waiting = "Waiting for file picker...") const
+    {
+        return filePickFor == owner ? waiting : label;
+    }
+
+    // `dialog` runs on the worker, so it must only call the platform dialog
+    // with values it owns (no references into the hub).
+    void startPick(std::string owner, std::function<fs::path()> dialog, std::function<void(const fs::path&)> then)
+    {
+        if (filePick) return;
+        messageGroup = -1; // a new pick hides the last result
+        pickGame = settingsGame;
+        pickGroup = settingsGroup;
+        filePick = std::make_shared<FilePick>();
+        filePickFor = std::move(owner);
+        filePickThen = std::move(then);
+        std::thread([pick = filePick, dialog = std::move(dialog)] {
+            pick->path = dialog();
+            pick->done.store(true, std::memory_order_release);
+        }).detach();
+    }
+
+    void startFilePick(std::string owner, std::string title, std::string filterName, std::string patterns,
+                       std::function<void(const fs::path&)> then)
+    {
+        startPick(std::move(owner),
+                  [title = std::move(title), filterName = std::move(filterName), patterns = std::move(patterns)] {
+                      return platform::askForFile(title, filterName, patterns);
+                  },
+                  std::move(then));
+    }
+
+    // Called by HubWindow between frames, never inside hub->frame(): the
+    // continuation may open a modal, which runs its own frame loop.
+    void finishFilePick()
+    {
+        if (!filePick || !filePick->done.load(std::memory_order_acquire)) return;
+        const fs::path picked = filePick->path;
+        std::function<void(const fs::path&)> then = std::move(filePickThen);
+        filePick.reset();
+        filePickFor.clear();
+        filePickThen = nullptr;
+        if (!picked.empty() && then) then(picked);
+        // The request the pick queued answers the page that opened it, even
+        // if another page is showing now.
+        if (!pendingRequest.empty()) {
+            messageGame = pickGame;
+            messageGroup = pickGroup;
+        }
+    }
+
+    void runBetweenFrames()
+    {
+        std::function<void()> work = std::move(betweenFrames);
+        betweenFrames = nullptr;
+        if (work) work();
+    }
 
 #if PIKMIN_LAUNCHER_NETPLAY
     // Online co-op panel (netplay builds of the game): the game runs as a
@@ -1000,6 +1098,8 @@ struct Hub {
     {
         pendingRequest = std::move(arguments);
         pendingLabel = label;
+        messageGame = settingsGame;
+        messageGroup = settingsGroup;
     }
 
     const std::vector<std::string>& stableOptions(int group, const SettingsRow& row)
@@ -1037,9 +1137,10 @@ struct Hub {
         if (snap.texturePacks.empty()) ImGui::TextColored(ImVec4(0.62f, 0.58f, 0.44f, 1.0f), "No packs installed yet.");
         ImGui::EndDisabled();
         ImGui::Dummy(ImVec2(0, 10));
-        if (glassButton("Install a pack from a .zip", ImVec2(300.0f, 46.0f), false, busy)) {
-            const fs::path zip = platform::askForFile("Choose the texture pack zip", "Texture pack zip", "*.zip *.ZIP");
-            if (!zip.empty()) queue({ "--texpack-install", zip.string() }, "Installing the pack...");
+        if (glassButton(filePickLabel("texpack", "Install a pack from a .zip").c_str(), ImVec2(300.0f, 46.0f), false,
+                        busy || filePickOpen())) {
+            startFilePick("texpack", "Choose the texture pack zip", "Texture pack zip", "*.zip *.ZIP",
+                          [this](const fs::path& zip) { queue({ "--texpack-install", zip.string() }, "Installing the pack..."); });
         }
     }
 
@@ -1074,12 +1175,14 @@ struct Hub {
                 ImGui::TextColored(ImVec4(0.62f, 0.58f, 0.44f, 1.0f), "Not installed");
             }
             ImGui::SameLine(ImGui::GetContentRegionMax().x - buttonW);
-            if (glassButton(model.installed ? "Replace..." : "Install...", ImVec2(buttonW, 40.0f), false, busy)) {
-                const fs::path zip = platform::askForFile("Choose the zip for " + model.name, "Model zip", "*.zip *.ZIP");
-                if (!zip.empty()) {
-                    queue({ "--hdmodel-install", std::to_string(model.row), zip.string() },
-                                          "Converting the model...");
-                }
+            const std::string pickOwner = "model" + std::to_string(model.row);
+            if (glassButton(filePickLabel(pickOwner, model.installed ? "Replace..." : "Install...").c_str(),
+                            ImVec2(buttonW, 40.0f), false, busy || filePickOpen())) {
+                const int row = model.row;
+                startFilePick(pickOwner, "Choose the zip for " + model.name, "Model zip", "*.zip *.ZIP",
+                              [this, row](const fs::path& zip) {
+                                  queue({ "--hdmodel-install", std::to_string(row), zip.string() }, "Converting the model...");
+                              });
             }
             ImGui::PopID();
         }
@@ -1127,6 +1230,225 @@ struct Hub {
         }
     }
 
+#ifndef __ANDROID__
+    void setGciNote(std::string note, bool isError)
+    {
+        gciNote = std::move(note);
+        gciNoteIsError = isError;
+    }
+
+    void tryImportGciSave()
+    {
+        gciNote.clear();
+        const GameInstall& game = state.games[settingsGame];
+        if (!game.installed || game.directory.empty()) {
+            setGciNote("Install this game before importing a save.", true);
+            return;
+        }
+        if (!platform::hasGraphicalDialogs()) {
+            setGciNote("Import needs a graphical file picker (zenity or kdialog on Linux).", true);
+            return;
+        }
+        const int gameIndex = settingsGame;
+        // .gci exports, plus Open Nectar's own card files, which have no
+        // extension ("Pikmin dataFile", "Pikmin2_SaveData").
+        startFilePick("gci", "Import a save", "GameCube or Open Nectar save", "*.gci *.GCI *dataFile *_SaveData",
+                      [this, gameIndex](const fs::path& picked) { importPickedSave(gameIndex, picked); });
+    }
+
+    // Runs between frames once the picker returns a file (see finishFilePick).
+    void importPickedSave(int gameIndex, const fs::path& picked)
+    {
+        const GameInstall& game = state.games[gameIndex];
+        const std::string discId = game.discId.empty() ? (gameIndex == 0 ? "GPIE01" : "GPVE01") : game.discId;
+        const fs::path card0 = card0DirectoryForInstall(fs::path(game.directory));
+        PreparedSave save;
+        std::string error;
+        switch (prepareSaveImport(picked, discId, card0, save, error)) {
+        case PrepareResult::Error: setGciNote(error, true); return;
+        case PrepareResult::AlreadyCurrent: setGciNote(error, false); return;
+        case PrepareResult::Ready: break;
+        }
+
+        std::error_code ec;
+        bool overwrite = false;
+        if (fs::exists(card0 / save.saveFileName, ec) || fs::exists(card0 / (".meta_" + save.saveFileName), ec)) {
+            if (!askModal) {
+                setGciNote("A save already exists; the launcher could not show a confirmation dialog.", true);
+                return;
+            }
+            // One file holds every slot and the options, in both games.
+            const std::string prompt =
+                std::string("Importing replaces all save slots and options on this install's memory card with the "
+                            "ones in ")
+                + (save.native ? "the save file you picked." : "the .gci file.")
+                + "\n\nYour current save is backed up first, and you can bring it back from this page with "
+                  "\"Restore previous save\".";
+            const int answer = askModal("Replace your save?", prompt, "Replace", "", false, "Cancel");
+            if (answer != 0) return;
+            overwrite = true;
+        }
+        CardBackup backup;
+        if (!importPreparedSave(save, card0, overwrite, error, &backup)) {
+            setGciNote(error, true);
+            return;
+        }
+        toast = "Imported \"" + save.saveFileName + "\" to the memory card. It will appear on the file select screen.";
+        toastTime = 4.5f;
+        setGciNote(backup.dir.empty() ? toast : toast + " Your previous save was backed up.", false);
+        savesStatusGame = -1; // re-read the card on the next frame
+    }
+
+    void tryRestoreSave()
+    {
+        gciNote.clear();
+        const int gameIndex = settingsGame;
+        betweenFrames = [this, gameIndex] { restorePreviousSave(gameIndex); };
+    }
+
+    // Runs between frames (see runBetweenFrames): it asks first.
+    void restorePreviousSave(int gameIndex)
+    {
+        const fs::path card0 = card0DirectoryForInstall(fs::path(state.games[gameIndex].directory));
+        const std::vector<CardBackup> backups = listCardBackups(card0);
+        if (backups.empty()) {
+            setGciNote("There is no backup to restore.", true);
+            return;
+        }
+        const std::string when = describeBackupTime(backups.front());
+        if (!askModal) {
+            setGciNote("The launcher could not show a confirmation dialog.", true);
+            return;
+        }
+        const std::string prompt =
+            "This puts back the save that was backed up on " + when
+            + ", replacing all save slots and options on this install's memory card.\n\nYour current save is "
+              "backed up first, so you can undo this with \"Restore previous save\".";
+        const int answer = askModal("Restore previous save?", prompt, "Restore", "", false, "Cancel");
+        if (answer != 0) return;
+        std::string error;
+        if (!restoreLatestCardBackup(card0, error)) {
+            setGciNote(error, true);
+            return;
+        }
+        toast = "Restored the save from " + when + ". It will appear on the file select screen.";
+        toastTime = 4.5f;
+        setGciNote(toast + " The save it replaced was backed up.", false);
+        savesStatusGame = -1;
+    }
+
+    // One line about this game's memory card: which save files are on it.
+    void refreshSavesStatus(float dt)
+    {
+        savesStatusAge += dt;
+        if (savesStatusGame == settingsGame && savesStatusAge < 2.0f) return;
+        savesStatusGame = settingsGame;
+        savesStatusAge = 0.0f;
+        savesStatus.clear();
+        savesBackupTime.clear();
+        savesFolderExists = false;
+        backupsFolderExists = false;
+        const GameInstall& game = state.games[settingsGame];
+        if (game.directory.empty()) return;
+        const fs::path card0 = card0DirectoryForInstall(fs::path(game.directory));
+        const std::vector<CardBackup> backups = listCardBackups(card0);
+        if (!backups.empty()) savesBackupTime = describeBackupTime(backups.front());
+        std::error_code backupsEc;
+        backupsFolderExists = fs::is_directory(cardBackupRoot(card0), backupsEc);
+        std::error_code ec;
+        std::vector<std::string> names;
+        if (fs::is_directory(card0, ec)) {
+            savesFolderExists = true;
+            for (const auto& entry : fs::directory_iterator(card0, ec)) {
+                const std::string name = entry.path().filename().string();
+                if (!name.empty() && name[0] != '.' && entry.is_regular_file(ec)) names.push_back(name);
+            }
+        }
+        const char* gameName = settingsGame == 0 ? "Pikmin" : "Pikmin 2";
+        savesStatus = names.empty()
+                          ? "No save yet. An imported save will appear on the file select screen."
+                          : std::string("You already have a ") + gameName
+                                + " save. Importing will ask before replacing it.";
+    }
+
+    void openFolder(const fs::path& folder)
+    {
+        // file:// URL: forward slashes, a leading slash before a drive letter,
+        // and the characters a URL can't carry as-is escaped.
+        const std::string path = folder.generic_string();
+        std::string url = path.empty() || path[0] != '/' ? "file:///" : "file://";
+        for (const char c : path) {
+            if (c == ' ' || c == '%' || c == '#' || c == '?') {
+                char escaped[4];
+                snprintf(escaped, sizeof(escaped), "%%%02X", static_cast<unsigned char>(c));
+                url += escaped;
+            } else {
+                url += c;
+            }
+        }
+        if (SDL_OpenURL(url.c_str()) != 0) setGciNote("Could not open the folder: " + folder.string(), true);
+    }
+
+    fs::path saveCardFolder() const
+    {
+        return card0DirectoryForInstall(fs::path(state.games[settingsGame].directory));
+    }
+
+    // Saves page, laid out like Texture Packs.
+    void drawSaves(bool busy, float dt)
+    {
+        refreshSavesStatus(dt);
+        ImGui::PushFont(fonts.caption);
+        ImGui::TextColored(kOrangeDeep, "SAVE FILES");
+        ImGui::PopFont();
+        ImGui::Separator();
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextColored(ImVec4(1.0f, 0.93f, 0.80f, 0.85f),
+                           "Bring a save into this install: a GameCube export (.gci) from Dolphin or a real "
+                           "memory card, or an Open Nectar save file from another install or a backup. It shows up "
+                           "on the game's file select screen.");
+        ImGui::Dummy(ImVec2(0, 6));
+        ImGui::TextColored(ImVec4(0.62f, 0.58f, 0.44f, 1.0f), "%s", savesStatus.c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::Dummy(ImVec2(0, 10));
+        // One shared width for every Saves-page button: wide enough for the longest label (including the
+        // "Waiting for file picker..." state), never below 240 px. Two buttons + gap fit the panel at 960 px.
+        float savesButtonW = 240.0f;
+        for (const char* label : {"Import a save...", "Open save folder", "Restore previous save", "Open backups folder",
+                                  "Waiting for file picker..."})
+            savesButtonW = std::max(savesButtonW, ImGui::CalcTextSize(label).x + 48.0f);
+        const ImVec2 savesButtonSize(savesButtonW, 46.0f);
+        if (glassButton(filePickLabel("gci", "Import a save...").c_str(), savesButtonSize, false,
+                        busy || filePickOpen()))
+            tryImportGciSave();
+        ImGui::SameLine(0.0f, 12.0f);
+        if (glassButton("Open save folder", savesButtonSize, false, !savesFolderExists)) openFolder(saveCardFolder());
+
+        ImGui::Dummy(ImVec2(0, 18));
+        ImGui::PushFont(fonts.caption);
+        ImGui::TextColored(kOrangeDeep, "BACKUPS");
+        ImGui::PopFont();
+        ImGui::Separator();
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextColored(ImVec4(0.62f, 0.58f, 0.44f, 1.0f),
+                           "Before a save is replaced, the old one is copied to a backup folder. The newest %d are kept.",
+                           kCardBackupKeep);
+        if (!savesBackupTime.empty()) {
+            ImGui::Dummy(ImVec2(0, 6));
+            ImGui::TextColored(ImVec4(0.62f, 0.58f, 0.44f, 1.0f), "Latest backup: %s", savesBackupTime.c_str());
+        }
+        ImGui::PopTextWrapPos();
+        ImGui::Dummy(ImVec2(0, 10));
+        if (!savesBackupTime.empty()) {
+            if (glassButton("Restore previous save", savesButtonSize, false, busy || filePickOpen()))
+                tryRestoreSave();
+            ImGui::SameLine(0.0f, 12.0f);
+        }
+        if (glassButton("Open backups folder", savesButtonSize, false, !backupsFolderExists))
+            openFolder(cardBackupRoot(saveCardFolder()));
+    }
+#endif
+
     void drawSettings(float top, ImVec2 size, float dt)
     {
         ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -1142,6 +1464,9 @@ struct Hub {
                 settingsGame = g;
                 settingsGroup = 0;
                 optionOrder.clear();
+#ifndef __ANDROID__
+                gciNote.clear();
+#endif
             }
             ImGui::PopID();
             pillX += pillW + pillGap;
@@ -1183,7 +1508,14 @@ struct Hub {
         // Fusion/Pikmin 2 declara exactF1: sus grupos vienen enteros del juego y
         // no se les debe mezclar ninguna página heredada.
         const int packsPage = int(groups.size()), modelsPage = packsPage + 1;
+#ifndef __ANDROID__
+        // Saves: the one launcher page every game gets, exactF1 included.
+        const int savesPage = snap.exactF1 ? int(groups.size()) : modelsPage + 1;
+        const int lastPage = savesPage;
+#else
+        const int savesPage = -1;
         const int lastPage = snap.exactF1 ? int(groups.size()) - 1 : modelsPage;
+#endif
         settingsGroup = std::clamp(settingsGroup, 0, lastPage);
 
         const float margin = std::max(40.0f, (size.x - 1000.0f) * 0.5f);
@@ -1197,7 +1529,10 @@ struct Hub {
 
         // Grupos a la izquierda, como pestañas verticales.
         for (int g = 0; g <= lastPage; ++g) {
-            const char* name = g == packsPage ? "Texture Packs" : g == modelsPage ? "HD Models" : groups[size_t(g)].name.c_str();
+            const char* name = g == savesPage ? "Saves"
+                             : g == packsPage ? "Texture Packs"
+                             : g == modelsPage ? "HD Models"
+                                               : groups[size_t(g)].name.c_str();
             ImGui::SetCursorScreenPos(ImVec2(margin, top + 24.0f + float(g) * 50.0f));
             ImGui::PushID(g);
             if (glassButton(name, ImVec2(listW, 40.0f), g == settingsGroup)) settingsGroup = g;
@@ -1224,6 +1559,9 @@ struct Hub {
         const SettingsGroup* shownGroup = settingsGroup < packsPage ? &groups[size_t(settingsGroup)] : nullptr;
         if (!snap.exactF1 && settingsGroup == packsPage) drawTexturePacks(snap, busy);
         if (!snap.exactF1 && settingsGroup == modelsPage) drawHdModels(snap, busy);
+#ifndef __ANDROID__
+        if (settingsGroup == savesPage) drawSaves(busy, dt);
+#endif
         if (shownGroup) {
         const SettingsGroup& group = *shownGroup;
         const float controlW = std::min(300.0f, panelW * 0.45f);
@@ -1280,7 +1618,13 @@ struct Hub {
         ImVec4 noteColour(1.0f, 0.93f, 0.80f, 0.95f);
         if (busy) note = settings->busyLabel;
         else if (!settings->error.empty()) { note = settings->error; noteColour = ImVec4(1.0f, 0.55f, 0.40f, 1.0f); }
-        else if (!snap.message.empty() && help.empty()) {
+#ifndef __ANDROID__
+        else if (settingsGroup == savesPage && help.empty()) {
+            note = gciNote;
+            if (gciNoteIsError) noteColour = ImVec4(1.0f, 0.55f, 0.40f, 1.0f);
+        }
+#endif
+        else if (!snap.message.empty() && help.empty() && messageGame == settingsGame && messageGroup == settingsGroup) {
             note = snap.message;
             if (snap.messageIsError) noteColour = ImVec4(1.0f, 0.55f, 0.40f, 1.0f);
         }
@@ -1350,14 +1694,16 @@ struct Hub {
         const bool running = jobState == MoveJob::Running;
         pathBox(ImVec2(inner, y + 28.0f), ImVec2(inner + innerW - 132.0f, y + 72.0f), moveTarget, "No folder chosen");
         ImGui::SetCursorScreenPos(ImVec2(inner + innerW - 120.0f, y + 28.0f));
-        if (glassButton("Browse", ImVec2(120.0f, 44.0f), false, running)) {
-            const fs::path chosen = platform::askForInstallDirectory();
-            if (!chosen.empty()) {
+        if (glassButton(filePickLabel("move", "Browse", "Waiting...").c_str(), ImVec2(120.0f, 44.0f), false,
+                        running || filePickOpen())) {
+            // Off the render thread, like the file pickers: the window keeps
+            // drawing while the folder chooser is open.
+            startPick("move", [] { return platform::askForInstallDirectory(); }, [this](const fs::path& chosen) {
                 fs::path target;
                 moveNote.clear();
                 if (resolveMoveTarget(chosen, target, moveNote)) moveTarget = target.string();
                 else moveTarget.clear();
-            }
+            });
         }
         y += 96.0f;
 
@@ -1807,9 +2153,15 @@ struct HubWindow::Impl {
     std::string messageTitle, messageText, primaryLabel, secondaryLabel, cancelLabel;
     bool messageIsError = false;
     int answer = -1; // 0 principal, 1 secundario
+    // Non-empty while waitForDialog() has a native dialog open: names it for
+    // the "Waiting for the ..." veil, and the window takes no input.
+    std::string dialogWaiting;
 
     ~Impl()
     {
+        // A picker the hub started may still be open on its worker; close it
+        // so it does not stay on screen after the launcher window is gone.
+        if (hub && hub->filePickOpen()) platform::cancelDialogs();
         if (!window) return;
         if (hub) hub->release();
         hub.reset();
@@ -2012,13 +2364,20 @@ struct HubWindow::Impl {
         }
         ImGui::NewFrame();
         const ImVec2 size = ImGui::GetIO().DisplaySize;
-        hub->frame(size, t, dt, modal == Modal::None);
+        // While a file picker is open the hub keeps animating but takes no input.
+        const bool waiting = !dialogWaiting.empty();
+        hub->frame(size, t, dt, modal == Modal::None && !hub->filePickOpen() && !waiting);
+        // A native dialog from waitForDialog(): the modal stays visible but
+        // cannot be clicked, so no second dialog opens from inside a frame.
+        ImGui::BeginDisabled(waiting);
         switch (modal) {
         case Modal::None: break;
         case Modal::Paths: drawPaths(size); break;
         case Modal::Progress: drawProgress(size, t); break;
         case Modal::Message: drawMessage(size); break;
         }
+        ImGui::EndDisabled();
+        if (waiting) drawDialogVeil(size);
         ImGui::Render();
 
         int fbW = 0, fbH = 0;
@@ -2028,6 +2387,52 @@ struct HubWindow::Impl {
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         SDL_GL_SwapWindow(window);
+        // Between frames: what follows a picked file may open a modal, which
+        // calls frame() itself, so it must not run inside hub->frame().
+        hub->finishFilePick();
+        hub->runBetweenFrames();
+    }
+
+    void drawDialogVeil(ImVec2 size)
+    {
+        ImDrawList* dl = ImGui::GetForegroundDrawList();
+        dl->AddRectFilled(ImVec2(0, 0), size, IM_COL32(2, 12, 4, 150));
+        const std::string text = "Waiting for the " + dialogWaiting + "...";
+        const ImVec2 textSize = hub->fonts.body->CalcTextSizeA(22.0f, FLT_MAX, 0.0f, text.c_str());
+        dl->AddText(hub->fonts.body, 22.0f, ImVec2((size.x - textSize.x) * 0.5f, size.y - textSize.y - 48.0f),
+                    col(kOrange), text.c_str());
+    }
+
+    // Runs a blocking native dialog on a worker thread and keeps drawing the
+    // window (dimmed, without input) until it returns. `what` names it for the
+    // veil ("disc image picker"). If the window is closed meanwhile, the
+    // dialog is closed too and this returns empty with quitRequested still
+    // set. It never returns while the dialog runs, so `dialog` may capture the
+    // caller's locals by reference. Only call it between frames.
+    std::string waitForDialog(const std::function<std::string()>& dialog, const std::string& what)
+    {
+        if (!dialogWaiting.empty()) return {}; // never two at once
+        std::atomic<bool> done { false };
+        std::string result;
+        dialogWaiting = what.empty() ? std::string("dialog") : what;
+        std::thread worker([&] {
+            result = dialog();
+            done.store(true, std::memory_order_release);
+        });
+        bool cancelled = false;
+        while (!done.load(std::memory_order_acquire)) {
+            frame();
+            if (quitRequested && !cancelled) {
+                // POSIX: ends the dialog process, so `done` follows quickly.
+                // Windows: the dialog belongs to this process; keep drawing
+                // until the player closes it, as nothing else can.
+                cancelled = true;
+                platform::cancelDialogs();
+            }
+        }
+        worker.join();
+        dialogWaiting.clear();
+        return quitRequested ? std::string() : result;
     }
 
     // Muestra un mensaje hasta que se pulsa un botón. -1 si se cierra la ventana.
@@ -2127,6 +2532,12 @@ bool HubWindow::open(const HubState& state, std::string& error)
 
     m.hub = std::make_unique<Hub>(m.state, m.result);
     Hub& hub = *m.hub;
+#ifndef __ANDROID__
+    hub.askModal = [&m](const std::string& title, const std::string& text, const std::string& primary,
+                        const std::string& secondary, bool isError, const std::string& cancel) {
+        return m.message(title, text, primary, secondary, isError, cancel);
+    };
+#endif
     loadFonts(hub.fonts);
     hub.logo = loadImageTexture(kLogoOpenNectar, kLogoOpenNectarSize, 160);
     hub.art.load(m.state.gameDataDirectory);
@@ -2236,10 +2647,12 @@ bool HubWindow::choosePaths(const std::function<std::string()>& chooseRom,
             m.frame();
             if (m.quitRequested) return false;
             if (m.pathsAction == 1) {
-                const std::string selected = chooseRom();
+                const std::string selected = m.waitForDialog(chooseRom, "disc image picker");
+                if (m.quitRequested) return false;
                 if (!selected.empty()) m.rom = selected;
             } else if (m.pathsAction == 2) {
-                const std::string selected = chooseInstallDirectory();
+                const std::string selected = m.waitForDialog(chooseInstallDirectory, "folder picker");
+                if (m.quitRequested) return false;
                 if (!selected.empty()) m.installDirectory = selected;
             } else if (m.pathsAction == 3) {
                 rom = m.rom;
@@ -2261,6 +2674,11 @@ bool HubWindow::choosePaths(const std::function<std::string()>& chooseRom,
             }
         }
     }
+}
+
+std::string HubWindow::runDialog(const std::function<std::string()>& dialog, const std::string& what)
+{
+    return mImpl->waitForDialog(dialog, what);
 }
 
 void HubWindow::updateProgress(std::uint32_t percent, const std::string& currentFile, const std::string& phase)

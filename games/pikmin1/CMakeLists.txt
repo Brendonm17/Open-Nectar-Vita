@@ -396,6 +396,7 @@ set(PC_PORT_SOURCES
     pc_port/dolphin_stubs/pad_stubs.cpp
     pc_port/dolphin_stubs/vi_stubs.cpp
     pc_port/dolphin_stubs/card_stubs.cpp
+    pc_port/dolphin_stubs/pc_card_save_root.cpp
     pc_port/dolphin_stubs/audio_stubs.cpp
     pc_port/dolphin_stubs/jaudio_hw_stubs.cpp
     pc_port/dolphin_stubs/misc_stubs.cpp
@@ -1037,6 +1038,8 @@ if(PIKMIN_BUILD_LAUNCHER)
     add_executable(pikmin_launcher
         pc_port/launcher/launcher_main.cpp
         pc_port/launcher/launcher_gui.cpp
+        pc_port/launcher/gci_save_import.cpp
+        pc_port/dolphin_stubs/pc_card_save_root.cpp
         pc_port/launcher/crash_report.cpp
         pc_port/launcher/bti_decode.cpp
         pc_port/launcher/settings_model.cpp
@@ -1105,14 +1108,25 @@ if(PIKMIN_BUILD_TESTS AND PIKMIN_BUILD_LAUNCHER)
     target_compile_options(sha256_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
     add_test(NAME sha256_test COMMAND sha256_test)
 
+    add_executable(gci_save_import_test pc_port/launcher/gci_save_import_test.cpp
+        pc_port/launcher/gci_save_import.cpp
+        pc_port/dolphin_stubs/pc_card_save_root.cpp)
+    target_include_directories(gci_save_import_test PRIVATE pc_port/launcher ${PC_PORT_DIR})
+    target_compile_options(gci_save_import_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+    add_test(NAME gci_save_import_test COMMAND gci_save_import_test)
+
     add_executable(installer_ui_test
         pc_port/launcher/installer_ui_test.cpp
         pc_port/launcher/installer_ui.cpp
-        pc_port/pc_icon.cpp)
+        pc_port/pc_icon.cpp
+        ${LAUNCHER_PLATFORM_SOURCE})
     target_include_directories(installer_ui_test PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/pc_port/launcher
         ${SDL2_INCLUDE_DIRS})
-    target_link_libraries(installer_ui_test PRIVATE ${SDL2_LIBRARIES})
+    target_link_libraries(installer_ui_test PRIVATE ${SDL2_LIBRARIES} Threads::Threads)
+    if (WIN32)
+        target_link_libraries(installer_ui_test PRIVATE comdlg32 ole32 shell32 uuid winhttp)
+    endif()
     target_compile_options(installer_ui_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
     add_test(NAME installer_ui_test COMMAND installer_ui_test)
 
@@ -1127,6 +1141,23 @@ if(PIKMIN_BUILD_TESTS AND PIKMIN_BUILD_LAUNCHER)
         target_link_libraries(prepared_image_test PRIVATE comdlg32 ole32 shell32 uuid winhttp)
     endif()
     add_test(NAME prepared_image_test COMMAND prepared_image_test)
+
+    # AppleScript quoting for the macOS dialogs, and closing a dialog process
+    # that is still open when the launcher quits.
+    if (NOT WIN32)
+        add_executable(launcher_dialog_test pc_port/launcher/launcher_dialog_test.cpp ${LAUNCHER_PLATFORM_SOURCE})
+        target_link_libraries(launcher_dialog_test PRIVATE Threads::Threads)
+        target_compile_options(launcher_dialog_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+        add_test(NAME launcher_dialog_test COMMAND launcher_dialog_test)
+    endif()
+
+    # The game's file picker: title prefix, and opening, answering and closing
+    # the dialog process without blocking the frame loop.
+    if (NOT WIN32)
+        add_executable(pc_file_dialog_test pc_port/pc_file_dialog_test.cpp pc_port/pc_file_dialog.cpp)
+        target_compile_options(pc_file_dialog_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+        add_test(NAME pc_file_dialog_test COMMAND pc_file_dialog_test)
+    endif()
 
     if(PIKMIN_NETPLAY_BUILD)
         # Host Co-op / Join Co-op flow with a fake game.

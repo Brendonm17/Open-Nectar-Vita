@@ -4,6 +4,7 @@
  * has its own copy of this logic; the game cannot link the launcher).
  */
 #include "pc_file_dialog.h"
+#include "pc_dialog_command.h"
 #if PIKI_P2_HOST
 // Pikmin 2: el operator new global va al heap del juego; mientras dure esta
 // llamada, las asignaciones de std::string/std::vector van a malloc.
@@ -99,12 +100,7 @@ static bool commandExists(const char* name)
     return std::system(cmd.c_str()) == 0;
 }
 
-static std::string shellQuote(const std::string& s)
-{
-    std::string q = "'";
-    for (char c : s) q += (c == '\'') ? "'\\''" : std::string(1, c);
-    return q + "'";
-}
+using pc_dialog::shellQuote;
 
 static std::string runDialog(const std::string& command)
 {
@@ -133,8 +129,15 @@ bool pc_file_dialog_open(const char* title, const char* filterName, const char* 
         selected = runDialog("kdialog --getopenfilename . " + shellQuote(std::string(patterns) + "|" + filterName)
                              + " --title " + shellQuote(title) + " 2>/dev/null");
     } else {
+#if defined(__APPLE__)
+        // osascript ships with macOS. Cancel prints nothing, so it reads as
+        // "no file chosen". The patterns are not passed (see chooseFileScript):
+        // the caller checks the chosen file.
+        selected = runDialog(pc_dialog::osascriptCommand(pc_dialog::chooseFileScript(title)));
+#else
         snprintf(out, outSize, "No file dialog: install zenity or kdialog.");
         return false;
+#endif
     }
     if (selected.empty()) return false;
     snprintf(out, outSize, "%s", selected.c_str());

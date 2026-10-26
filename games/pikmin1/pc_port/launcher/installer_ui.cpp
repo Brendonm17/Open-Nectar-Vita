@@ -1,12 +1,16 @@
 #include "installer_ui.h"
 #include "../pc_icon.h"
+#include "launcher_platform.h"
 
 #include <SDL.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <cstdint>
+#include <thread>
 #include <unordered_map>
+#include <vector>
 
 namespace pikmin {
 namespace launcher {
@@ -262,6 +266,52 @@ bool InstallerWindow::open(std::string& error)
     return true;
 }
 
+std::string InstallerWindow::runDialog(const std::function<std::string()>& dialog, const std::string& what)
+{
+    const std::string status = mImpl->status;
+    mImpl->status = "Waiting for the " + (what.empty() ? std::string("dialog") : what) + "...";
+    mImpl->render();
+    // Events queued before the dialog opened (say, a second click already in
+    // flight) belong after it, as they did when the dialog blocked this thread.
+    std::vector<SDL_Event> queued;
+    for (SDL_Event event; SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_FIRSTEVENT, SDL_LASTEVENT) == 1;)
+        queued.push_back(event);
+    std::atomic<bool> done { false };
+    std::string result;
+    std::thread worker([&] {
+        result = dialog();
+        done.store(true, std::memory_order_release);
+    });
+    // Keep the window answering while the dialog is open. Clicks are dropped,
+    // so no second dialog opens on top of this one.
+    bool quit = false;
+    while (!done.load(std::memory_order_acquire)) {
+        SDL_Event event;
+        if (!SDL_WaitEventTimeout(&event, 50)) continue;
+        if (event.type == SDL_QUIT && !quit) {
+            // POSIX: closes the dialog. Windows: it is this process's own and
+            // stays until the player answers it.
+            quit = true;
+            platform::cancelDialogs();
+        } else if (event.type == SDL_WINDOWEVENT) {
+            mImpl->render();
+        }
+    }
+    worker.join();
+    for (SDL_Event& event : queued)
+        SDL_PushEvent(&event);
+    mImpl->status = status;
+    mImpl->render();
+    if (quit) {
+        // Hand the close back to the caller's event loop.
+        SDL_Event close {};
+        close.type = SDL_QUIT;
+        SDL_PushEvent(&close);
+        return {};
+    }
+    return result;
+}
+
 bool InstallerWindow::choosePaths(const std::function<std::string()>& chooseRom,
                                   const std::function<std::string()>& chooseInstallDirectory,
                                   std::string& rom, std::string& installDirectory)
@@ -292,10 +342,10 @@ bool InstallerWindow::choosePaths(const std::function<std::string()>& chooseRom,
         const int x = event.button.x;
         const int y = event.button.y;
         if (contains(mImpl->romBrowse, x, y)) {
-            const std::string selected = chooseRom();
+            const std::string selected = runDialog(chooseRom, "disc image picker");
             if (!selected.empty()) mImpl->rom = selected;
         } else if (contains(mImpl->installBrowse, x, y)) {
-            const std::string selected = chooseInstallDirectory();
+            const std::string selected = runDialog(chooseInstallDirectory, "folder picker");
             if (!selected.empty()) mImpl->installDirectory = selected;
         } else if (contains(mImpl->installButton, x, y)) {
             if (mImpl->rom.empty() || mImpl->installDirectory.empty()) {

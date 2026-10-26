@@ -1,5 +1,6 @@
 /** Native filesystem implementation of the GameCube memory-card API. */
 #include "Dolphin/card.h"
+#include "dolphin_stubs/pc_card_save_root.h"
 #include "Dolphin/dvd.h"
 #include "JSystem/JKernel/JKRHeap.h"
 #include "randomizer/pc_randomizer.h"
@@ -47,28 +48,6 @@ bool validChannel(s32 channel) { return channel >= 0 && channel < 2; }
 //
 // Resolved once, and never from the working directory unless there is already
 // a card there.
-// The folder the game was installed into. The launcher copies the game binary
-// into its data root, so the executable's own directory is that install
-// folder on both systems -- and unlike the working directory it does not
-// change with how the game was started.
-fs::path installDir()
-{
-	if (const char* env = std::getenv("NECTAR_EXECUTABLE_PATH"); env != nullptr && *env != '\0')
-		return fs::path(env).parent_path();
-	if (const char* env = std::getenv("PIKMIN_EXECUTABLE_PATH"); env != nullptr && *env != '\0')
-		return fs::path(env).parent_path();
-#if defined(_WIN32)
-	std::vector<wchar_t> path(32768); // Windows long-path limit
-	const DWORD count = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
-	if (count > 0 && count < path.size()) return fs::path(std::wstring(path.data(), count)).parent_path();
-#elif defined(__linux__)
-	std::vector<char> path(4096);
-	const ssize_t count = readlink("/proc/self/exe", path.data(), path.size() - 1);
-	if (count > 0) { path[static_cast<std::size_t>(count)] = '\0'; return fs::path(path.data()).parent_path(); }
-#endif
-	return {};
-}
-
 // STL path/string temporaries must come from the host allocator: CARD* is
 // called every frame from System::beginRender (CARDProbe) while the current
 // JKR heap may be a full section/solid heap. See PcHostAllocScope in p2_os_host.cpp.
@@ -78,97 +57,9 @@ struct CardHostAllocScope {
 	~CardHostAllocScope() { pc_host_alloc_set(mPrev); }
 };
 
-// Per-user data folder, for installs whose own folder cannot be written to
-// (Program Files, /usr, /opt, an AppImage's read-only mount, Proton prefixes
-// with a read-only game dir). Issue #34: on Linux the card was written beside
-// the executable, silently failed there and the progress was gone on restart.
-fs::path userDataSaveDir()
-{
-#if defined(_WIN32)
-	if (const char* local = std::getenv("LOCALAPPDATA"); local != nullptr && *local != '\0')
-		return fs::path(local) / "Nectar" / "save";
-#else
-	if (const char* xdg = std::getenv("XDG_DATA_HOME"); xdg != nullptr && *xdg != '\0')
-		return fs::path(xdg) / "pikmin-native" / "save";
-	if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0')
-		return fs::path(home) / ".local" / "share" / "pikmin-native" / "save";
-#endif
-	return {};
-}
-
-// True when files can actually be created under `dir` (creating it if needed).
-bool writableDir(const fs::path& dir)
-{
-	std::error_code error;
-	fs::create_directories(dir, error);
-	if (error) return false;
-	const fs::path probe = dir / ".write_test";
-	{
-		std::ofstream out(probe, std::ios::binary | std::ios::trunc);
-		if (!out) return false;
-		out << '1';
-		if (!out) return false;
-	}
-	fs::remove(probe, error);
-	return true;
-}
-
 fs::path saveRoot()
 {
-	static const fs::path resolved = [] {
-		std::error_code error;
-		// An explicit override always wins; portable setups can pin it.
-		if (const char* env = std::getenv("NECTAR_SAVE_DIR"); env != nullptr && *env != '\0')
-			return fs::path(env);
-
-		// Where the card belongs: beside the installed game.
-		const fs::path install = installDir();
-		const fs::path preferred = install.empty() ? fs::path("save") : install / "save";
-		if (fs::exists(preferred / "card0", error)) return preferred;
-
-		// Places earlier builds wrote to. A card in one of these is somebody's
-		// progress, so find it and bring it along rather than start empty.
-		std::vector<fs::path> legacy;
-		legacy.emplace_back("save"); // relative to the working directory
-#if defined(_WIN32)
-		if (const char* local = std::getenv("LOCALAPPDATA"); local != nullptr && *local != '\0')
-			legacy.push_back(fs::path(local) / "Nectar" / "save");
-		if (const char* roaming = std::getenv("APPDATA"); roaming != nullptr && *roaming != '\0')
-			legacy.push_back(fs::path(roaming) / "OpenNectar" / "save");
-#else
-		if (const char* xdg = std::getenv("XDG_DATA_HOME"); xdg != nullptr && *xdg != '\0')
-			legacy.push_back(fs::path(xdg) / "pikmin-native" / "save");
-		if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0')
-			legacy.push_back(fs::path(home) / ".local" / "share" / "pikmin-native" / "save");
-#endif
-		for (const fs::path& candidate : legacy) {
-			if (fs::equivalent(candidate, preferred, error) && !error) continue;
-			if (!fs::exists(candidate / "card0", error)) continue;
-			// Copy rather than move: if anything goes wrong the original is
-			// still there, and an orphaned folder is cheaper than a lost save.
-			fs::create_directories(preferred, error);
-			std::error_code copyError;
-			fs::copy(candidate, preferred,
-			         fs::copy_options::recursive | fs::copy_options::overwrite_existing, copyError);
-			if (!copyError && fs::exists(preferred / "card0", error)) {
-				std::printf("[PC Port] Moved your memory card into the game folder:\n  from %s\n  to   %s\n",
-				            candidate.string().c_str(), preferred.string().c_str());
-				return preferred;
-			}
-			// Could not write beside the game -- read-only install, most likely.
-			return candidate;
-		}
-		if (writableDir(preferred)) return preferred;
-		// The game folder is read-only: keep the card in the user's data
-		// folder instead of pretending to save (issue #34).
-		const fs::path fallback = userDataSaveDir();
-		if (!fallback.empty() && writableDir(fallback)) {
-			std::printf("[PC Port] Game folder is not writable; memory card lives in %s\n",
-			            fallback.string().c_str());
-			return fallback;
-		}
-		return preferred;
-	}();
+	static const fs::path resolved = pc_card_resolve_save_root({});
 	return resolved;
 }
 

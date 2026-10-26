@@ -1,20 +1,26 @@
 // Implementación POSIX de la interfaz de plataforma del launcher.
-// Los diálogos gráficos se delegan en zenity o kdialog; si no hay ninguno,
-// el launcher recurre a su instalador en modo texto.
+// Los diálogos gráficos se delegan en zenity o kdialog (osascript en macOS);
+// si no hay ninguno, el launcher recurre a su instalador en modo texto.
 
 #include "launcher_platform.h"
+#include "../pc_dialog_command.h"
 
 #include <cstdint>
 #include <cstdlib>
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
+#include <signal.h>
 #if defined(__APPLE__)
 #include <climits>
 #include <mach-o/dyld.h>
 #endif
+#include <chrono>
+#include <condition_variable>
 #include <fstream>
 #include <iostream>
+#include <mutex>
+#include <set>
 #include <string>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -45,10 +51,56 @@ bool commandExists(const char* command)
     return false;
 }
 
-std::string runDialog(const char* program, const std::vector<std::string>& args)
+// Dialog processes that are open now, so cancelDialogs() can close them when
+// the launcher quits while a picker waits on another thread. Never destroyed:
+// a detached picker thread may still be finishing during exit.
+struct DialogRegistry {
+    std::mutex mutex;
+    std::condition_variable idle;
+    std::set<pid_t> children;
+    int running = 0;
+    bool closing = false;
+};
+
+DialogRegistry& dialogRegistry()
 {
+    static DialogRegistry* registry = new DialogRegistry;
+    return *registry;
+}
+
+} // namespace
+
+std::string runDialogProcess(const char* program, const std::vector<std::string>& args)
+{
+    DialogRegistry& registry = dialogRegistry();
+    {
+        std::lock_guard<std::mutex> lock(registry.mutex);
+        if (registry.closing) return {};
+        ++registry.running;
+    }
+    struct Finished {
+        DialogRegistry& registry;
+        ~Finished()
+        {
+            std::lock_guard<std::mutex> lock(registry.mutex);
+            --registry.running;
+            registry.idle.notify_all();
+        }
+    } finished { registry };
+
     int pipeFds[2];
     if (pipe(pipeFds) != 0) return {};
+    // Close-on-exec so a second dialog forked meanwhile does not inherit this
+    // pipe (its copy of the write end would keep read() below from ending).
+    // dup2 clears the flag on the child's stdout copy.
+    fcntl(pipeFds[0], F_SETFD, FD_CLOEXEC);
+    fcntl(pipeFds[1], F_SETFD, FD_CLOEXEC);
+    // Build argv before fork: another launcher thread may hold the allocator
+    // lock, so the child must not allocate before exec.
+    std::vector<char*> argv;
+    argv.push_back(const_cast<char*>(program));
+    for (const std::string& arg : args) argv.push_back(const_cast<char*>(arg.c_str()));
+    argv.push_back(nullptr);
     const pid_t child = fork();
     if (child == 0) {
         dup2(pipeFds[1], STDOUT_FILENO);
@@ -61,27 +113,52 @@ std::string runDialog(const char* program, const std::vector<std::string>& args)
             close(nullFd);
         }
         close(pipeFds[0]); close(pipeFds[1]);
-        std::vector<char*> argv;
-        argv.push_back(const_cast<char*>(program));
-        for (const std::string& arg : args) argv.push_back(const_cast<char*>(arg.c_str()));
-        argv.push_back(nullptr);
         execvp(program, argv.data());
         _exit(127);
     }
     close(pipeFds[1]);
+    if (child < 0) {
+        close(pipeFds[0]);
+        return {};
+    }
+    {
+        // A cancelDialogs() that began between fork and here missed this one.
+        std::lock_guard<std::mutex> lock(registry.mutex);
+        registry.children.insert(child);
+        if (registry.closing) kill(child, SIGTERM);
+    }
     std::string result;
     char buffer[1024];
-    ssize_t count;
-    while ((count = read(pipeFds[0], buffer, sizeof(buffer))) > 0) result.append(buffer, count);
+    for (;;) {
+        const ssize_t count = read(pipeFds[0], buffer, sizeof(buffer));
+        if (count > 0) result.append(buffer, static_cast<std::size_t>(count));
+        else if (count < 0 && errno == EINTR) continue;
+        else break;
+    }
     close(pipeFds[0]);
     int status = 0;
-    waitpid(child, &status, 0);
+    while (waitpid(child, &status, 0) < 0 && errno == EINTR) {
+    }
+    {
+        std::lock_guard<std::mutex> lock(registry.mutex);
+        registry.children.erase(child);
+    }
     while (!result.empty() && (result.back() == '\n' || result.back() == '\r')) result.pop_back();
+    // Cancel, a missing program and cancelDialogs() all end here as "nothing chosen".
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return {};
     return result;
 }
 
-} // namespace
+void cancelDialogs(int timeoutMs)
+{
+    DialogRegistry& registry = dialogRegistry();
+    std::unique_lock<std::mutex> lock(registry.mutex);
+    registry.closing = true;
+    for (const pid_t child : registry.children) kill(child, SIGTERM);
+    registry.idle.wait_for(lock, std::chrono::milliseconds(timeoutMs > 0 ? timeoutMs : 0),
+                           [&registry] { return registry.running == 0; });
+    registry.closing = false;
+}
 
 fs::path executablePath()
 {
@@ -143,14 +220,20 @@ bool stdinIsTerminal()
 void showMessage(const std::string& title, const std::string& message, bool error)
 {
     if (commandExists("zenity")) {
-        runDialog("zenity", { error ? "--error" : "--info", "--title=" + title, "--text=" + message,
+        runDialogProcess("zenity", { error ? "--error" : "--info", "--title=" + title, "--text=" + message,
                                "--width=480" });
         return;
     }
     else if (commandExists("kdialog")) {
-        runDialog("kdialog", { error ? "--error" : "--msgbox", message, "--title", title });
+        runDialogProcess("kdialog", { error ? "--error" : "--msgbox", message, "--title", title });
         return;
     }
+#if defined(__APPLE__)
+    // No "activate": it adds about 2 s before the dialog shows, and the
+    // dialog already opens above the launcher window without it.
+    runDialogProcess("osascript", { "-e", pc_dialog::messageScript(title, message, error) });
+    return;
+#endif
     std::cerr << title << ": " << message << '\n';
 }
 
@@ -159,7 +242,7 @@ fs::path askForInstallDirectory(const std::string& title)
     if (commandExists("zenity")) {
         std::string initial;
         if (const char* home = std::getenv("HOME")) initial = fs::path(home).string() + "/";
-        const std::string selected = runDialog("zenity", {
+        const std::string selected = runDialogProcess("zenity", {
             "--file-selection", "--directory",
             "--title=Open Nectar - " + title,
             "--filename=" + initial
@@ -167,7 +250,7 @@ fs::path askForInstallDirectory(const std::string& title)
         if (!selected.empty()) return selected;
     } else if (commandExists("kdialog")) {
         const std::string initial = std::getenv("HOME") ? std::getenv("HOME") : ".";
-        const std::string selected = runDialog("kdialog", {
+        const std::string selected = runDialogProcess("kdialog", {
             "--getexistingdirectory", initial,
             "--title", "Open Nectar - " + title
         });
@@ -176,8 +259,8 @@ fs::path askForInstallDirectory(const std::string& title)
 #if defined(__APPLE__)
     else {
         // POSIX path returns a trailing slash. Drop it, but keep a bare "/".
-        std::string selected = runDialog("osascript", { "-e",
-            "POSIX path of (choose folder with prompt \"Open Nectar - " + title + "\")" });
+        std::string selected = runDialogProcess("osascript", { "-e",
+            pc_dialog::chooseFolderScript("Open Nectar - " + title) });
         while (selected.size() > 1 && selected.back() == '/') selected.pop_back();
         if (!selected.empty()) return selected;
     }
@@ -188,7 +271,7 @@ fs::path askForInstallDirectory(const std::string& title)
 fs::path askForImage()
 {
     if (commandExists("zenity")) {
-        const std::string selected = runDialog("zenity", {
+        const std::string selected = runDialogProcess("zenity", {
             "--file-selection", "--title=Open Nectar - Choose your disc image",
             "--file-filter=GameCube disc image | *.iso *.ISO *.gcm *.GCM *.rvz *.RVZ *.wia *.WIA *.gcz *.GCZ",
             "--file-filter=All files | *"
@@ -196,7 +279,7 @@ fs::path askForImage()
         if (!selected.empty()) return selected;
     }
     else if (commandExists("kdialog")) {
-        const std::string selected = runDialog("kdialog", {
+        const std::string selected = runDialogProcess("kdialog", {
             "--getopenfilename", ".", "*.iso *.ISO *.gcm *.GCM *.rvz *.RVZ *.wia *.WIA *.gcz *.GCZ|GameCube disc image"
         });
         if (!selected.empty()) return selected;
@@ -205,8 +288,8 @@ fs::path askForImage()
     else {
         // No type filter: osascript's "of type" needs file-type identifiers, not
         // extensions. The launcher checks the image format after selection.
-        const std::string selected = runDialog("osascript", { "-e",
-            "POSIX path of (choose file with prompt \"Open Nectar - Choose your disc image\")" });
+        const std::string selected = runDialogProcess("osascript", { "-e",
+            pc_dialog::chooseFileScript("Open Nectar - Choose your disc image") });
         if (!selected.empty()) return selected;
     }
 #endif
@@ -216,13 +299,20 @@ fs::path askForImage()
 fs::path askForFile(const std::string& title, const std::string& filterName, const std::string& patterns)
 {
     if (commandExists("zenity")) {
-        return runDialog("zenity", { "--file-selection", "--title=Open Nectar - " + title,
+        return runDialogProcess("zenity", { "--file-selection", "--title=Open Nectar - " + title,
                                      "--file-filter=" + filterName + " | " + patterns, "--file-filter=All files | *" });
     }
     if (commandExists("kdialog")) {
-        return runDialog("kdialog", { "--getopenfilename", ".", patterns + "|" + filterName });
+        return runDialogProcess("kdialog", { "--getopenfilename", ".", patterns + "|" + filterName });
     }
+#if defined(__APPLE__)
+    // No type filter, as in askForImage: callers validate the chosen file.
+    // No "activate" (see showMessage); the panel opens above the launcher.
+    // Cancel makes osascript exit non-zero, which runDialogProcess returns as empty.
+    return runDialogProcess("osascript", { "-e", pc_dialog::chooseFileScript("Open Nectar - " + title) });
+#else
     return {};
+#endif
 }
 
 fs::path findConverter()
@@ -247,10 +337,17 @@ fs::path findConverter()
 fs::path askForConverter()
 {
     if (commandExists("zenity"))
-        return runDialog("zenity", { "--file-selection", "--title=Choose dolphin-tool from your Dolphin installation" });
+        return runDialogProcess("zenity", { "--file-selection", "--title=Choose dolphin-tool from your Dolphin installation" });
     if (commandExists("kdialog"))
-        return runDialog("kdialog", { "--getopenfilename", ".", "dolphin-tool", "--title", "Choose dolphin-tool" });
+        return runDialogProcess("kdialog", { "--getopenfilename", ".", "dolphin-tool", "--title", "Choose dolphin-tool" });
+#if defined(__APPLE__)
+    // Package contents shown so the panel can open an .app bundle that
+    // carries dolphin-tool. Cancel returns empty, as on Linux.
+    return runDialogProcess("osascript", { "-e",
+        pc_dialog::chooseFileScript("Choose dolphin-tool from your Dolphin installation", true) });
+#else
     return {};
+#endif
 }
 
 fs::path cacheDirectory()

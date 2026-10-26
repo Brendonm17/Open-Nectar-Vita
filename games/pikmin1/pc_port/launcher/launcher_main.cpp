@@ -723,8 +723,11 @@ UpdateOutcome runUpdate(pikmin::launcher::HubWindow& hub, const fs::path& source
 
     // Vía manual: el paquete de una carpeta (o la instalación, desde el paquete).
     for (;;) {
-        const fs::path chosen = platform::askForInstallDirectory(
-            fromInsideInstall ? "Choose the folder of the new Open Nectar download" : "Choose your Open Nectar folder");
+        const fs::path chosen = fs::u8path(hub.runDialog([&] {
+            return platform::askForInstallDirectory(fromInsideInstall ? "Choose the folder of the new Open Nectar download"
+                                                                      : "Choose your Open Nectar folder")
+                .u8string();
+        }, "folder picker"));
         if (chosen.empty()) return UpdateOutcome::BackHome;
         const fs::path package = fromInsideInstall ? chosen : sourceDirectory;
         const fs::path install = fromInsideInstall ? sourceDirectory : chosen;
@@ -1076,8 +1079,9 @@ fs::path converterFile()
 }
 
 // Recordada (si sigue existiendo), junto al launcher / en PATH, o la que elija
-// el usuario si `ask`. La encontrada se guarda para la próxima vez.
-fs::path locateConverter(bool ask)
+// el usuario si `ask`. La encontrada se guarda para la próxima vez. Con `ui`,
+// el selector se abre sin congelar su ventana.
+fs::path locateConverter(bool ask, pikmin::launcher::InstallerUi* ui = nullptr)
 {
     std::error_code ec;
     const fs::path file = converterFile();
@@ -1090,7 +1094,11 @@ fs::path locateConverter(bool ask)
         }
     }
     fs::path converter = platform::findConverter();
-    if (converter.empty() && ask) converter = platform::askForConverter();
+    if (converter.empty() && ask) {
+        converter = ui ? fs::u8path(ui->runDialog([] { return platform::askForConverter().u8string(); },
+                                                  "dolphin-tool picker"))
+                       : platform::askForConverter();
+    }
     if (!converter.empty() && !file.empty()) {
         fs::create_directories(file.parent_path(), ec);
         std::ofstream out(file, std::ios::trunc);
@@ -1125,7 +1133,7 @@ UpdateOutcome runPikmin2Install(pikmin::launcher::HubWindow& hub, const fs::path
         fs::path image = rom;
         pikmin::launcher::PreparedImage prepared;
         if (pikmin::launcher::isCompressedImage(image)) {
-            if (converter.empty()) converter = locateConverter(true);
+            if (converter.empty()) converter = locateConverter(true, &hub);
             if (converter.empty()) {
                 if (retry("Compressed images need dolphin-tool from a Dolphin installation. "
                           "Choose it when prompted, or select an ISO/GCM.")) continue;
@@ -1492,18 +1500,27 @@ int main(int argc, char** argv)
                     if (choice.action == pikmin::launcher::HubAction::InstallCharacter) {
                         // Un personaje del creador de modelos: a Load/Characters de
                         // Pikmin 1; sale en el selector de capitán.
-                        const fs::path pack = platform::askForFile("Install a character", "Character", "*.nectarchar");
+                        // The picker and the native result message run off the
+                        // render thread so the window keeps drawing.
+                        const fs::path pack = fs::u8path(home->runDialog([] {
+                            return platform::askForFile("Install a character", "Character", "*.nectarchar").u8string();
+                        }, "file picker"));
                         if (!pack.empty()) {
                             nectar::CharacterInfo info;
                             std::string error;
-                            if (nectar::installCharacterPack(hubState.games[0].directory, pack.u8string(), info, error))
-                                platform::showMessage(info.isPikmin() ? "Pikmin model installed" : "Character installed",
-                                                      info.isPikmin()
-                                                          ? "\"" + info.name + "\" is installed. Pick it in Settings > HD Models > Pikmin models, or in the game's Options > Graphics."
-                                                          : "\"" + info.name + "\" is in the captain selector of Pikmin.",
-                                                      false);
-                            else
-                                platform::showMessage("Could not install the character", error, true);
+                            const bool installed =
+                                nectar::installCharacterPack(hubState.games[0].directory, pack.u8string(), info, error);
+                            home->runDialog([&] {
+                                if (installed)
+                                    platform::showMessage(info.isPikmin() ? "Pikmin model installed" : "Character installed",
+                                                          info.isPikmin()
+                                                              ? "\"" + info.name + "\" is installed. Pick it in Settings > HD Models > Pikmin models, or in the game's Options > Graphics."
+                                                              : "\"" + info.name + "\" is in the captain selector of Pikmin.",
+                                                          false);
+                                else
+                                    platform::showMessage("Could not install the character", error, true);
+                                return std::string();
+                            }, "message");
                         }
                         continue;
                     }
@@ -1620,7 +1637,11 @@ int main(int argc, char** argv)
 
         bool installedAssetsNow = false;
         if (!assetsReady(dataRoot)) {
-            if (image.empty() && hasGraphicalDialogs()) image = askForImage();
+            if (image.empty() && hasGraphicalDialogs()) {
+                image = installerWindow
+                    ? fs::u8path(installerWindow->runDialog([] { return askForImage().u8string(); }, "disc image picker"))
+                    : askForImage();
+            }
             if (image.empty() && stdinIsTerminal()) image = askForImageConsole();
             if (image.empty()) {
                 if (installerWindow) return 0;
@@ -1629,7 +1650,7 @@ int main(int argc, char** argv)
             }
             pikmin::launcher::PreparedImage prepared;
             if (pikmin::launcher::isCompressedImage(image)) {
-                if (converter.empty()) converter = locateConverter(installerWindow != nullptr);
+                if (converter.empty()) converter = locateConverter(installerWindow != nullptr, installerWindow.get());
                 if (converter.empty()) {
                     if (reportError("Compressed images need dolphin-tool from a Dolphin installation. "
                                     "Choose it when prompted, or select an ISO/GCM. For command-line installs, "
