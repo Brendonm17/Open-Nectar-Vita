@@ -642,6 +642,10 @@ struct Hub {
                       const std::string&)>
         askModal;
     std::string gciNote;
+    // Set by the Import button; HubWindow::Impl::frame() runs the import after
+    // the frame is rendered, because the "Replace save?" modal runs its own
+    // frame loop and must not be entered from inside an ImGui window.
+    bool gciImportRequested = false;
 #endif
 
     Hub(const HubState& s, HubResult& r) : state(s), result(r) {}
@@ -1199,7 +1203,7 @@ struct Hub {
         dl->AddText(fonts.body, 19.0f, ImVec2(panelA.x + 16.0f, panelA.y + 12.0f), col(kOrange),
                     "Bring a Dolphin or GameCube memory-card save into this install.");
         ImGui::SetCursorScreenPos(ImVec2(panelB.x - 296.0f, panelA.y + 34.0f));
-        if (glassButton("Import GameCube save (.gci)", ImVec2(280.0f, 40.0f))) tryImportGciSave();
+        if (glassButton("Import GameCube save (.gci)", ImVec2(280.0f, 40.0f))) gciImportRequested = true;
         if (!gciNote.empty()) {
             dl->AddText(fonts.caption, 16.0f, ImVec2(panelA.x + 16.0f, panelA.y + 52.0f),
                         col(ImVec4(1.0f, 0.55f, 0.40f, 1.0f)), gciNote.c_str(), nullptr, width - 32.0f);
@@ -2115,6 +2119,14 @@ struct HubWindow::Impl {
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         SDL_GL_SwapWindow(window);
+#ifndef __ANDROID__
+        // Between frames: the file picker blocks and the confirmation modal
+        // calls frame() itself, so neither may run inside hub->frame().
+        if (hub->gciImportRequested) {
+            hub->gciImportRequested = false;
+            hub->tryImportGciSave();
+        }
+#endif
     }
 
     // Muestra un mensaje hasta que se pulsa un botón. -1 si se cierra la ventana.
