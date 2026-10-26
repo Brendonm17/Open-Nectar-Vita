@@ -278,4 +278,26 @@ inline float fitDialogHeight(float content, float chrome, float maxH, float minH
     return std::max(minH, std::min(maxH, content + chrome));
 }
 
+// ── Pie ────────────────────────────────────────────────────────────────────
+
+// La placa "Installed in: ..." ocupa los últimos 38 px de la ventana; las
+// páginas acaban por encima con un pequeño hueco.
+inline constexpr float kFooterTop = 38.0f;    // desde el borde inferior
+inline constexpr float kFooterReserve = 48.0f;
+inline float hubPageBottom(float windowH) { return windowH - kFooterReserve; }
+
+// Alto del logo y comienzo del contenido (bajo las pestañas, si las hay).
+inline constexpr float kLogoTop = 18.0f;
+inline constexpr float kTabsH = 42.0f;
+
+inline float hubLogoHeight(float windowW, float windowH, float logoAspect)
+{
+    return std::min(std::min(windowW * 0.56f, 700.0f) / logoAspect, logoHeightCap(windowH));
+}
+
+inline float hubContentTop(float windowW, float windowH, float logoAspect, bool tabs)
+{
+    return kLogoTop + hubLogoHeight(windowW, windowH, logoAspect) + 10.0f + (tabs ? kTabsH : 0.0f);
+}
+
 } // namespace pikmin::launcher

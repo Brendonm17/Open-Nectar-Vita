@@ -1233,7 +1233,8 @@ struct Hub {
     }
 
     // Borde inferior de las páginas Games y Move Install.
-    static float pageBottom(ImVec2 size) { return size.y - 16.0f; }
+    // Por encima del pie ("Installed in: ...").
+    static float pageBottom(ImVec2 size) { return hubPageBottom(size.y); }
 
     // Filas de botones de la columna más alta (la de Pikmin 1 si está instalado).
     float gamesRows() const
@@ -2490,17 +2491,26 @@ struct Hub {
     }
 #endif
 
+    // El pie va en la ventana del hub (debajo de modales y de "What's new"),
+    // en su franja reservada; si la ruta no cabe se recorta por delante.
     void drawFooter(ImVec2 size)
     {
-        ImDrawList* dl = ImGui::GetForegroundDrawList();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
         const std::string where = state.games[0].directory.empty()
             ? std::string("Not installed yet")
-            : "Installed in: " + state.games[0].directory;
+            : "Installed in: " + fitTail(fonts.caption, 16.0f, state.games[0].directory,
+                                         std::max(40.0f, size.x - 44.0f
+                                             - fonts.caption->CalcTextSizeA(16.0f, FLT_MAX, 0.0f, "Installed in: ").x));
         // Placa semitransparente para que el texto se lea sobre la hierba.
         const ImVec2 extent = fonts.caption->CalcTextSizeA(16.0f, FLT_MAX, 0.0f, where.c_str());
-        dl->AddRectFilled(ImVec2(12, size.y - 38), ImVec2(32 + extent.x, size.y - 10), IM_COL32(6, 26, 10, 200), 14.0f);
-        dl->AddText(fonts.caption, 16.0f, ImVec2(22, size.y - 33), col(kOrange), where.c_str());
+        dl->AddRectFilled(ImVec2(12, size.y - kFooterTop), ImVec2(32 + extent.x, size.y - 10), IM_COL32(6, 26, 10, 200), 14.0f);
+        dl->AddText(fonts.caption, 16.0f, ImVec2(22, size.y - kFooterTop + 5.0f), col(kOrange), where.c_str());
+    }
 
+    // Avisos breves, por encima de todo.
+    void drawToast(ImVec2 size)
+    {
+        ImDrawList* dl = ImGui::GetForegroundDrawList();
         if (toastTime > 0.0f) {
             const float alpha = std::min(1.0f, toastTime);
             const ImVec2 t = fonts.body->CalcTextSizeA(19.0f, FLT_MAX, 0.0f, toast.c_str());
@@ -2527,9 +2537,9 @@ struct Hub {
         ImGui::BeginDisabled(!interactive || whatsNewOpen || coopOpen);
 
         // En ventanas bajas el logo encoge también con la altura.
-        const float logoH = std::min(std::min(size.x * 0.56f, 700.0f) / logo.aspect(), logoHeightCap(size.y));
+        const float logoH = hubLogoHeight(size.x, size.y, logo.aspect());
         const float logoW = logoH * logo.aspect();
-        const ImVec2 logoAt((size.x - logoW) * 0.5f, 18.0f);
+        const ImVec2 logoAt((size.x - logoW) * 0.5f, kLogoTop);
         ImGui::GetWindowDrawList()->AddImage(logo.imgui(), logoAt, ImVec2(logoAt.x + logoW, logoAt.y + logoH));
 
         // El launcher del paquete (fuera de una instalación) solo instala o
@@ -2541,7 +2551,7 @@ struct Hub {
             tab = Tab::Games;
         } else {
             drawTabs(tabsY, size.x);
-            contentTop += 42.0f;
+            contentTop += kTabsH;
         }
 
         switch (tab) {
@@ -2556,9 +2566,11 @@ struct Hub {
 
         drawReleaseNotice(size, t);
         ImGui::EndDisabled();
+        // Fuera de las páginas con scroll: el cursor vuelve a la ventana del hub.
+        drawFooter(size);
         ImGui::End();
         toastTime = std::max(0.0f, toastTime - dt);
-        drawFooter(size);
+        drawToast(size);
         if (whatsNewOpen && interactive) drawWhatsNew(size);
 #if PIKMIN_LAUNCHER_NETPLAY
         if (coopOpen && interactive) drawCoop(size);

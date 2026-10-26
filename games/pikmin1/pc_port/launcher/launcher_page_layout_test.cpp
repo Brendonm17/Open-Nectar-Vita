@@ -170,6 +170,13 @@ int main()
         check(near(fitDialogHeight(900.0f, 174.0f, 600.0f, 320.0f), 600.0f), "long content scrolls inside the max");
     }
 
+    // ── Pie ──
+    {
+        const float logoAspect = 2172.0f / 476.0f; // assets/logo.png
+        check(hubPageBottom(700.0f) <= 700.0f - kFooterTop - 6.0f, "pages end above the footer pill");
+        check(near(hubContentTop(1180.0f, 780.0f, logoAspect, true), 18.0f + 660.8f / logoAspect + 10.0f + 42.0f), "content top at design size");
+    }
+
     std::cout << "launcher_page_layout_test: ok\n";
     return 0;
 }
