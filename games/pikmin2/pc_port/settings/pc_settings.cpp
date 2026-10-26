@@ -174,6 +174,7 @@ struct PcConfig {
     int idleCounter = 0;
     int eternalNight = 0;       // siempre de noche (luz), el reloj del día sigue igual
     int fireflies = 0;          // luciérnagas por el escenario (de día o de noche)
+    int skipHealthSafety = 0;   // USA: arranca sin la pantalla Health & Safety (como PAL/JP)
     // Mods: health as a percentage of the original. Applied as a divisor on
     // incoming damage rather than by resizing the health bar, so the life
     // gauge and every "below a quarter" check keep reading correctly.
@@ -306,6 +307,7 @@ struct PcConfig {
         idleCounter = 0;
         eternalNight = 0;
         fireflies = 0;
+        skipHealthSafety = 0;
         naviHealthPct = 100;
         tekiHealthPct = 100;
         infiniteDay = 0;
@@ -1182,6 +1184,7 @@ void saveConfig() {
     out << "idleCounter = " << sConfig.idleCounter << "\n";
     out << "eternalNight = " << sConfig.eternalNight << "\n";
     out << "fireflies = " << sConfig.fireflies << "\n";
+    out << "skipHealthSafety = " << sConfig.skipHealthSafety << "\n";
     out << "naviHealthPct = " << sConfig.naviHealthPct << "\n";
     out << "tekiHealthPct = " << sConfig.tekiHealthPct << "\n";
     out << "infiniteDay = " << sConfig.infiniteDay << "\n";
@@ -1373,6 +1376,7 @@ void loadConfig() {
         }
         else if (key == "eternalNight") sConfig.eternalNight = atoi(val.c_str()) ? 1 : 0;
         else if (key == "fireflies") sConfig.fireflies = atoi(val.c_str()) ? 1 : 0;
+        else if (key == "skipHealthSafety") sConfig.skipHealthSafety = atoi(val.c_str()) ? 1 : 0;
         else if (key == "idleCounter") {
             sConfig.idleCounter = atoi(val.c_str()) ? 1 : 0;
         }
@@ -2742,6 +2746,9 @@ void modsRowChange(int row, bool left, bool right) {
     }
     else if (row == 41) {
         if (left || right) sPending.fireflies = sPending.fireflies ? 0 : 1;
+    }
+    else if (row == 42) {
+        if (left || right) sPending.skipHealthSafety = sPending.skipHealthSafety ? 0 : 1;
     }
     // Vida de Olimar, en porcentaje de la original.
     else if (row == 11) {
@@ -7713,6 +7720,7 @@ int pc_settings_get_idle_counter(void) {
 }
 
 int pc_settings_get_fireflies(void) { return sConfig.fireflies; }
+int pc_settings_get_skip_health_safety(void) { return sConfig.skipHealthSafety; }
 
 int pc_settings_get_eternal_night(void) {
     if (pc_speedrun_active()) return 0;
@@ -8089,6 +8097,7 @@ void modsRowValue(int i, char* value, size_t n) {
     case 10: snprintf(value, n, "%s", sPending.idleCounter ? "On" : "Off (original)"); break;
     case 40: snprintf(value, n, "%s", sPending.eternalNight ? "On" : "Off (original)"); break;
     case 41: snprintf(value, n, "%s", sPending.fireflies ? "On" : "Off (original)"); break;
+    case 42: snprintf(value, n, "%s", sPending.skipHealthSafety ? "On" : "Off (original)"); break;
     case 11: healthPctLabel(sPending.naviHealthPct, "Infinite", value, n); break;
     case 12: healthPctLabel(sPending.tekiHealthPct, "Insta Kill", value, n); break;
     case 13:
@@ -8292,6 +8301,10 @@ const GroupRow kGameplayRows[] = {
     { SRC_MODS, 40, "Eternal Night", "Always night above ground, whatever the day length." },
     { SRC_MODS, 41, "Fireflies", "Fireflies drift around the field, by day or by night." },
     { SRC_MODS, 10, "Idle Pikmin Counter", "Shows how many Pikmin are standing around with nothing to do." },
+#if defined(VERSION_GPVE01)
+    // Solo el disco USA tiene la pantalla; PAL y JP arrancan ya sin ella.
+    { SRC_MODS, 42, "Skip Health & Safety Screen", "Starts at the Nintendo logo instead of the USA disc's Health & Safety warning, which waits for a button or 60 seconds. The European and Japanese versions never show it. Applies the next time the game starts." },
+#endif
 #else
     { SRC_MODS, 25, "Instant Whistle Response", "Whistled Pikmin join the squad at once, without stopping to turn and look first." },
     { SRC_MODS, 1, "Chain Pikmin Actions", "Pikmin that finish a task go on to the next one nearby." },
@@ -8444,6 +8457,9 @@ const GroupSection kSections[] = {
     { PC_SET_GROUP_GAMEPLAY, 0, "PIKMIN" },
     { PC_SET_GROUP_GAMEPLAY, 2, "WORLD" },
     { PC_SET_GROUP_GAMEPLAY, 3, "HUD" },
+#if defined(VERSION_GPVE01)
+    { PC_SET_GROUP_GAMEPLAY, 7, "STARTUP" },
+#endif
 #else
     { PC_SET_GROUP_CONTROLS, 0, "SCHEME" },
     { PC_SET_GROUP_CONTROLS, 3, "ACTIONS" },

@@ -28,6 +28,15 @@
 #include "p2_host_restimg.h"
 #endif
 
+#if defined(PIKI_PC_PORT) && defined(VERSION_US)
+// Port option (F1/launcher: Gameplay > Skip Health & Safety Screen). The USA
+// disc opens on a Health & Safety warning that waits for a button after 1.5 s,
+// or 60 s with no input. PAL and JP never had it. With the option on, the USA
+// boot takes their path straight to the Nintendo logo. Off by default.
+extern "C" int pc_settings_get_skip_health_safety(void);
+static bool pcSkipHealthSafety() { return pc_settings_get_skip_health_safety() != 0; }
+#endif
+
 static u32 unused[4] = { 1, 2, 3, 0 }; // has to be generated before nans
 #include "nans.h"
 #include "Game/Piki.h"
@@ -671,6 +680,12 @@ void BootSection::doDraw(Graphics& gfx)
 	case SID_InitNintendoLogo:
 	case SID_FadeInNintendoLogo:
 #if defined(VERSION_US)
+#ifdef PIKI_PC_PORT
+		if (pcSkipHealthSafety()) {
+			drawNintendoLogo(gfx);
+			break;
+		}
+#endif
 		drawEpilepsy(gfx);
 #else
 		drawNintendoLogo(gfx);
@@ -922,6 +937,22 @@ bool BootSection::doUpdate()
 		break;
 #else
 	case SID_InitNintendoLogo:
+#ifdef PIKI_PC_PORT
+		if (pcSkipHealthSafety()) {
+			// Same as PAL/JP above. The greeting those versions start while
+			// loading plays here instead, where the USA disc plays it after
+			// the warning.
+			printf("[PC Port] Boot: Health & Safety screen skipped (setting)\n");
+			setMode(SID_NintendoLogo);
+			mPikiMgr->appear();
+			if (PSSystem::pcSoundReady()) {
+				PSM::Scene_Global* scene = static_cast<PSM::Scene_Global*>(PSMGetPikSceneMgrCheck()->mScenes);
+				P2ASSERTLINE(1638, scene);
+				scene->startGlobalStream(P2_STREAM_SOUND_ID(PSSTR_PIKMIN_GREET));
+			}
+			break;
+		}
+#endif
 		if ((mController->getButton() & Controller::PRESS_B) && VIGetDTVStatus() == 1) {
 			mDoOpenProgressive = true;
 		}

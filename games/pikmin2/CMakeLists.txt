@@ -637,6 +637,17 @@ if(PIKMIN2_ENABLE_PORT_LAYER)
             ${PC_PORT_DIR}/timing/pc_render_phase.cpp
         )
 
+        # The Health & Safety screen only exists on the USA disc, so its skip
+        # option (and this check) only ship in that build. string(JSON) needs 3.19.
+        if(PIKMIN_GAME_VERSION STREQUAL "VERSION_GPVE01" AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.19)
+            add_test(NAME p2_skip_health_safety_setting_test
+                COMMAND ${CMAKE_COMMAND}
+                    -DP2_GAME=$<TARGET_FILE:${P2_GAME}>
+                    -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/p2_skip_health_safety_setting_test
+                    -P ${PC_PORT_DIR}/settings/pc_settings_skip_health_safety_test.cmake)
+            set_tests_properties(p2_skip_health_safety_setting_test PROPERTIES TIMEOUT 60)
+        endif()
+
         add_test(NAME p2_jaudio_integration_test COMMAND ${P2_GAME} --audio-self-test)
         set_tests_properties(p2_jaudio_integration_test PROPERTIES
             WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
