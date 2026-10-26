@@ -2627,8 +2627,9 @@ bool zen::DrawWorldMap::update(Controller* controller)
 					mPause.start();
 					mCurrentMode = DrawWorldMapMode::Paused;
 #if defined(PIKI_PC_PORT)
-				} else if (controller->keyClick(KBBTN_B) && mCursorMgr->isMoveOK()) {
-					// B leaves the idle map for file select. A still lands.
+				} else if (mCursorMgr->isMoveOK() && (controller->keyClick(KBBTN_B) || pc_menu_click_take_back())) {
+					// B leaves the idle map for file select. A still lands. The map holds the
+					// pointer, so a right click reaches here as a posted back, not as B.
 					SeSystem::playSysSe(SYSSE_CANCEL);
 					mCurrentMode  = DrawWorldMapMode::Null;
 					res           = true;
