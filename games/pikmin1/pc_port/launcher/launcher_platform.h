@@ -59,7 +59,8 @@ bool convertImage(const std::filesystem::path& converter,
 // Carpeta de caché del launcher (portadas descargadas). Se crea si no existe.
 // Linux: $XDG_CACHE_HOME/open-nectar, o ~/.cache/open-nectar.
 // Windows: %LOCALAPPDATA%\Open Nectar\cache.
-// Portable mode (portable.txt beside the launcher): <install>/cache.
+// An installed game keeps it in <install>/cache instead, unless
+// "Keep settings in the game folder" is off (see nectar_paths/paths.h).
 std::filesystem::path cacheDirectory();
 
 // Descarga `url` a `destination` (WinHTTP en Windows; curl en casi

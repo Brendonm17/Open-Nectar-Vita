@@ -1013,17 +1013,21 @@ bool sameContents(const fs::path& lhs, const fs::path& rhs)
                       std::istreambuf_iterator<char>(b));
 }
 
-// La carpeta de instalación se recuerda (junto a pikmin2_dir) para que el
-// launcher descargado de GitHub, si se vuelve a abrir, mande al instalado en
-// vez de instalar otra vez.
-fs::path installDirFile() { return nectar::paths::configFile("install_dir"); }
+// La carpeta de instalación se recuerda para que el launcher descargado de
+// GitHub, si se vuelve a abrir, mande al instalado en vez de instalar otra
+// vez. Es un puntero a la instalación, no un ajuste: siempre en la carpeta
+// del usuario, aunque los ajustes estén en la de la instalación.
+fs::path installDirFile() { return nectar::paths::userFolderConfigFile("install_dir"); }
 
 fs::path rememberedInstallDirectory() { return nectar::paths::readStoredPath(installDirFile()); }
 
 // Guarda la carpeta y, si es nueva, pone en el escritorio el acceso directo a
 // su launcher. Solo la primera vez: si el usuario lo borra, no vuelve.
+// Con portable.txt (o NECTAR_PORTABLE=1) no se escribe nada fuera de la
+// carpeta: ni el puntero ni el acceso directo.
 void rememberInstallDirectory(const fs::path& directory)
 {
+    if (nectar::paths::isStrictPortable()) return;
     std::error_code ec;
     const fs::path absolute = fs::absolute(directory, ec);
     const fs::path install = ec ? directory : absolute;
@@ -1032,7 +1036,7 @@ void rememberInstallDirectory(const fs::path& directory)
     const fs::path previous = rememberedInstallDirectory();
     if (!previous.empty() && fs::equivalent(previous, install, ec)) return;
     if (!nectar::paths::writeStoredPath(file, install)) return;
-    if (!nectar::paths::isPortableMode()) platform::createDesktopShortcut(install / kLauncherExecutable);
+    platform::createDesktopShortcut(install / kLauncherExecutable);
 }
 
 // La ruta de dolphin-tool elegida también se recuerda (junto a pikmin2_dir):
@@ -1257,6 +1261,10 @@ int main(int argc, char** argv)
         else { usage(argv[0]); return 2; }
     }
 
+    // Primera vez con los ajustes en la carpeta del juego: se copian (no se
+    // mueven) los de la carpeta del usuario, antes de escribir ninguno.
+    nectar::paths::migrateUserFolderSettings();
+
     const fs::path sourceDirectory = executableDirectory();
     // Instalación (de Pikmin 1, de Pikmin 2 o de los dos) junto a este launcher.
     const bool isInstallFolder = assetsReady(sourceDirectory)
@@ -1369,6 +1377,19 @@ int main(int argc, char** argv)
         hubState.games[0].installed = pikmin1Available;
         hubState.games[1].installed = pikmin2Available;
         hubState.installerOnly = !pikmin1Available && !pikmin2Available;
+        hubState.settingsFolder = [] {
+            const nectar::paths::Layout layout = nectar::paths::currentLayout();
+            pikmin::launcher::SettingsFolderInfo info;
+            info.keepInGameFolder = layout.location == nectar::paths::Location::InstallFolder;
+            info.canChange = layout.reason == nectar::paths::Reason::Default
+                          || layout.reason == nectar::paths::Reason::OptedOut;
+            info.folder = nectar::paths::userConfigDirectory().u8string();
+            info.note = nectar::paths::describeLayout(layout);
+            return info;
+        };
+        hubState.setKeepSettingsInGameFolder = [](bool keep, std::string& message) {
+            return nectar::paths::setKeepSettingsInInstallFolder(keep, message);
+        };
 #if PIKMIN_LAUNCHER_NETPLAY
         hubState.netplay = pikmin1Available;
 #endif
