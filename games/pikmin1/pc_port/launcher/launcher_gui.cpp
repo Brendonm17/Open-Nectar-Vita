@@ -17,6 +17,7 @@
 #include "launcher_gui.h"
 
 #include "bti_decode.h"
+#include "button_style.h"
 #if PIKMIN_LAUNCHER_NETPLAY
 #include "launcher_coop.h"
 #endif
@@ -59,6 +60,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -637,6 +639,30 @@ struct Hub {
     bool chosen = false;
     bool coopOpen = false;
 
+    // ── Botones "gota de rocío" (button_style.h) ───────────────────────────
+    // Cada aspecto se hornea una vez por tamaño y escala de pantalla; cada
+    // botón guarda su animación y, solo mientras se anima, una textura con la
+    // mezcla del fotograma.
+    using DewdropKey = std::tuple<int, int, int>; // ancho y alto (cuartos de unidad), escala (%)
+    struct DewdropSet {
+        float width = 0, height = 0, scale = 1;
+        dewdrop::Bitmap bitmaps[dewdrop::kLookCount];
+        Texture textures[dewdrop::kLookCount];
+        unsigned wanted = 0; // aspectos que conviene tener ya horneados
+    };
+    struct DewdropButton {
+        dewdrop::Anim anim;
+        DewdropKey key;
+        Texture blend;
+        dewdrop::Bitmap scratch;
+        int lastFrame = -1;
+    };
+    std::map<DewdropKey, DewdropSet> dewdropSets;
+    std::map<ImGuiID, DewdropButton> dewdropButtons;
+    Texture dewdropSparkle;
+    float dewdropScale = 0.0f;
+    int dewdropWarmFrame = -1;
+
     Hub(const HubState& s, HubResult& r) : state(s), result(r) {}
 
 #if PIKMIN_LAUNCHER_NETPLAY
@@ -748,46 +774,185 @@ struct Hub {
         }
     }
 
-    // Marco de cristal común a todo lo que el launcher dibuja a mano (botones,
-    // aviso de versión): relleno, brillo y borde comparten rectángulo y radio,
-    // así que el relleno nunca asoma por fuera del borde ni deja una segunda
-    // línea oscura dentro. El borde mide lo mismo que FrameBorderSize, para
-    // que case con los desplegables de ImGui.
-    void glassFrame(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 fill, ImU32 border, float glossAlpha)
+    // ── Botones "gota de rocío" ─────────────────────────────────────────────
+    static float dewdropScaleNow()
     {
-        const float h = b.y - a.y;
-        const float r = h * 0.5f;
-        const float inset = kControlBorder * 0.5f;
-        // El relleno acaba bajo el borde, no más allá.
-        dl->AddRectFilled(ImVec2(a.x + inset, a.y + inset), ImVec2(b.x - inset, b.y - inset), fill, r - inset);
-        // Brillo de cristal en la mitad de arriba, dentro del borde.
-        const float glossTop = a.y + kControlBorder + 1.0f;
-        const float glossBottom = a.y + h * 0.36f;
-        dl->AddRectFilled(ImVec2(a.x + r, glossTop), ImVec2(b.x - r, glossBottom),
-                          col(ImVec4(1.0f, 1.0f, 1.0f, glossAlpha)), (glossBottom - glossTop) * 0.5f);
-        dl->AddRect(a, b, border, r, 0, kControlBorder);
+        const ImVec2 fb = ImGui::GetIO().DisplayFramebufferScale;
+        return std::max(1.0f, std::max(fb.x, fb.y));
     }
 
-    // Botón de cristal como los del HUD del juego. Todos los botones del
-    // launcher pasan por aquí, así que todos se ven igual.
+    void freeDewdrop()
+    {
+        for (auto& entry : dewdropSets)
+            for (Texture& tex : entry.second.textures) freeTexture(tex);
+        for (auto& entry : dewdropButtons) freeTexture(entry.second.blend);
+        dewdropSets.clear();
+        dewdropButtons.clear();
+        freeTexture(dewdropSparkle);
+    }
+
+    void bakeLook(DewdropSet& set, dewdrop::Look look)
+    {
+        const int i = int(look);
+        if (set.textures[i].valid()) return;
+        set.bitmaps[i] = dewdrop::render(look, set.width, set.height, set.scale);
+        const dewdrop::Bitmap& bmp = set.bitmaps[i];
+        set.textures[i] = uploadTexture(bmp.rgba, bmp.width, bmp.height, 0);
+    }
+
+    // Hornea un aspecto que aún falte (como mucho uno por fotograma), para que
+    // al pasar el ratón por primera vez no haya tirón.
+    void warmDewdrop()
+    {
+        if (dewdropWarmFrame == ImGui::GetFrameCount()) return;
+        dewdropWarmFrame = ImGui::GetFrameCount();
+        for (auto& entry : dewdropSets) {
+            DewdropSet& set = entry.second;
+            for (int i = 0; i < dewdrop::kLookCount; ++i) {
+                if ((set.wanted & (1u << i)) && !set.textures[i].valid()) {
+                    bakeLook(set, dewdrop::Look(i));
+                    return;
+                }
+            }
+        }
+    }
+
+    void uploadBlend(Texture& tex, const dewdrop::Bitmap& bmp)
+    {
+        if (tex.valid() && tex.width == bmp.width && tex.height == bmp.height) {
+            glBindTexture(GL_TEXTURE_2D, tex.id);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, bmp.width, bmp.height, GL_RGBA, GL_UNSIGNED_BYTE, bmp.rgba.data());
+            return;
+        }
+        freeTexture(tex);
+        tex = uploadTexture(bmp.rgba, bmp.width, bmp.height, 0);
+    }
+
+    // Texto crema con contorno verde oscuro y sombra suave: se lee sobre
+    // cualquier parte del degradado.
+    void dewdropText(ImDrawList* dl, float size, ImVec2 centre, const char* text, float alpha, float drop)
+    {
+        const ImVec2 extent = fonts.body->CalcTextSizeA(size, FLT_MAX, 0.0f, text);
+        const float scale = dewdropScaleNow();
+        // A píxel de pantalla, para que el texto en reposo salga nítido.
+        const ImVec2 pos(std::round((centre.x - extent.x * 0.5f) * scale) / scale,
+                         std::round((centre.y - extent.y * 0.5f) * scale) / scale + drop);
+        const ImU32 shadow = col(ImVec4(0.0f, 0.06f, 0.01f, 1.0f), 0.30f * alpha);
+        dl->AddText(fonts.body, size, ImVec2(pos.x + 1.0f, pos.y + 2.0f), shadow, text);
+        dl->AddText(fonts.body, size, ImVec2(pos.x + 1.5f, pos.y + 2.5f), shadow, text);
+        const dewdrop::Rgb o = dewdrop::kTextOutline, t = dewdrop::kTextCream;
+        const ImU32 outline = col(ImVec4(o.r, o.g, o.b, 1.0f), 0.8f * alpha);
+        static const ImVec2 around[] = { { -1, -1 }, { 0, -1 }, { 1, -1 }, { -1, 0 }, { 1, 0 }, { -1, 1 }, { 0, 1 }, { 1, 1 } };
+        for (const ImVec2& d : around) dl->AddText(fonts.body, size, ImVec2(pos.x + d.x, pos.y + d.y), outline, text);
+        // Fredoka a 21 px tiene trazos de ~1.5 px: a 1x el contorno se come la
+        // letra. Una segunda pasada desplazada medio píxel (el atlas va con
+        // sobremuestreo horizontal) engorda el trazo crema sin emborronarlo.
+        const ImU32 cream = col(ImVec4(t.r, t.g, t.b, 1.0f), alpha);
+        dl->AddText(fonts.body, size, pos, cream, text);
+        dl->AddText(fonts.body, size, ImVec2(pos.x + 0.5f / scale, pos.y), cream, text);
+    }
+
+    // Marco común a todo lo que el launcher dibuja a mano (botones, aviso de
+    // versión). Anima el estado del elemento `id` con el tiempo real (no
+    // depende de los FPS) y pinta el fotograma; devuelve las capas para que
+    // quien llama coloque el texto. Mientras algo se anima el bucle sigue
+    // redibujando: el launcher pinta todos los fotogramas con vsync.
+    dewdrop::Layers dewdropFrame(ImDrawList* dl, ImGuiID id, ImVec2 a, ImVec2 b, bool hovered, bool held, bool selected,
+                                 bool disabled)
+    {
+        const float scale = dewdropScaleNow();
+        if (scale != dewdropScale) {
+            // Ventana movida a otra pantalla: se vuelve a hornear a la nueva escala.
+            freeDewdrop();
+            dewdropScale = scale;
+        }
+        const float w = b.x - a.x, h = b.y - a.y;
+        const DewdropKey key(int(std::lround(w * 4)), int(std::lround(h * 4)), int(std::lround(scale * 100)));
+        DewdropSet& set = dewdropSets[key];
+        if (set.width == 0) {
+            set.width = w;
+            set.height = h;
+            set.scale = scale;
+        }
+        DewdropButton& button = dewdropButtons[id];
+        if (button.key != key) {
+            freeTexture(button.blend);
+            button.key = key;
+        }
+        const int frame = ImGui::GetFrameCount();
+        // Un botón que vuelve a aparecer (otra pestaña, otro diálogo) no
+        // arrastra la animación de cuando se ocultó.
+        if (button.lastFrame >= 0 && frame - button.lastFrame > 1) button.anim = dewdrop::Anim();
+        const float dt = button.lastFrame == frame ? 0.0f : std::min(ImGui::GetIO().DeltaTime, 0.1f);
+        button.lastFrame = frame;
+        dewdrop::step(button.anim, hovered, held, selected, disabled, dt);
+        const dewdrop::Layers layers = dewdrop::layersFor(button.anim);
+
+        using dewdrop::Look;
+        const auto bit = [](Look l) { return 1u << unsigned(l); };
+        set.wanted |= disabled ? bit(Look::Disabled)
+                    : selected ? bit(Look::Selected) | bit(Look::SelectedHovered) | bit(Look::SelectedPressed)
+                               : bit(Look::Normal) | bit(Look::Hovered) | bit(Look::Pressed);
+        warmDewdrop();
+
+        const Texture* tex = nullptr;
+        const Look settled = dewdrop::settledLook(layers);
+        if (settled != Look::Count) {
+            bakeLook(set, settled);
+            tex = &set.textures[int(settled)];
+            freeTexture(button.blend);
+        } else {
+            const dewdrop::Bitmap* looks[dewdrop::kLookCount] = {};
+            for (int i = 0; i < dewdrop::kLookCount; ++i) {
+                if (layers.weight[i] <= 0.0005f) continue;
+                bakeLook(set, Look(i));
+                looks[i] = &set.bitmaps[i];
+            }
+            dewdrop::composite(looks, layers.weight, button.scratch);
+            uploadBlend(button.blend, button.scratch);
+            tex = &button.blend;
+        }
+        if (tex && tex->valid()) {
+            // El horneado empieza kPad unidades antes del botón; se encaja a
+            // píxel de pantalla para que el borde salga nítido (Retina y 1x).
+            const ImVec2 origin(std::round((a.x - dewdrop::kPad) * scale) / scale,
+                                std::round((a.y - dewdrop::kPad) * scale) / scale);
+            dl->AddImage(tex->imgui(), origin, ImVec2(origin.x + tex->width / scale, origin.y + tex->height / scale));
+        }
+
+        // Centelleo al entrar el ratón: una sola vez, sobre el destello.
+        if (layers.twinkle > 0.01f) {
+            if (!dewdropSparkle.valid()) {
+                const dewdrop::Bitmap sparkle = dewdrop::renderSparkle(dewdrop::pixels(40.0f, scale));
+                dewdropSparkle = uploadTexture(sparkle.rgba, sparkle.width, sparkle.height, 0);
+            }
+            float gx, gy;
+            dewdrop::glintCentre(w, h, gx, gy);
+            const ImVec2 c(a.x + gx, a.y + gy);
+            const float half = 0.5f * 26.0f * (h / 44.0f) * layers.twinkleScale;
+            const float cs = std::cos(layers.twinkleAngle) * half, sn = std::sin(layers.twinkleAngle) * half;
+            dl->AddImageQuad(dewdropSparkle.imgui(), ImVec2(c.x - cs + sn, c.y - sn - cs), ImVec2(c.x + cs + sn, c.y + sn - cs),
+                             ImVec2(c.x + cs - sn, c.y + sn + cs), ImVec2(c.x - cs - sn, c.y - sn + cs), ImVec2(0, 0), ImVec2(1, 0),
+                             ImVec2(1, 1), ImVec2(0, 1), col(ImVec4(1, 1, 1, 1), layers.twinkle));
+        }
+        return layers;
+    }
+
+    // Botón como una gota de rocío. Todos los botones del launcher pasan por
+    // aquí, así que todos se ven y se animan igual.
     bool glassButton(const char* label, ImVec2 size, bool selected = false, bool disabled = false)
     {
         const ImVec2 at = ImGui::GetCursorScreenPos();
         const bool clicked = ImGui::InvisibleButton(label, size);
+        const ImGuiID id = ImGui::GetItemID();
         const bool hovered = ImGui::IsItemHovered() && !disabled;
         const bool held = ImGui::IsItemActive() && !disabled;
         if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-        const ImVec4 tint = disabled ? ImVec4(0.35f, 0.42f, 0.36f, 1.0f)
-                          : held      ? kLeafDark
-                          : hovered   ? kLeafBright
-                          : selected  ? kLeaf
-                                      : ImVec4(0.16f, 0.45f, 0.20f, 1.0f);
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const ImVec2 b(at.x + size.x, at.y + size.y);
-        glassFrame(dl, at, b, col(tint, 0.9f), col(selected || hovered ? kOrange : kOrangeDeep, disabled ? 0.4f : 1.0f),
-                   disabled ? 0.04f : 0.10f);
-        centredText(dl, fonts.body, 21.0f, ImVec2(at.x + size.x * 0.5f, at.y + size.y * 0.5f),
-                    col(kOrange, disabled ? 0.45f : 1.0f), label);
+        const dewdrop::Layers layers = dewdropFrame(dl, id, at, b, hovered, held, selected, disabled);
+        dewdropText(dl, 21.0f, ImVec2(at.x + size.x * 0.5f, at.y + size.y * 0.5f), label, layers.textAlpha, layers.textDrop);
         return clicked && !disabled;
     }
 
@@ -1415,14 +1580,15 @@ struct Hub {
         const ImVec2 b(size.x - 18.0f, 58.0f), a(b.x - extent.x - 40.0f, 18.0f);
         ImGui::SetCursorScreenPos(a);
         const bool clicked = ImGui::InvisibleButton("##release", ImVec2(b.x - a.x, b.y - a.y));
+        const ImGuiID id = ImGui::GetItemID();
         const bool hovered = ImGui::IsItemHovered();
+        const bool held = ImGui::IsItemActive();
         if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const float pulse = 0.5f + 0.5f * std::sin(t * 3.0f);
         dl->AddRectFilled(ImVec2(a.x - 4, a.y - 4), ImVec2(b.x + 4, b.y + 4), col(kOrange, 0.10f + 0.12f * pulse), 24.0f);
-        glassFrame(dl, a, b, hovered ? col(kLeafBright) : col(kLeaf), col(kOrange), 0.10f);
-        dl->AddText(fonts.body, 19.0f, ImVec2(a.x + 20.0f, a.y + (b.y - a.y - 19.0f) * 0.5f), col(ImVec4(1.0f, 0.93f, 0.80f, 1.0f)),
-                    text.c_str());
+        const dewdrop::Layers layers = dewdropFrame(dl, id, a, b, hovered, held, true, false);
+        dewdropText(dl, 19.0f, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), text.c_str(), layers.textAlpha, layers.textDrop);
         if (clicked) choose(HubAction::Update, HubGame::Pikmin1);
 
         // "What's new" a su izquierda, si el release trae notas.
@@ -1755,6 +1921,7 @@ struct Hub {
 
     void release()
     {
+        freeDewdrop();
         for (Texture& cover : covers) freeTexture(cover);
         freeTexture(logo);
         slideshow.release();
