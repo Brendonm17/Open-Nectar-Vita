@@ -65,6 +65,14 @@ RenderModeInfo gPcRenderInfoStore = {};
 #include "touch/pc_touch.h"
 #endif
 
+#if defined(__APPLE__)
+// pc_gfx.cpp. macOS (OpenGL 4.1 core) shows a black window if the swap runs
+// while the renderer's own framebuffer is bound; Pikmin 1 and
+// pc_window_swap_buffers bind the default one around the swap the same way.
+unsigned int pc_gfx_begin_swap_framebuffer(void);
+void pc_gfx_end_swap_framebuffer(unsigned int bound);
+#endif
+
 OSTime __OSStartTime       = 0;
 u32 __OSFpscrEnableBits    = 0;
 volatile OSHeapHandle __OSCurrHeap = -1;
@@ -1470,7 +1478,13 @@ void VIWaitForRetrace()
 			// El swap puede esperar al refresco: es la espera del vsync de la
 			// consola, sin turno, para que corran los demás hilos.
 			pc_sched_host_begin();
+#if defined(__APPLE__)
+			const unsigned int renderTarget = pc_gfx_begin_swap_framebuffer();
+#endif
 			SDL_GL_SwapWindow(window);
+#if defined(__APPLE__)
+			pc_gfx_end_swap_framebuffer(renderTarget);
+#endif
 			pc_sched_host_end();
 		}
 		// Some drivers accept interval 1 but do not actually block. In that

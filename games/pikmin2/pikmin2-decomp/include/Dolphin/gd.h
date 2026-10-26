@@ -39,7 +39,11 @@ void GDSetArrayRaw(GXAttr attr, u32 data, u8 stride);
 ///////////// GD DECLARATIONS //////////////
 
 #ifdef PIKI_PC_PORT
-#ifdef __cplusplus
+#if defined(__cplusplus) && defined(__APPLE__)
+// Darwin: C++ thread_local reads go through a wrapper the defining TU must
+// emit, and GDBase.c is C. __thread is the same TLS variable without one.
+extern __thread GDCurrentDL* __GDCurrentDL;
+#elif defined(__cplusplus)
 extern thread_local GDCurrentDL* __GDCurrentDL;
 #else
 extern _Thread_local GDCurrentDL* __GDCurrentDL;

@@ -69,22 +69,22 @@ endif()
 # ─── Flags de compilación: código decompilado ───
 # Fuerza nuestro header de adaptación ANTES de cualquier include del juego.
 set(CLANG_LEGACY_RELAXATIONS
-    $<$<CXX_COMPILER_ID:Clang>:-Wno-register>
-    $<$<CXX_COMPILER_ID:Clang>:-Wno-address-of-temporary>
-    $<$<CXX_COMPILER_ID:Clang>:-Wno-unknown-warning-option>
+    $<$<CXX_COMPILER_ID:Clang,AppleClang>:-Wno-register>
+    $<$<CXX_COMPILER_ID:Clang,AppleClang>:-Wno-address-of-temporary>
+    $<$<CXX_COMPILER_ID:Clang,AppleClang>:-Wno-unknown-warning-option>
     # clang no tiene -fpermissive. Estas dos dejan pasar como aviso lo mismo que
     # GCC permite al decomp: punteros a enteros de 32 bits (-fms-extensions) y
     # plantillas que usan tipos aún incompletos (análisis diferido).
-    $<$<CXX_COMPILER_ID:Clang>:-fms-extensions>
-    $<$<CXX_COMPILER_ID:Clang>:-fdelayed-template-parsing>
-    $<$<CXX_COMPILER_ID:Clang>:-Wno-microsoft>
+    $<$<CXX_COMPILER_ID:Clang,AppleClang>:-fms-extensions>
+    $<$<CXX_COMPILER_ID:Clang,AppleClang>:-fdelayed-template-parsing>
+    $<$<CXX_COMPILER_ID:Clang,AppleClang>:-Wno-microsoft>
     # trig.h redefine sinf/cosf/sincosf/acosf con la tabla de GameCube. clang
     # los trata como los de libm y llama a la versión exacta: la nave giraba
     # ~0,1° distinto y en Android los capitanes salían fuera de las cabinas.
-    $<$<CXX_COMPILER_ID:Clang>:-fno-builtin-sinf>
-    $<$<CXX_COMPILER_ID:Clang>:-fno-builtin-cosf>
-    $<$<CXX_COMPILER_ID:Clang>:-fno-builtin-sincosf>
-    $<$<CXX_COMPILER_ID:Clang>:-fno-builtin-acosf>
+    $<$<CXX_COMPILER_ID:Clang,AppleClang>:-fno-builtin-sinf>
+    $<$<CXX_COMPILER_ID:Clang,AppleClang>:-fno-builtin-cosf>
+    $<$<CXX_COMPILER_ID:Clang,AppleClang>:-fno-builtin-sincosf>
+    $<$<CXX_COMPILER_ID:Clang,AppleClang>:-fno-builtin-acosf>
 )
 set(LEGACY_COMPILE_OPTIONS
     -include "${ADAPTER_DIR}/pikmin2_pc_types.h"

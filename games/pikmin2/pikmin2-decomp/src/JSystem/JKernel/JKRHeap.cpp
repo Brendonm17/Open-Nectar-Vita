@@ -46,7 +46,36 @@ void pcHeapLogCaller()
 static thread_local bool sPcHostAllocActive = false;
 bool pc_host_alloc_active() { return sPcHostAllocActive; }
 void pc_host_alloc_set(bool active) { sPcHostAllocActive = active; }
+#ifdef __APPLE__
+#include <mach-o/getsect.h>
+#include <mach-o/loader.h>
+// macOS: the replacement operator new below also serves Apple's frameworks
+// (Metal shader compiler, CoreAnalytics), on the main thread and on their own
+// dispatch threads. Their objects must not live in the JKR heaps: JKR blocks
+// are only 4-byte aligned and the heaps are not thread safe, and Metal hit
+// SIGBUS on such blocks during the first buffer swap. Requests from code
+// outside this executable get malloc; operator delete already frees either.
+static bool pcCallerIsGame(const void* caller)
+{
+	static uintptr_t textLo = 0, textHi = 0;
+	if (!textLo) {
+		Dl_info info;
+		unsigned long size = 0;
+		if (dladdr((const void*)&pcCallerIsGame, &info) && info.dli_fbase) {
+			uint8_t* text = getsegmentdata((const struct mach_header_64*)info.dli_fbase, "__TEXT", &size);
+			textHi        = (uintptr_t)text + size;
+			textLo        = (uintptr_t)text;
+		}
+		if (!textLo)
+			return true;
+	}
+	return (uintptr_t)caller >= textLo && (uintptr_t)caller < textHi;
+}
+#define JKR_USE_CURRENT_HEAP() \
+	(JKRHeap::sCurrentHeap && !sPcHostAllocActive && pcCallerIsGame(__builtin_return_address(0)))
+#else
 #define JKR_USE_CURRENT_HEAP() (JKRHeap::sCurrentHeap && !sPcHostAllocActive)
+#endif
 #else
 #define JKR_USE_CURRENT_HEAP() (JKRHeap::sCurrentHeap)
 #define JKR_NEW_SIZE_T u32
