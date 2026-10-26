@@ -1396,8 +1396,7 @@ struct Hub {
         ImGui::Separator();
         ImGui::PushTextWrapPos(0.0f);
         ImGui::TextColored(ImVec4(0.62f, 0.58f, 0.44f, 1.0f),
-                           "Before a save is replaced, the old one is copied to a card0-backups folder next to the "
-                           "memory card. The newest %d are kept.",
+                           "Before a save is replaced, the old one is copied to a backup folder. The newest %d are kept.",
                            kCardBackupKeep);
         if (!savesBackupTime.empty()) {
             ImGui::Dummy(ImVec2(0, 6));
