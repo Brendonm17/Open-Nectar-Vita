@@ -1,9 +1,10 @@
 /**
  * @file pc_p2_coop_movie_protagonist_test.cpp
- * @brief One-shot queue for the co-op captain who starts a non-navi cutscene.
+ * @brief Protagonist tag queue, per-slot binding, and stale-tag clearing.
  */
 
 #include "pc_p2_coop.h"
+#include "pc_p2_coop_movie.h"
 
 #include <cstdio>
 
@@ -25,6 +26,7 @@ int main()
 {
 	char olimar;
 	char louie;
+	char unrelated;
 
 	expect_ptr(pc_p2_coop_take_movie_protagonist(), nullptr, "empty queue");
 
@@ -36,6 +38,25 @@ int main()
 	pc_p2_coop_set_movie_protagonist(&olimar);
 	pc_p2_coop_set_movie_protagonist(&louie);
 	expect_ptr(pc_p2_coop_take_movie_protagonist(), &louie, "last writer wins");
+
+	// Queued movies: each play() consumes its tag into a context slot (simulated).
+	pc_p2_coop_set_movie_protagonist(&olimar);
+	void* movieA = pc_p2_coop_take_movie_protagonist();
+	pc_p2_coop_set_movie_protagonist(&louie);
+	void* movieB = pc_p2_coop_take_movie_protagonist();
+	void* slotA  = pc_p2_coop_movie_queue_slot_protagonist(movieA, &unrelated);
+	void* slotB  = pc_p2_coop_movie_queue_slot_protagonist(movieB, &unrelated);
+	expect_ptr(slotA, &olimar, "queue slot A keeps Olimar tag");
+	expect_ptr(slotB, &louie, "queue slot B keeps Louie tag");
+	expect_ptr(pc_p2_coop_take_movie_protagonist(), nullptr, "tags consumed at enqueue");
+
+	// Stale global tag must not leak after clear (e.g. section reset).
+	pc_p2_coop_set_movie_protagonist(&louie);
+	pc_p2_coop_clear_movie_protagonist();
+	expect_ptr(pc_p2_coop_take_movie_protagonist(), nullptr, "clear drops stale tag");
+
+	// Fallback when no tag was set for this movie.
+	expect_ptr(pc_p2_coop_movie_queue_slot_protagonist(nullptr, &olimar), &olimar, "slot uses fallback navi");
 
 	if (sFailures == 0) {
 		std::printf("pc_p2_coop_movie_protagonist_test: all checks passed\n");

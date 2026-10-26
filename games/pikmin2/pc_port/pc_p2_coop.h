@@ -49,6 +49,7 @@ int  pc_p2_coop_movie_full(void);
 /// conocer un Pikmin silbado). Lo consume pcCoopMovieBegin al arrancar la demo.
 void pc_p2_coop_set_movie_protagonist(void* navi);
 void* pc_p2_coop_take_movie_protagonist(void);
+void pc_p2_coop_clear_movie_protagonist(void);
 
 #ifdef __cplusplus
 }

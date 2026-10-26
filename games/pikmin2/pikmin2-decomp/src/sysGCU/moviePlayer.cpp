@@ -13,6 +13,7 @@ extern f64 gPcJStudioSubFrame;
 extern "C" int pc_settings_get_hide_olimar_text(void);
 extern "C" int pc_speedrun_active(void);
 #include "Game/pcCoop.h"
+#include "pc_p2_coop_movie.h"
 #include "Game/BaseGameSection.h"
 #include "Game/Navi.h"
 #include "Game/pelletMgr.h"
@@ -51,17 +52,11 @@ static bool pcCoopMovieNavis()
 	    && Game::naviMgr->getAt(NAVIID_Olimar) && Game::naviMgr->getAt(NAVIID_Louie);
 }
 
-static void pcCoopMovieBegin(Game::MoviePlayer* player)
+static Game::Navi* pcCoopResolveProtagonist(Game::MoviePlayer* player, Game::Navi* tagged)
 {
-	if (!pcCoopMovieNavis()) {
-		return;
-	}
-	Game::Navi* navi = nullptr;
-	if (void* tagged = pc_p2_coop_take_movie_protagonist()) {
-		navi = static_cast<Game::Navi*>(tagged);
-		if (!navi->isAlive()) {
-			navi = nullptr;
-		}
+	Game::Navi* navi = tagged;
+	if (navi && !navi->isAlive()) {
+		navi = nullptr;
 	}
 	if (!navi && player->mTargetObject && player->mTargetObject->isNavi()) {
 		navi = static_cast<Game::Navi*>(player->mTargetObject);
@@ -72,6 +67,25 @@ static void pcCoopMovieBegin(Game::MoviePlayer* player)
 	if (!navi || !navi->isAlive()) {
 		navi = Game::naviMgr->getMovieNavi();
 	}
+	if (navi && !navi->isAlive()) {
+		navi = nullptr;
+	}
+	return navi;
+}
+
+static Game::Navi* pcCoopConsumePlayProtagonist(Game::MoviePlayer* player)
+{
+	void* tagged = pc_p2_coop_take_movie_protagonist();
+	Game::Navi* navi = tagged ? static_cast<Game::Navi*>(tagged) : nullptr;
+	return pcCoopResolveProtagonist(player, navi);
+}
+
+static void pcCoopMovieBegin(Game::MoviePlayer* player, Game::Navi* pendingProtagonist)
+{
+	if (!pcCoopMovieNavis()) {
+		return;
+	}
+	Game::Navi* navi = pcCoopResolveProtagonist(player, pendingProtagonist);
 	if (!navi || navi->mNaviIndex > NAVIID_Louie) {
 		return;
 	}
@@ -176,6 +190,9 @@ MoviePlayer::MoviePlayer()
 	mAltCamera    = nullptr;
 	mViewport     = nullptr;
 	mTargetObject = nullptr;
+#ifdef PIKI_PC_PORT
+	mPcPendingProtagonist = nullptr;
+#endif
 	mFlags.clear();
 	mCurrentConfig = nullptr;
 	mDelegate1     = nullptr;
@@ -281,14 +298,34 @@ int MoviePlayer::play(MoviePlayArg& arg)
  */
 int MoviePlayer::play(MovieConfig* config, MoviePlayArg& arg, bool flag)
 {
+#ifdef PIKI_PC_PORT
+	Game::Navi* pendingProtagonist = mPcPendingProtagonist;
+	if (!pendingProtagonist) {
+		if (pc_p2_coop_active()) {
+			pendingProtagonist = pcCoopConsumePlayProtagonist(this);
+		} else {
+			pc_p2_coop_clear_movie_protagonist();
+		}
+	}
+#endif
 	if (isFlag(MVP_IsActive)) {
 		// if a movie is already playing, put the new cutscene in the queue instead
 		MovieContext* context = getNewContext();
 		if (!context) {
 			JUT_PANICLINE(560, "******* ★キューにはいりきらんよ～！！\n"); // "******* ★It won't fit in the queue!!"
+#ifdef PIKI_PC_PORT
+			mPcPendingProtagonist = nullptr;
+#endif
 			return MOVIEPLAY_QUEUEFAIL;
 		} else {
 			setContext(context, config, arg);
+#ifdef PIKI_PC_PORT
+			context->mPcCoopProtagonist = pendingProtagonist;
+			if (pendingProtagonist && pc_p2_coop_active()) {
+				context->mNavi = pendingProtagonist;
+			}
+			mPcPendingProtagonist = nullptr;
+#endif
 			return MOVIEPLAY_INQUEUE;
 		}
 	} else {
@@ -296,7 +333,8 @@ int MoviePlayer::play(MovieConfig* config, MoviePlayArg& arg, bool flag)
 			Screen::gGame2DMgr->stopFinalFloorSound();
 		}
 #ifdef PIKI_PC_PORT
-		pcCoopMovieBegin(this);
+		pcCoopMovieBegin(this, pendingProtagonist);
+		mPcPendingProtagonist = nullptr;
 #endif
 		mAltNavi   = mTargetNavi;
 		mAltCamera = mActingCamera;
@@ -401,6 +439,9 @@ MovieContext::MovieContext()
 	mArg.mStreamID      = 0;
 	mArg._14            = 0;
 	mArg.mSoundPosition = nullptr;
+#ifdef PIKI_PC_PORT
+	mPcCoopProtagonist = nullptr;
+#endif
 }
 
 /**
@@ -428,9 +469,16 @@ void MoviePlayer::clearContexts()
 	for (int i = 0; i < mContextsCount; i++) {
 		MovieContext* context = &mContexts[i];
 		context->clearRelations();
+#ifdef PIKI_PC_PORT
+		context->mPcCoopProtagonist = nullptr;
+#endif
 		mStoreContextInactive.add(context);
 	}
 	mActiveContextNum = 0;
+#ifdef PIKI_PC_PORT
+	mPcPendingProtagonist = nullptr;
+	pc_p2_coop_clear_movie_protagonist();
+#endif
 }
 
 /**
@@ -444,6 +492,10 @@ bool MoviePlayer::playSuspended()
 		mTargetNavi   = context->mNavi;
 		mActingCamera = context->mCamera;
 		mTargetObject = context->mTargetObject;
+#ifdef PIKI_PC_PORT
+		mPcPendingProtagonist = context->mPcCoopProtagonist;
+		context->mPcCoopProtagonist = nullptr;
+#endif
 		int flag      = play(context->mConfig, context->mArg, true);
 		switch (flag) {
 		case MOVIEPLAY_SUCCESS:
