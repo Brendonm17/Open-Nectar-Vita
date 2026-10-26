@@ -14,6 +14,9 @@ set(NM_P1 "${NM_ROOT}/games/pikmin1")
 if(NOT TARGET nectar_mapcore)
     add_subdirectory("${NM_ROOT}/libs/nectar_mapcore" "${CMAKE_CURRENT_BINARY_DIR}/nectar_mapcore")
 endif()
+if(NOT TARGET nectar_paths)
+    add_subdirectory("${NM_ROOT}/libs/nectar_paths" "${CMAKE_CURRENT_BINARY_DIR}/nectar_paths")
+endif()
 
 find_package(Threads REQUIRED)
 if(NOT SDL2_LIBRARIES)
@@ -91,7 +94,7 @@ target_include_directories(nectar_mapmaker PRIVATE
     "${NM_P1}/third_party/imgui"
     "${NM_P1}/third_party/imgui/backends"
     ${SDL2_INCLUDE_DIRS})
-target_link_libraries(nectar_mapmaker PRIVATE nectar_mapcore ${NM_IMGUI} ${SDL2_LIBRARIES} Threads::Threads)
+target_link_libraries(nectar_mapmaker PRIVATE nectar_mapcore nectar_paths ${NM_IMGUI} ${SDL2_LIBRARIES} Threads::Threads)
 if(WIN32)
     target_link_libraries(nectar_mapmaker PRIVATE comdlg32 ole32 shell32 uuid winhttp)
     set_target_properties(nectar_mapmaker PROPERTIES WIN32_EXECUTABLE ON)

@@ -619,7 +619,11 @@ struct Hub {
     std::string whatsNewVersion, whatsNewNotes;
     std::shared_ptr<SettingsClient> settingsClients[kHubGameCount];
     std::shared_ptr<SettingsClient> settings;
-    int settingsGame = 0;
+    int settingsGame = 0; // kHubGameCount = the "Launcher" page
+    std::string launcherMessage; // result of the last switch on that page
+    bool launcherMessageIsError = false;
+    SettingsFolderInfo launcherInfo;
+    bool launcherInfoFresh = false;
     int settingsGroup = 0;
     // Page that asked for the request whose result is in snap.message: the
     // result only shows on that page, so it does not follow you to another.
@@ -1453,16 +1457,22 @@ struct Hub {
     {
         ImDrawList* dl = ImGui::GetWindowDrawList();
         // Un apartado por juego: cada uno con sus propias opciones.
-        const char* gameNames[kHubGameCount] = { "Pikmin", "Pikmin 2" };
+        // Y un último apartado, "Launcher", con las opciones del propio launcher.
+        const char* gameNames[kHubGameCount + 1] = { "Pikmin", "Pikmin 2", "Launcher" };
+        const bool launcherPage = bool(state.settingsFolder);
+        const int pills = kHubGameCount + (launcherPage ? 1 : 0);
+        if (settingsGame >= pills) settingsGame = 0;
         const float pillW = 170.0f, pillGap = 12.0f;
-        float pillX = (size.x - (float(kHubGameCount) * pillW + float(kHubGameCount - 1) * pillGap)) * 0.5f;
-        for (int g = 0; g < kHubGameCount; ++g) {
+        float pillX = (size.x - (float(pills) * pillW + float(pills - 1) * pillGap)) * 0.5f;
+        for (int g = 0; g < pills; ++g) {
             ImGui::SetCursorScreenPos(ImVec2(pillX, top + 16.0f));
             ImGui::PushID(1000 + g);
-            const bool unavailable = !settingsClients[g];
+            const bool unavailable = g < kHubGameCount && !settingsClients[g];
             if (glassButton(gameNames[g], ImVec2(pillW, 38.0f), g == settingsGame, unavailable) && g != settingsGame) {
                 settingsGame = g;
                 settingsGroup = 0;
+                launcherInfoFresh = false;
+                launcherMessage.clear();
                 optionOrder.clear();
 #ifndef __ANDROID__
                 gciNote.clear();
@@ -1472,6 +1482,11 @@ struct Hub {
             pillX += pillW + pillGap;
         }
         top += 54.0f;
+        if (settingsGame == kHubGameCount) {
+            settings = nullptr;
+            drawLauncherSettings(top, size);
+            return;
+        }
         settings = settingsClients[settingsGame];
         if (!settings) {
             centredText(dl, fonts.body, 21.0f, ImVec2(size.x * 0.5f, top + 80.0f), col(kOrange),
@@ -1486,6 +1501,100 @@ struct Hub {
             SettingsClient::start(settings, std::move(pendingRequest), pendingLabel);
             pendingRequest.clear();
         }
+    }
+
+    // Settings > Launcher: where the launcher keeps its own settings. Same
+    // layout as a game's settings page (list, rows, help bar).
+    void drawLauncherSettings(float top, ImVec2 size)
+    {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        // Read once per visit (and after a switch), not every frame.
+        if (!launcherInfoFresh) {
+            launcherInfo = state.settingsFolder();
+            launcherInfoFresh = true;
+        }
+        const SettingsFolderInfo& info = launcherInfo;
+        const float margin = std::max(40.0f, (size.x - 1000.0f) * 0.5f);
+        const float listW = 180.0f;
+        const float panelX = margin + listW + 18.0f;
+        const float panelW = size.x - margin - panelX;
+        const float bottom = size.y - 64.0f;
+        const float helpH = 104.0f;
+
+        ImGui::SetCursorScreenPos(ImVec2(margin, top + 24.0f));
+        glassButton("Folders", ImVec2(listW, 40.0f), true);
+
+        ImGui::SetCursorScreenPos(ImVec2(panelX, top + 24.0f));
+        ImGui::BeginChild("launcherRows", ImVec2(panelW, bottom - helpH - 12.0f - (top + 24.0f)), ImGuiChildFlags_Borders);
+        const float controlW = std::min(300.0f, panelW * 0.45f);
+        const ImVec4 label(1.0f, 0.93f, 0.80f, 1.0f), dim(0.62f, 0.58f, 0.44f, 1.0f);
+        ImGui::Dummy(ImVec2(0, 4));
+        ImGui::PushFont(fonts.caption);
+        ImGui::TextColored(kOrangeDeep, "%s", "Where settings are kept");
+        ImGui::PopFont();
+        ImGui::Separator();
+
+        std::string help;
+        int choice = -1; // 1 = on, 0 = off
+        const char* options[2] = { "Off", "On" };
+        {
+            const float rowY = ImGui::GetCursorPosY();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextColored(info.canChange ? label : dim, "%s", "Keep settings in the game folder");
+            ImGui::SameLine(ImGui::GetContentRegionMax().x - controlW);
+            ImGui::SetNextItemWidth(controlW);
+            ImGui::BeginDisabled(!info.canChange);
+            const int current = info.keepInGameFolder ? 1 : 0;
+            if (ImGui::BeginCombo("##keepInGameFolder", options[current])) {
+                for (int i = 1; i >= 0; --i) {
+                    if (ImGui::Selectable(options[i], i == current) && i != current) choice = i;
+                    if (i == current) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::EndDisabled();
+            const float rowH = ImGui::GetCursorPosY() - rowY;
+            const ImVec2 rowMin(ImGui::GetWindowPos().x, ImGui::GetWindowPos().y + rowY - ImGui::GetScrollY());
+            if (ImGui::IsMouseHoveringRect(rowMin, ImVec2(rowMin.x + ImGui::GetWindowWidth(), rowMin.y + rowH)))
+                help = "On: the launcher's settings and cache live inside the game folder, so they move with it. "
+                       "Off: they live in your user folder. Switching copies them across; nothing is deleted.";
+            // Locked (portable.txt, NECTAR_PORTABLE, read-only folder...): say
+            // why right under the row, not only in the help bar.
+            if (!info.canChange && !info.note.empty()) {
+                ImGui::PushFont(fonts.caption);
+                ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x);
+                ImGui::TextColored(dim, "%s", info.note.c_str());
+                ImGui::PopTextWrapPos();
+                ImGui::PopFont();
+                ImGui::Dummy(ImVec2(0, 4));
+            }
+        }
+        {
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextColored(label, "%s", "Settings folder");
+            ImGui::SameLine(ImGui::GetContentRegionMax().x - controlW);
+            const std::string shown = fitTail(ImGui::GetFont(), ImGui::GetFontSize(), info.folder, controlW);
+            ImGui::TextColored(dim, "%s", shown.c_str());
+        }
+        ImGui::EndChild();
+
+        if (choice >= 0 && state.setKeepSettingsInGameFolder) {
+            launcherMessageIsError = !state.setKeepSettingsInGameFolder(choice == 1, launcherMessage);
+            launcherInfoFresh = false;
+        }
+
+        const ImVec2 a(panelX, bottom - helpH), b(panelX + panelW, bottom);
+        dl->AddRectFilled(a, b, IM_COL32(4, 22, 8, 215), 14.0f);
+        dl->AddRect(a, b, col(kOrangeDeep, 0.6f), 14.0f, 0, 1.5f);
+        std::string note = info.note;
+        ImVec4 noteColour(1.0f, 0.93f, 0.80f, 0.95f);
+        // While locked the reason stays first, even when hovering the row.
+        if (!help.empty()) note = info.canChange || note.empty() ? help : note + "\n" + help;
+        else if (!launcherMessage.empty()) {
+            note = launcherMessage;
+            if (launcherMessageIsError) noteColour = ImVec4(1.0f, 0.55f, 0.40f, 1.0f);
+        }
+        dl->AddText(fonts.body, 19.0f, ImVec2(a.x + 16.0f, a.y + 8.0f), col(noteColour), note.c_str(), nullptr, panelW - 32.0f);
     }
 
     void drawSettingsLocked(float top, ImVec2 size, float dt)

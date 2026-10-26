@@ -3,6 +3,7 @@
 #include "installer_ui.h"
 #include "release_update.h"
 
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -36,6 +37,14 @@ struct GameInstall {
     std::string discId;     // GPIE01 USA, GPIP01 Europa...; vacío = USA
 };
 
+// Where the launcher keeps its settings, for Settings > Launcher.
+struct SettingsFolderInfo {
+    bool keepInGameFolder = false; // what the switch shows
+    bool canChange = false;        // false: forced by portable.txt, read-only, etc.
+    std::string folder;            // folder in use now
+    std::string note;              // why, in plain words
+};
+
 struct HubState {
     // Launcher del paquete, fuera de una instalación: solo Install y Update,
     // sin las pestañas de ajustes y de mover la instalación.
@@ -52,6 +61,9 @@ struct HubState {
     std::string modelMaker;
     // Host Co-op / Join Co-op under Pikmin 1 (netplay builds of the game).
     bool netplay = false;
+    // Settings > Launcher. Empty (Android) hides that page.
+    std::function<SettingsFolderInfo()> settingsFolder;
+    std::function<bool(bool keep, std::string& message)> setKeepSettingsInGameFolder;
 };
 
 struct HubResult {
