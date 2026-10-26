@@ -71,4 +71,18 @@ inline SidebarLayout fitSidebar(int count, float available, SidebarMetrics m = {
     return out;
 }
 
+// Desplazamiento de la lista con scroll que deja entero a la vista el botón
+// `selected`, moviéndose lo mínimo desde `scrollY`. Si ya se ve, no se mueve.
+inline float sidebarScrollToShow(int selected, const SidebarLayout& l, float view, float scrollY)
+{
+    view = std::max(0.0f, view);
+    const float maxScroll = std::max(0.0f, l.content - view);
+    if (selected < 0) return std::clamp(scrollY, 0.0f, maxScroll);
+    const float top = float(selected) * l.step;
+    const float bottom = top + l.height;
+    if (bottom > scrollY + view) scrollY = bottom - view;
+    if (top < scrollY) scrollY = top; // si el botón no cabe entero, que se vea su principio
+    return std::clamp(scrollY, 0.0f, maxScroll);
+}
+
 } // namespace pikmin::launcher

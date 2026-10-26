@@ -638,6 +638,10 @@ struct Hub {
     int messageGame = -1;
     int messageGroup = -1;
     int pickGame = -1, pickGroup = -1; // page that opened the file pick
+    // Última altura y página con las que se ajustó el scroll de la lista de
+    // páginas; al cambiar cualquiera se vuelve a dejar la página elegida a la vista.
+    float pagesShownView = -1.0f;
+    int pagesShownGroup = -1;
     // Orden de las opciones tal como se vieron la primera vez: el juego lista
     // las cíclicas empezando por el valor actual, y el desplegable no debe
     // reordenarse cada vez que se cambia algo.
@@ -1867,7 +1871,19 @@ struct Hub {
             ImGui::SetCursorScreenPos(listOrigin);
             ImGui::BeginChild("##pages", ImVec2(listW, std::max(1.0f, listSpace)), ImGuiChildFlags_None,
                               ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar);
+            // Al encoger la ventana (o cambiar de página o de juego) la página
+            // elegida podría quedar fuera; solo entonces se mueve la lista, para
+            // no pelear con la rueda.
+            if (listSpace != pagesShownView || settingsGroup != pagesShownGroup) {
+                pagesShownView = listSpace;
+                pagesShownGroup = settingsGroup;
+                const float y = ImGui::GetScrollY();
+                const float want = sidebarScrollToShow(settingsGroup, sidebar, listSpace, y);
+                if (want != y) ImGui::SetScrollY(want);
+            }
             listOrigin = ImGui::GetCursorScreenPos();
+        } else {
+            pagesShownView = -1.0f;
         }
         for (int g = 0; g <= lastPage; ++g) {
             const char* name = g == savesPage ? "Saves"

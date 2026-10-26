@@ -58,6 +58,17 @@ int main()
     l = fitSidebar(1, 34.0f);
     check(!l.scroll && near(l.height, 34.0f), "single short button");
 
+    // Scrolling list: the selected page is brought into view with the smallest move.
+    l = fitSidebar(8, 174.0f); // 960x560: step 35, height 30, content 275
+    check(l.scroll && near(l.content, 275.0f), "560 px scrolls");
+    check(near(sidebarScrollToShow(7, l, 174.0f, 0.0f), 101.0f), "last page scrolled to the bottom");
+    check(near(sidebarScrollToShow(5, l, 174.0f, 0.0f), 31.0f), "hidden page scrolled just into view");
+    check(near(sidebarScrollToShow(2, l, 174.0f, 40.0f), 40.0f), "visible page does not move the list");
+    check(near(sidebarScrollToShow(0, l, 174.0f, 101.0f), 0.0f), "page above scrolls up to its top");
+    check(near(sidebarScrollToShow(1, l, 174.0f, 40.0f), 35.0f), "partly hidden page above is shown whole");
+    check(near(sidebarScrollToShow(7, l, 20.0f, 0.0f), 245.0f), "view shorter than a button shows its top");
+    check(near(sidebarScrollToShow(-1, l, 174.0f, 500.0f), 101.0f), "no selection only clamps");
+
     for (int count = 1; count <= 16; ++count)
         for (float available = 0.0f; available <= 800.0f; available += 7.0f) checkFits(count, available);
 
