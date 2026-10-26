@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -229,6 +230,52 @@ inline std::vector<DialogButton> fitDialogButtons(const std::vector<float>& widt
     if (cancelW > 0.0f) out.push_back({ 0.0f, std::min(cancelW, innerW), row++ });
     rows = row;
     return out;
+}
+
+// ── Ventanas grandes ───────────────────────────────────────────────────────
+
+// La interfaz se diseña para 1180x780. En ventanas mayores se dibuja más
+// grande (hasta kDesktopUiScaleMax), en proporción al lado que menos crece,
+// para no dejar una isla pequeña en medio de la pantalla.
+inline constexpr float kDesignW = 1180.0f;
+inline constexpr float kDesignH = 780.0f;
+inline constexpr float kDesktopUiScaleMax = 1.75f;
+
+inline float desktopUiScale(float windowW, float windowH)
+{
+    const float s = std::min(windowW / kDesignW, windowH / kDesignH);
+    return std::max(1.0f, std::min(s, kDesktopUiScaleMax));
+}
+
+// Escala a la que se rasteriza algo (fuentes, botones): sube en pasos de 0.5
+// para no rehacerlo en cada píxel de un cambio de tamaño.
+inline float bakeScaleFor(float pixelScale)
+{
+    return std::ceil(std::max(1.0f, pixelScale) * 2.0f - 0.001f) * 0.5f;
+}
+
+// Densidad de las fuentes para una escala de interfaz y de pantalla.
+inline float fontDensityFor(float uiScale, float framebufferScale)
+{
+    return bakeScaleFor(uiScale * framebufferScale);
+}
+
+// "Reset all" justo debajo de la lista de páginas (no en el fondo de la
+// ventana) mientras la lista no tenga scroll.
+inline float resetAllY(float listTop, float listContent, bool listScrolls, float bottom, float resetH, float gap = 16.0f)
+{
+    if (listScrolls) return bottom - resetH;
+    return std::min(bottom - resetH, listTop + listContent + gap);
+}
+
+// Alto de un diálogo que se ajusta a su contenido: `content` es lo que mide
+// lo de dentro (el fotograma anterior; < 0 si aún no se sabe), `chrome` el
+// título, márgenes y botones.
+inline float fitDialogHeight(float content, float chrome, float maxH, float minH)
+{
+    maxH = std::max(minH, maxH);
+    if (content < 0.0f) return maxH;
+    return std::max(minH, std::min(maxH, content + chrome));
 }
 
 } // namespace pikmin::launcher

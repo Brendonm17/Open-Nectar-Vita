@@ -30,6 +30,7 @@
 #include "release_update.h"
 
 #include "imgui.h"
+#include "imgui_internal.h" // cola de eventos: escalar la posición del ratón
 #include "backends/imgui_impl_opengl3.h"
 #include "backends/imgui_impl_sdl2.h"
 
@@ -626,6 +627,7 @@ struct Hub {
     // Panel "What's new": las notas del release nuevo, copiadas al abrirlo.
     bool whatsNewOpen = false;
     std::string whatsNewVersion, whatsNewNotes;
+    float whatsNewNotesH = -1.0f; // alto de las notas del fotograma anterior
     std::shared_ptr<SettingsClient> settingsClients[kHubGameCount];
     std::shared_ptr<SettingsClient> settings;
     int settingsGame = 0; // kHubGameCount = the "Launcher" page
@@ -974,9 +976,11 @@ struct Hub {
     dewdrop::Layers dewdropFrame(ImDrawList* dl, ImGuiID id, ImVec2 a, ImVec2 b, bool hovered, bool held, bool selected,
                                  bool disabled)
     {
-        const float scale = dewdropScaleNow();
+        // En pasos de 0.5: la escala de escritorio cambia con cada píxel al
+        // redimensionar y no se puede volver a hornear todo en cada fotograma.
+        const float scale = bakeScaleFor(dewdropScaleNow());
         if (scale != dewdropScale) {
-            // Ventana movida a otra pantalla: se vuelve a hornear a la nueva escala.
+            // Ventana movida a otra pantalla (o escala nueva): se vuelve a hornear.
             freeDewdrop();
             dewdropScale = scale;
         }
@@ -1962,7 +1966,7 @@ struct Hub {
         }
         // Restaurar: pide un segundo clic para confirmar.
         resetArmed = std::max(0.0f, resetArmed - dt);
-        ImGui::SetCursorScreenPos(ImVec2(margin, bottom - resetH));
+        ImGui::SetCursorScreenPos(ImVec2(margin, resetAllY(listTop, sidebar.content, sidebar.scroll, bottom, resetH)));
         if (glassButton(resetArmed > 0.0f ? "Sure? Click" : "Reset all", ImVec2(listW, resetH), false, busy)) {
             if (resetArmed > 0.0f) {
                 resetArmed = 0.0f;
@@ -2240,6 +2244,7 @@ struct Hub {
             whatsNewOpen = true;
             whatsNewVersion = version;
             whatsNewNotes = notes;
+            whatsNewNotesH = -1.0f;
         }
     }
 
@@ -2346,7 +2351,10 @@ struct Hub {
                          | ImGuiWindowFlags_NoBackground);
         ImDrawList* dl = ImGui::GetWindowDrawList();
         dl->AddRectFilled(ImVec2(0, 0), size, IM_COL32(2, 12, 4, 170));
-        const ImVec2 panel(std::min(size.x - 80.0f, 860.0f), size.y - 110.0f);
+        // Tan alto como sus notas (hasta casi toda la ventana).
+        const float chrome = 80.0f + 50.0f + 44.0f;
+        const ImVec2 panel(std::min(size.x - 80.0f, 860.0f),
+                           fitDialogHeight(whatsNewNotesH, chrome, size.y - 110.0f, std::min(size.y - 110.0f, 320.0f)));
         const ImVec2 a((size.x - panel.x) * 0.5f, (size.y - panel.y) * 0.5f);
         const ImVec2 b(a.x + panel.x, a.y + panel.y);
         dl->AddRectFilled(ImVec2(a.x + 8, a.y + 12), ImVec2(b.x + 8, b.y + 12), IM_COL32(0, 0, 0, 110), 22.0f);
@@ -2365,6 +2373,7 @@ struct Hub {
         ImGui::PushTextWrapPos(0.0f);
         drawNotes(whatsNewNotes);
         ImGui::PopTextWrapPos();
+        whatsNewNotesH = ImGui::GetCursorPosY() + ImGui::GetStyle().WindowPadding.y;
         ImGui::EndChild();
 
         const std::string updateLabel = "Update to " + whatsNewVersion;
@@ -2570,12 +2579,19 @@ struct Hub {
 // escala virtual multiplicada por gUiScale (fuentes rasterizadas a la
 // densidad real para que el texto salga nítido).
 float gUiScale = 1.0f;
+// Escritorio: densidad a la que están rasterizadas las fuentes (escala de la
+// interfaz por la de la pantalla), para que el texto ampliado salga nítido.
+float gFontDensity = 1.0f;
 
 void loadFonts(Fonts& fonts)
 {
     ImGuiIO& io = ImGui::GetIO();
     ImFontConfig cfg;
+#ifdef __ANDROID__
     cfg.RasterizerDensity = gUiScale;
+#else
+    cfg.RasterizerDensity = gFontDensity;
+#endif
     cfg.FontDataOwnedByAtlas = false; // los datos viven en el ejecutable
     cfg.OversampleH = 3;
     auto* data = const_cast<unsigned char*>(kFontFredoka);
@@ -2796,11 +2812,53 @@ struct HubWindow::Impl {
         endModal();
     }
 
+#ifndef __ANDROID__
+    // Escritorio: la escala sigue al tamaño de la ventana. Si la densidad de
+    // las fuentes cambia, se rehace el atlas (antes del fotograma).
+    void updateDesktopScale()
+    {
+        int w = 0, h = 0, fbW = 0;
+        SDL_GetWindowSize(window, &w, &h);
+        SDL_GL_GetDrawableSize(window, &fbW, nullptr);
+        if (w <= 0 || h <= 0) return;
+        gUiScale = desktopUiScale(float(w), float(h));
+        const float density = fontDensityFor(gUiScale, float(fbW) / float(w));
+        if (density != gFontDensity) {
+            gFontDensity = density;
+            ImGui::GetIO().Fonts->Clear();
+            loadFonts(hub->fonts);
+            ImGui_ImplOpenGL3_DestroyFontsTexture();
+            ImGui_ImplOpenGL3_CreateFontsTexture();
+        }
+    }
+
+    // Las posiciones del ratón llegan en puntos de la ventana; la interfaz
+    // va en puntos virtuales (ventana / gUiScale). Se escalan en la cola de
+    // ImGui una sola vez cada una (los eventos pueden esperar varios fotogramas).
+    void scaleQueuedMouse()
+    {
+        ImGuiContext& g = *ImGui::GetCurrentContext();
+        ImU32 newest = lastScaledEvent;
+        for (ImGuiInputEvent& e : g.InputEventsQueue) {
+            if (e.EventId <= lastScaledEvent) continue;
+            newest = std::max(newest, e.EventId);
+            if (e.Type != ImGuiInputEventType_MousePos || gUiScale == 1.0f) continue;
+            if (e.MousePos.PosX > -FLT_MAX && e.MousePos.PosY > -FLT_MAX) {
+                e.MousePos.PosX /= gUiScale;
+                e.MousePos.PosY /= gUiScale;
+            }
+        }
+        lastScaledEvent = newest;
+    }
+    ImU32 lastScaledEvent = 0;
+#endif
+
     // Un fotograma: eventos, pantalla principal y el modal que toque.
     void frame()
     {
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
+#ifdef __ANDROID__
             if (gUiScale != 1.0f) {
                 // Coordenadas de la pantalla real → las de la interfaz virtual.
                 const float inv = 1.0f / gUiScale;
@@ -2814,6 +2872,7 @@ struct HubWindow::Impl {
                     event.button.y = int(event.button.y * inv);
                 }
             }
+#endif
             ImGui_ImplSDL2_ProcessEvent(&event);
             if (event.type == SDL_QUIT) quitRequested = true;
             if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE
@@ -2829,8 +2888,14 @@ struct HubWindow::Impl {
         const float t = float(now - start) / freq;
         last = now;
 
+#ifndef __ANDROID__
+        updateDesktopScale();
+#endif
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL2_NewFrame();
+#ifndef __ANDROID__
+        scaleQueuedMouse();
+#endif
         if (gUiScale != 1.0f) {
             ImGuiIO& io = ImGui::GetIO();
             io.DisplayFramebufferScale = ImVec2(io.DisplayFramebufferScale.x * gUiScale, io.DisplayFramebufferScale.y * gUiScale);

@@ -142,6 +142,34 @@ int main()
         check(rows == 1 && b.size() == 1, "dialog: single button");
     }
 
+    // ── Ventanas grandes ──
+    {
+        check(near(desktopUiScale(1180.0f, 780.0f), 1.0f), "design size: scale 1");
+        check(near(desktopUiScale(800.0f, 600.0f), 1.0f), "small windows never shrink");
+        check(near(desktopUiScale(1920.0f, 1000.0f), 1000.0f / 780.0f), "scale follows the side that grows least");
+        check(near(desktopUiScale(2560.0f, 1000.0f), 1000.0f / 780.0f), "wide window: height limits");
+        check(near(desktopUiScale(3840.0f, 2160.0f), kDesktopUiScaleMax), "scale capped");
+        check(near(desktopUiScale(800.0f, 1300.0f), 1.0f), "tall narrow window: scale 1");
+        for (float w = 640.0f; w <= 4000.0f; w += 37.0f)
+            for (float h = 480.0f; h <= 2400.0f; h += 41.0f) {
+                const float s = desktopUiScale(w, h);
+                check(s >= 1.0f && s <= kDesktopUiScaleMax, "scale in range");
+                if (s > 1.0f) check(w / s >= kDesignW - 0.5f && h / s >= kDesignH - 0.5f, "scaled UI keeps the design room");
+            }
+        check(near(fontDensityFor(1.0f, 1.0f), 1.0f) && near(fontDensityFor(1.0f, 2.0f), 2.0f), "density: plain and retina");
+        check(near(fontDensityFor(1.28f, 2.0f), 3.0f) && near(fontDensityFor(1.1f, 1.0f), 1.5f), "density rounds up in halves");
+        check(near(bakeScaleFor(2.0f), 2.0f) && near(bakeScaleFor(2.3f), 2.5f) && near(bakeScaleFor(0.5f), 1.0f), "bake scale in halves");
+
+        check(near(resetAllY(100.0f, 300.0f, false, 700.0f, 44.0f), 416.0f), "reset all right under the list");
+        check(near(resetAllY(100.0f, 600.0f, false, 700.0f, 44.0f), 656.0f), "reset all never below the page");
+        check(near(resetAllY(100.0f, 900.0f, true, 700.0f, 44.0f), 656.0f), "scrolling list: reset all at the bottom");
+
+        check(near(fitDialogHeight(-1.0f, 174.0f, 600.0f, 320.0f), 600.0f), "dialog: unknown content takes the room");
+        check(near(fitDialogHeight(200.0f, 174.0f, 600.0f, 320.0f), 374.0f), "dialog fits its content");
+        check(near(fitDialogHeight(50.0f, 174.0f, 600.0f, 320.0f), 320.0f), "dialog keeps a minimum");
+        check(near(fitDialogHeight(900.0f, 174.0f, 600.0f, 320.0f), 600.0f), "long content scrolls inside the max");
+    }
+
     std::cout << "launcher_page_layout_test: ok\n";
     return 0;
 }
