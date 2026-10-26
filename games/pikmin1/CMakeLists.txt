@@ -1194,6 +1194,10 @@ if(PIKMIN_BUILD_TESTS AND PIKMIN_BUILD_LAUNCHER)
     target_compile_options(button_layout_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
     add_test(NAME button_layout_test COMMAND button_layout_test)
 
+    add_executable(launcher_scroll_test pc_port/launcher/launcher_scroll_test.cpp)
+    target_compile_options(launcher_scroll_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+    add_test(NAME launcher_scroll_test COMMAND launcher_scroll_test)
+
     if(PIKMIN_NETPLAY_BUILD)
         # Host Co-op / Join Co-op flow with a fake game.
         add_executable(launcher_coop_test pc_port/launcher/launcher_coop_test.cpp pc_port/launcher/launcher_coop.cpp)
