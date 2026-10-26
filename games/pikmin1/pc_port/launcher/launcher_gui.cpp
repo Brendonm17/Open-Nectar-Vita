@@ -621,6 +621,11 @@ struct Hub {
     std::shared_ptr<SettingsClient> settings;
     int settingsGame = 0;
     int settingsGroup = 0;
+    // Page that asked for the request whose result is in snap.message: the
+    // result only shows on that page, so it does not follow you to another.
+    int messageGame = -1;
+    int messageGroup = -1;
+    int pickGame = -1, pickGroup = -1; // page that opened the file pick
     // Orden de las opciones tal como se vieron la primera vez: el juego lista
     // las cíclicas empezando por el valor actual, y el desplegable no debe
     // reordenarse cada vez que se cambia algo.
@@ -684,6 +689,9 @@ struct Hub {
     void startPick(std::string owner, std::function<fs::path()> dialog, std::function<void(const fs::path&)> then)
     {
         if (filePick) return;
+        messageGroup = -1; // a new pick hides the last result
+        pickGame = settingsGame;
+        pickGroup = settingsGroup;
         filePick = std::make_shared<FilePick>();
         filePickFor = std::move(owner);
         filePickThen = std::move(then);
@@ -714,6 +722,12 @@ struct Hub {
         filePickFor.clear();
         filePickThen = nullptr;
         if (!picked.empty() && then) then(picked);
+        // The request the pick queued answers the page that opened it, even
+        // if another page is showing now.
+        if (!pendingRequest.empty()) {
+            messageGame = pickGame;
+            messageGroup = pickGroup;
+        }
     }
 
     void runBetweenFrames()
@@ -1084,6 +1098,8 @@ struct Hub {
     {
         pendingRequest = std::move(arguments);
         pendingLabel = label;
+        messageGame = settingsGame;
+        messageGroup = settingsGroup;
     }
 
     const std::vector<std::string>& stableOptions(int group, const SettingsRow& row)
@@ -1608,7 +1624,7 @@ struct Hub {
             if (gciNoteIsError) noteColour = ImVec4(1.0f, 0.55f, 0.40f, 1.0f);
         }
 #endif
-        else if (!snap.message.empty() && help.empty()) {
+        else if (!snap.message.empty() && help.empty() && messageGame == settingsGame && messageGroup == settingsGroup) {
             note = snap.message;
             if (snap.messageIsError) noteColour = ImVec4(1.0f, 0.55f, 0.40f, 1.0f);
         }
