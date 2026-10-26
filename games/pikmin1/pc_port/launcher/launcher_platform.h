@@ -6,7 +6,8 @@
 // launcher_main.cpp no incluye cabeceras de plataforma: todo lo específico
 // vive detrás de esta interfaz, con una implementación por sistema:
 //
-//   launcher_platform_posix.cpp  → Linux/BSD, diálogos vía zenity o kdialog
+//   launcher_platform_posix.cpp  → Linux/BSD, diálogos vía zenity o kdialog;
+//                                  macOS, vía osascript
 //   launcher_platform_win32.cpp  → Windows, diálogos nativos del shell
 //
 // Las rutas se manejan siempre como std::filesystem::path, que en Windows
@@ -32,7 +33,8 @@ std::filesystem::path executablePath();
 std::filesystem::path defaultDataRoot();
 
 // True si hay diálogos gráficos disponibles. En Windows siempre, porque son
-// parte del sistema; en POSIX depende de que exista zenity o kdialog.
+// parte del sistema; en macOS también (osascript); en el resto de POSIX
+// depende de que exista zenity o kdialog.
 bool hasGraphicalDialogs();
 
 // True si la entrada estándar es una terminal interactiva, es decir, si tiene
@@ -76,6 +78,21 @@ std::filesystem::path askForInstallDirectory(const std::string& title = "Choose 
 
 // Aviso al usuario. Si no hay diálogos disponibles, escribe por stderr.
 void showMessage(const std::string& title, const std::string& message, bool error);
+
+// The dialogs above block their thread until the user answers, so the
+// launcher runs them on a worker thread while its window keeps drawing. This
+// closes any that are still open (POSIX: ends the zenity, kdialog or osascript
+// process; their call returns empty) and waits up to `timeoutMs` for those
+// calls to return. Call it when the launcher quits with a picker open.
+// Windows and Android: nothing to do, the dialogs end with the process.
+void cancelDialogs(int timeoutMs = 2000);
+
+#if !defined(_WIN32) && !defined(__ANDROID__)
+// Runs a dialog program and returns what it printed on stdout without the
+// final line break. Empty if it fails, is cancelled, or cancelDialogs() closes
+// it. The argv is built before fork. Exposed for launcher_dialog_test.
+std::string runDialogProcess(const char* program, const std::vector<std::string>& args);
+#endif
 
 // Cuando el launcher se abre con doble clic no hay terminal donde mostrar
 // errores ni el instalador de texto. Esto vuelve a lanzarlo dentro de una,

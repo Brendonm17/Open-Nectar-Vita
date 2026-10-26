@@ -1117,11 +1117,15 @@ if(PIKMIN_BUILD_TESTS AND PIKMIN_BUILD_LAUNCHER)
     add_executable(installer_ui_test
         pc_port/launcher/installer_ui_test.cpp
         pc_port/launcher/installer_ui.cpp
-        pc_port/pc_icon.cpp)
+        pc_port/pc_icon.cpp
+        ${LAUNCHER_PLATFORM_SOURCE})
     target_include_directories(installer_ui_test PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/pc_port/launcher
         ${SDL2_INCLUDE_DIRS})
-    target_link_libraries(installer_ui_test PRIVATE ${SDL2_LIBRARIES})
+    target_link_libraries(installer_ui_test PRIVATE ${SDL2_LIBRARIES} Threads::Threads)
+    if (WIN32)
+        target_link_libraries(installer_ui_test PRIVATE comdlg32 ole32 shell32 uuid winhttp)
+    endif()
     target_compile_options(installer_ui_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
     add_test(NAME installer_ui_test COMMAND installer_ui_test)
 
@@ -1136,6 +1140,15 @@ if(PIKMIN_BUILD_TESTS AND PIKMIN_BUILD_LAUNCHER)
         target_link_libraries(prepared_image_test PRIVATE comdlg32 ole32 shell32 uuid winhttp)
     endif()
     add_test(NAME prepared_image_test COMMAND prepared_image_test)
+
+    # AppleScript quoting for the macOS dialogs, and closing a dialog process
+    # that is still open when the launcher quits.
+    if (NOT WIN32)
+        add_executable(launcher_dialog_test pc_port/launcher/launcher_dialog_test.cpp ${LAUNCHER_PLATFORM_SOURCE})
+        target_link_libraries(launcher_dialog_test PRIVATE Threads::Threads)
+        target_compile_options(launcher_dialog_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+        add_test(NAME launcher_dialog_test COMMAND launcher_dialog_test)
+    endif()
 
     if(PIKMIN_NETPLAY_BUILD)
         # Host Co-op / Join Co-op flow with a fake game.

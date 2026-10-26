@@ -114,6 +114,9 @@ bool hasGraphicalDialogs()
     return true;
 }
 
+// The dialogs here run inside this process and close with it.
+void cancelDialogs(int) { }
+
 bool stdinIsTerminal()
 {
     return _isatty(_fileno(stdin)) != 0;

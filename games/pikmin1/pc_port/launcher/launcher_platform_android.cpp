@@ -108,6 +108,8 @@ void showMessage(const std::string& title, const std::string& message, bool erro
                              nullptr);
 }
 
+void cancelDialogs(int) { } // the pickers are the system's, through JNI
+
 bool respawnInTerminal() { return false; }
 
 bool runAndCapture(const fs::path&, const std::vector<std::string>&, const fs::path&, std::string&, std::string& error)
