@@ -32,10 +32,16 @@ float horizontalInset(float height, float textHeight)
     return kButtonBorder + kButtonPadX + capInset(height, textHeight);
 }
 
+float verticalInset(float height, float textHeight)
+{
+    const float spare = (height - 2.0f * kButtonBorder - textHeight) * 0.5f;
+    return kButtonBorder + std::clamp(spare, 0.0f, kButtonPadY);
+}
+
 Rect innerTextRect(float width, float height, float textHeight)
 {
     const float x = horizontalInset(height, textHeight);
-    const float y = kButtonBorder + kButtonPadY;
+    const float y = verticalInset(height, textHeight);
     Rect r;
     r.x0 = x;
     r.x1 = std::max(x, width - x);
@@ -67,8 +73,11 @@ FittedLabel fitLabel(const std::string& label, float width, float height, const 
     }
     out.size = floorSize;
     out.shrunk = floorSize < baseSize;
-    out.truncated = true;
     const float room = innerTextRect(width, height, floorSize).width() + kEpsilon;
+    // Si lo que falta es alto y no ancho, recortar no ayuda: se queda entero
+    // (el recorte al rectángulo interior hace el resto).
+    if (measure(label, floorSize) <= room) return out;
+    out.truncated = true;
     std::string text = label;
     while (!text.empty()) {
         popCodepoint(text);

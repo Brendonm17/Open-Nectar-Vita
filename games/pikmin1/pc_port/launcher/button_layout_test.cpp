@@ -123,6 +123,16 @@ void testWidths()
             check(r.height() >= kLabelSize, "label height fits every button height in use");
         }
     }
+    // Botones compactos (barra de ajustes encogida, 30 px mín.): el relleno
+    // vertical cede pero el texto de 21 px sigue sin pisar el borde.
+    for (float h : { 30.0f, 32.0f, 34.0f, 36.0f }) {
+        const Rect r = innerTextRect(buttonWidth(ButtonSize::Large), h, kLabelSize);
+        check(r.y0 >= kButtonBorder && h - r.y1 >= kButtonBorder, "compact: text stays off the border");
+        check(r.height() >= kLabelSize - 1e-4f, "compact: 21 px label still fits");
+        check(r.x0 >= kButtonBorder + kButtonPadX, "compact: horizontal padding kept");
+    }
+    check(verticalInset(44, kLabelSize) == kButtonBorder + kButtonPadY, "full vertical padding when there is room");
+
     // La curva del extremo se nota: más baja la píldora, más se mete.
     check(capInset(38, 21) > capInset(50, 21) && capInset(50, 21) > 0, "cap inset follows the pill curve");
     check(capInset(44, 0) == 0, "no cap inset for an empty line");
@@ -206,6 +216,9 @@ void testFallback()
     check(sizeFor("OK", 50, measure) == ButtonSize::Small, "sizeFor OK -> Small");
     check(sizeFor("OK", 50, measure, ButtonSize::Medium) == ButtonSize::Medium, "sizeFor respects minimum");
     check(sizeFor("Use a downloaded folder", 50, measure) == ButtonSize::ExtraLarge, "sizeFor long -> ExtraLarge");
+    // Muy bajo: encoge, pero no recorta lo que cabe a lo ancho.
+    fit = fitLabel("Graphics", 190, 18, fakeMeasure);
+    check(!fit.truncated && fit.text == "Graphics" && fit.size == kLabelFloor, "height-only squeeze never truncates");
 }
 
 } // namespace

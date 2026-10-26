@@ -53,6 +53,9 @@ struct Rect {
 float capInset(float height, float textHeight);
 // Margen horizontal total a cada lado: borde + kButtonPadX + capInset.
 float horizontalInset(float height, float textHeight);
+// Margen vertical: borde + kButtonPadY. En botones compactos (la barra de
+// ajustes encogida) el relleno cede hasta 0, pero el texto nunca pisa el borde.
+float verticalInset(float height, float textHeight);
 // Rectángulo donde puede ir el texto, relativo a la esquina del botón.
 Rect innerTextRect(float width, float height, float textHeight);
 
