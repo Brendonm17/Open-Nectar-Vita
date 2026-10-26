@@ -232,6 +232,11 @@ void zen::ogScrTitleMgr::pcSetupMainMenus()
 	mPcExtraMenu[1]  = new DrawMenu("screen/blo/m_selec2.blo", false, false, &extExtra);
 	char* extra1[4] = { pcRowText(mPcExtraMenu[1], 2), sSpeedrunLabel, sRandomizerLabel, sCustomLabel };
 	pcLabelRows(mPcExtraMenu[1], extra1, 4);
+	// The submenus take clicks like the main menu, so a click lands on the row under it
+	// rather than acting as A on the highlighted one.
+	mPcPlayMenu->setPointerClicks(true);
+	mPcExtraMenu[0]->setPointerClicks(true);
+	mPcExtraMenu[1]->setPointerClicks(true);
 }
 
 // Lo que hace cada opción, con los números de siempre: 0 Start, 1 Speedrun,
