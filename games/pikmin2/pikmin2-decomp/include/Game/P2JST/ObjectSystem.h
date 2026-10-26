@@ -17,7 +17,13 @@ struct ObjectSystem : public JStage::TSystem, public ObjectBase {
 	ObjectSystem(const char*, MoviePlayer*);
 
 	virtual ~ObjectSystem();                                                           // _08
+#ifdef __APPLE__
+	// Apple Clang rejects a char* override of JStage::TObject's char const* one
+	// (GCC only warns). Same code; just the matching return type.
+	virtual char const* JSGGetName() const; // _10
+#else
 	virtual char* JSGGetName() const;                                                  // _10
+#endif
 	virtual u32 JSGGetFlag() const;                                                    // _18
 	virtual void JSGSetFlag(u32);                                                      // _1C
 	virtual void JSGSetData(u32, const void*, u32);                                    // _24

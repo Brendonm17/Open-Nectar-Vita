@@ -80,7 +80,8 @@ typedef unsigned int p2uint;
  * chocaban con los del sistema. Se incluyen las reales y se definen las guardas
  * que en Linux pone glibc: el decomp ve exactamente lo mismo que alli. */
 /* Android (bionic) pasa lo mismo: sus guardas son _STDIO_H_, _STRING_H_... */
-#if defined(_WIN32) || defined(__ANDROID__)
+/* macOS (libc de Darwin) tambien: _STDIO_H_, _STRING_H_... */
+#if defined(_WIN32) || defined(__ANDROID__) || defined(__APPLE__)
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>

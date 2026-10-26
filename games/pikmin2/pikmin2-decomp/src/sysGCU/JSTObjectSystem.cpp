@@ -682,7 +682,11 @@ int ObjectSystem::JSGFindObject(JStage::TObject** outObject, const char* name, J
  * @note Address: 0x80431348
  * @note Size: 0x8
  */
+#ifdef __APPLE__
+char const* ObjectSystem::JSGGetName() const
+#else
 char* ObjectSystem::JSGGetName() const
+#endif
 {
 	return const_cast<char*>(mName);
 }
