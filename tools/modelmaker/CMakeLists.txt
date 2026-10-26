@@ -83,6 +83,7 @@ add_executable(nectar_modelmaker
     "${MM_MAPMAKER}/gl.cpp"
     "${MM_MAPMAKER}/config.cpp"
     "${MM_MAPMAKER}/obj_import.cpp"
+    "${MM_MAPMAKER}/dae_import.cpp"
     ${MM_PLATFORM}
     "${MM_GEN}/font_fredoka.h")
 set_property(TARGET nectar_modelmaker PROPERTY INCLUDE_DIRECTORIES "")

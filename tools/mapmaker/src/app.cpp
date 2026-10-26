@@ -40,10 +40,10 @@ using nectar::MapDoc;
 namespace {
 
 constexpr double kAutosaveSeconds = 120.0;
-constexpr float kTopBarH = 72.0f, kDefaultToolboxW = 312.0f, kDefaultSideW = 352.0f;
+constexpr float kTopBarH = 64.0f, kDefaultToolboxW = 300.0f, kDefaultSideW = 360.0f;
 constexpr float kMinToolboxW = 240.0f, kMinSideW = 280.0f, kMinViewportW = 420.0f;
 
-const ImVec4 kGood(0.57f, 0.84f, 0.37f, 1), kWarn(0.96f, 0.76f, 0.28f, 1), kBad(0.96f, 0.40f, 0.30f, 1), kDim(0.62f, 0.66f, 0.50f, 1);
+const ImVec4 kGood(0.57f, 0.84f, 0.37f, 1), kWarn(0.96f, 0.76f, 0.28f, 1), kBad(0.96f, 0.40f, 0.30f, 1), kDim(0.59f, 0.62f, 0.56f, 1);
 
 double now() { return double(SDL_GetTicks64()) / 1000.0; }
 
@@ -194,9 +194,9 @@ bool wideButton(const char* label, float h = 36.0f) { return ImGui::Button(label
 bool choiceButton(const char* label, bool on, ImVec2 size = ImVec2(0, 0))
 {
 	if (on) {
-		ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.52f, 0.66f, 0.25f, 1));
-		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.64f, 0.76f, 0.31f, 1));
-		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.08f, 0.12f, 0.05f, 1));
+		ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.28f, 0.38f, 0.18f, 1));
+		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.38f, 0.49f, 0.22f, 1));
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.94f, 0.96f, 0.88f, 1));
 	}
 	const bool pressed = ImGui::Button(label, size);
 	if (on) ImGui::PopStyleColor(3);
@@ -222,10 +222,10 @@ void panelHeading(const char* title, const char* subtitle)
 	const ImVec2 p = ImGui::GetCursorScreenPos();
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 	const float titleW = ImGui::CalcTextSize(title).x;
-	dl->AddCircleFilled(ImVec2(p.x + 5, p.y + 9), 4.0f, IM_COL32(166, 190, 70, 255));
-	dl->AddLine(ImVec2(p.x + 26 + titleW, p.y + 9), ImVec2(p.x + ImGui::GetContentRegionAvail().x, p.y + 9), IM_COL32(86, 112, 49, 190), 1.0f);
+	dl->AddCircleFilled(ImVec2(p.x + 5, p.y + 9), 3.5f, IM_COL32(166, 190, 70, 255));
+	dl->AddLine(ImVec2(p.x + 26 + titleW, p.y + 9), ImVec2(p.x + ImGui::GetContentRegionAvail().x, p.y + 9), IM_COL32(67, 76, 67, 220), 1.0f);
 	ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 18);
-	ImGui::TextColored(ImVec4(0.88f, 0.85f, 0.60f, 1), "%s", title);
+	ImGui::TextColored(ImVec4(0.88f, 0.90f, 0.84f, 1), "%s", title);
 	if (subtitle && *subtitle) {
 		ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 18);
 		ImGui::PushStyleColor(ImGuiCol_Text, kDim);
@@ -751,7 +751,9 @@ void App::drawWelcome()
 {
 	const ImGuiViewport* vp = ImGui::GetMainViewport();
 	ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f, vp->WorkPos.y + vp->WorkSize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-	ImGui::SetNextWindowSize(ImVec2(760, 0));
+	const float welcomeW = std::max(600.0f, std::min(1080.0f, vp->WorkSize.x - 48.0f));
+	const float welcomeH = std::max(540.0f, std::min(900.0f, vp->WorkSize.y - 48.0f));
+	ImGui::SetNextWindowSize(ImVec2(welcomeW, welcomeH));
 	ImGui::Begin(tr("¿Qué quieres hacer?"), nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
 	{
 		const ImVec2 p = ImGui::GetCursorScreenPos();
@@ -785,15 +787,20 @@ void App::drawWelcome()
 	const S shapes[] = { { "r", nectar::TerrainShape::Rectangle, tr("Rectángulo") }, { "o", nectar::TerrainShape::Oval, tr("Óvalo") },
 		                 { "c", nectar::TerrainShape::Cross, tr("Cruz") },          { "i", nectar::TerrainShape::TwoIslands, tr("Dos islas") },
 		                 { "a", nectar::TerrainShape::Ring, tr("Anillo") } };
+	const float shapeSize = std::max(96.0f, std::min(150.0f, (ImGui::GetContentRegionAvail().x - 72.0f) / 5.0f));
 	for (int i = 0; i < 5; i++) {
 		if (i) ImGui::SameLine(0, 18);
-		if (shapeButton(shapes[i].id, shapes[i].shape, shapes[i].label, 124)) {
+		if (shapeButton(shapes[i].id, shapes[i].shape, shapes[i].label, shapeSize)) {
 			newMap(shapes[i].shape);
 			screen_ = Screen::Editor;
 		}
 	}
 	ImGui::Spacing();
-	if (templatePickers(132)) screen_ = Screen::Editor;
+	if (ImGui::Button(tr("Nivel desde un modelo (OBJ o DAE)..."), ImVec2(320, 34))) newMapFromModel();
+	hint(tr("Un escenario hecho en Blender o sacado de otro juego: su malla es el suelo y encima pones cebollas, piezas y enemigos."));
+	ImGui::Spacing();
+	const float templateSize = std::max(112.0f, std::min(148.0f, (ImGui::GetContentRegionAvail().x - 80.0f) / 6.0f));
+	if (templatePickers(templateSize)) screen_ = Screen::Editor;
 	ImGui::Spacing();
 	if (coursePickers()) screen_ = Screen::Editor;
 	ImGui::Spacing();
@@ -856,6 +863,65 @@ void App::newMap(nectar::TerrainShape shape)
 	cam_.topDown  = false;
 	tool_         = Tool::Move;
 	if (!cfg_.tutorialDone) tutorialStep_ = 0;
+}
+
+void App::newMapFromModel()
+{
+	const fs::path file = pikmin::launcher::platform::askForFile(tr("Elige el nivel"), tr("Malla OBJ o DAE"), "*.obj *.OBJ *.dae *.DAE");
+	if (file.empty()) return;
+	// Primero su tamaño, para que quepa como un escenario del juego: el lado
+	// mayor en planta, a 4000 (los del juego van de 2000 a 5000).
+	nectar::MeshModInput mesh;
+	ObjInfo info;
+	std::string err;
+	if (!readMesh(file.string(), 1.0f, mesh, info, err)) {
+		notify(2, tr("No se pudo importar: ") + err);
+		return;
+	}
+	const float side  = std::max(info.max.x - info.min.x, info.max.z - info.min.z);
+	const float scale = side > 1.0f ? 4000.0f / side : 1.0f;
+
+	// La carpeta del mapa (las mallas van en ella), como al guardar.
+	const std::string name = file.stem().string();
+	std::string path;
+	std::error_code ec;
+	for (int n = 1;; n++) {
+		const std::string folder = n == 1 ? slug(name) : slug(name) + "_" + std::to_string(n);
+		path                     = (fs::path(cfg_.userMapsDir()) / folder / "map.json").string();
+		if (!fs::exists(path, ec)) break;
+	}
+	fs::create_directories(fs::path(path).parent_path(), ec);
+	std::string asset;
+	if (!importObj(file.string(), fs::path(path).parent_path().string(), scale, asset, info, err)) {
+		notify(2, tr("No se pudo importar: ") + err);
+		return;
+	}
+	models_.erase(assetFile(asset));
+
+	newMap(nectar::TerrainShape::Rectangle);
+	MapDoc d      = ed_.doc;
+	d.name        = name;
+	d.terrain     = nectar::DocTerrain();
+	d.terrain.none = true;
+	// Centrado en el origen, con el contorno justo alrededor.
+	const double cx = (info.min.x + info.max.x) * 0.5, cz = (info.min.z + info.max.z) * 0.5;
+	const double hx = (info.max.x - info.min.x) * 0.5 + 50.0, hz = (info.max.z - info.min.z) * 0.5 + 50.0;
+	d.minX = -hx, d.maxX = hx, d.minZ = -hz, d.maxZ = hz;
+	nectar::DocProp level;
+	level.asset   = asset;
+	level.x       = -cx;
+	level.z       = -cz;
+	level.collide = true;
+	level.ground  = true;
+	d.props.push_back(level);
+	ed_.reset(d, path); // con la ruta ya puesta, la malla "map:" se encuentra al compilar
+	if (!saveMap(path)) return;
+	cam_.distance = 6000;
+	screen_       = Screen::Editor;
+	char buf[256];
+	std::snprintf(buf, sizeof(buf), tr("Nivel importado: %zu triángulos, %.0f × %.0f × %.0f (escala %.3f). Coloca las cosas encima."), info.triangles,
+	              info.max.x - info.min.x, info.max.y - info.min.y, info.max.z - info.min.z, scale);
+	notify(info.warnings.empty() ? 0 : 1, std::string(buf) + (info.warnings.empty() ? "" : "\n" + info.warnings));
 }
 
 unsigned App::templateThumb(const TemplateInfo& t)
@@ -1377,7 +1443,15 @@ std::vector<App::Issue> App::checkMap() const
 		bool missing = false;
 		const auto loadedError = modelErrors_.find(prop.asset);
 		if (loadedError != modelErrors_.end() && !loadedError->second.empty()) missing = true;
-		if (catalogFinished_) {
+		const bool mapAsset = prop.asset.rfind("map:", 0) == 0;
+		const bool cutAsset = prop.asset.rfind("cut:", 0) == 0;
+		if (mapAsset) {
+			// Las mallas importadas pertenecen al mapa, no al catálogo del juego.
+			// Validarlas contra catalog_.entries las marcaba siempre como ausentes.
+			std::error_code ec;
+			const std::string file = assetFile(prop.asset);
+			missing = missing || file.empty() || !fs::is_regular_file(file, ec);
+		} else if (catalogFinished_ && !cutAsset) {
 			bool found = false;
 			for (const nectar::CatalogEntry& entry : catalog_.entries) {
 				if (entry.path != prop.asset) continue;
@@ -1774,24 +1848,24 @@ void App::drawTopBar(const Rect& r)
 {
 	ImGui::SetNextWindowPos(ImVec2(r.x, r.y));
 	ImGui::SetNextWindowSize(ImVec2(r.w, r.h));
-	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 10));
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 8));
 	ImGui::Begin("##top", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
 	ImGui::PopStyleVar();
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 	const ImVec2 wp = ImGui::GetWindowPos();
-	// Una franja de hojas/tierra separa claramente el editor del lienzo.
-	dl->AddRectFilled(wp, ImVec2(wp.x + r.w, wp.y + r.h), IM_COL32(19, 35, 18, 255));
-	dl->AddRectFilled(ImVec2(wp.x, wp.y + r.h - 5), ImVec2(wp.x + r.w, wp.y + r.h), IM_COL32(91, 111, 43, 255));
-	dl->AddLine(ImVec2(wp.x, wp.y + r.h - 6), ImVec2(wp.x + r.w, wp.y + r.h - 6), IM_COL32(160, 168, 71, 150), 1.0f);
-	drawSprout(dl, ImVec2(wp.x + 31, wp.y + 33), 1.0f);
-	dl->AddText(ImVec2(wp.x + 55, wp.y + 15), IM_COL32(236, 226, 169, 255), "NECTAR");
-	dl->AddText(ImVec2(wp.x + 55, wp.y + 37), IM_COL32(145, 167, 91, 255), "VS MAP MAKER");
+	// Barra de aplicación sobria: las acciones destacan sobre una superficie
+	// neutra y una línea Nectar identifica el producto sin teñir todo el editor.
+	dl->AddRectFilled(wp, ImVec2(wp.x + r.w, wp.y + r.h), IM_COL32(24, 28, 25, 255));
+	dl->AddRectFilled(ImVec2(wp.x, wp.y + r.h - 3), ImVec2(wp.x + r.w, wp.y + r.h), IM_COL32(123, 155, 56, 255));
+	drawSprout(dl, ImVec2(wp.x + 28, wp.y + 30), 0.86f);
+	dl->AddText(ImVec2(wp.x + 49, wp.y + 12), IM_COL32(232, 235, 220, 255), "NECTAR");
+	dl->AddText(ImVec2(wp.x + 49, wp.y + 33), IM_COL32(139, 153, 126, 255), "MAP MAKER");
 
-	ImGui::SetCursorPos(ImVec2(190, 16));
-	const ImVec2 b(88, 38);
+	ImGui::SetCursorPos(ImVec2(168, 13));
+	const ImVec2 b(82, 34);
 	// Editando el nivel de una zona: volver a su campaña (guardando el nivel).
 	if (!editingZoneOf_.empty()) {
-		if (ImGui::Button(tr("< Campaña"), ImVec2(110, 38))) {
+		if (ImGui::Button(tr("< Campaña"), ImVec2(104, 34))) {
 			if (ed_.dirty && !ed_.path.empty()) saveMap(ed_.path);
 			openCampaign(editingZoneOf_);
 		}
@@ -1817,26 +1891,26 @@ void App::drawTopBar(const Rect& r)
 	ImGui::SetItemTooltip(tr("Guardar un .nectarpack para compartir este mapa"));
 	ImGui::SameLine(0, 14);
 	ImGui::BeginDisabled(!ed_.canUndo());
-	if (ImGui::Button(tr("Deshacer"), ImVec2(92, 38))) ed_.undo();
+	if (ImGui::Button(tr("Deshacer"), ImVec2(88, 34))) ed_.undo();
 	ImGui::SetItemTooltip(tr("Volver atrás el último cambio (Ctrl+Z)"));
 	ImGui::EndDisabled();
 	ImGui::SameLine();
 	ImGui::BeginDisabled(!ed_.canRedo());
-	if (ImGui::Button(tr("Rehacer"), ImVec2(88, 38))) ed_.redo();
+	if (ImGui::Button(tr("Rehacer"), ImVec2(84, 34))) ed_.redo();
 	ImGui::SetItemTooltip(tr("Repetir lo que deshiciste (Ctrl+Y)"));
 	ImGui::EndDisabled();
 	const float mapX = ImGui::GetItemRectMax().x - wp.x + 18.0f;
 	if (mapX < r.w - 370.0f) {
 		ImGui::SameLine(0, 18);
-		ImGui::SetCursorPosY(16);
-		ImGui::TextColored(ImVec4(0.71f, 0.75f, 0.54f, 1), "%s%s", ed_.doc.name.c_str(), ed_.dirty ? tr("  (sin guardar)") : "");
+		ImGui::SetCursorPosY(20);
+		ImGui::TextColored(ImVec4(0.68f, 0.72f, 0.65f, 1), "%s%s", ed_.doc.name.c_str(), ed_.dirty ? tr("  (sin guardar)") : "");
 	}
 
 	// A la derecha: ayuda y probar.
-	const float testW = 220, helpW = 96, viewW = 88;
-	ImGui::SameLine(r.w - testW - helpW - viewW - 32);
-	ImGui::SetCursorPosY(16);
-	if (ImGui::Button(tr("Vista"), ImVec2(viewW, 38))) ImGui::OpenPopup("##view_menu");
+	const float testW = 196, helpW = 82, viewW = 78;
+	ImGui::SameLine(r.w - testW - helpW - viewW - 28);
+	ImGui::SetCursorPosY(13);
+	if (ImGui::Button(tr("Vista"), ImVec2(viewW, 34))) ImGui::OpenPopup("##view_menu");
 	if (ImGui::BeginPopup("##view_menu")) {
 		bool changed = false;
 		changed |= ImGui::Checkbox(tr("Panel de herramientas"), &cfg_.showToolbox);
@@ -1859,12 +1933,12 @@ void App::drawTopBar(const Rect& r)
 		ImGui::EndPopup();
 	}
 	ImGui::SameLine();
-	if (ImGui::Button(tr("Ayuda"), ImVec2(helpW, 38))) openHelp_ = true;
+	if (ImGui::Button(tr("Ayuda"), ImVec2(helpW, 34))) openHelp_ = true;
 	ImGui::SameLine();
 	ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.45f, 0.59f, 0.20f, 1));
 	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.58f, 0.70f, 0.27f, 1));
 	ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.07f, 0.11f, 0.04f, 1));
-	if (ImGui::Button(tr("Probar en el juego"), ImVec2(testW, 38))) {
+	if (ImGui::Button(tr("Probar en el juego"), ImVec2(testW, 34))) {
 		// Con varios modos, se elige en cuál.
 		const unsigned m = ed_.doc.modes;
 		if ((m & (m - 1)) != 0) ImGui::OpenPopup("##test_mode");
@@ -1917,13 +1991,14 @@ void App::drawToolbox(const Rect& r)
 		                { Tool::Scatter, tr("Decorar"), tr("Esparce hierbas, flores y piedras pintando"), false, Icon::Decor },
 		                { Tool::Trace, tr("Trazos"), tr("Caminos, ríos y calzadas por puntos, o zonas de suelo con contorno a mano"), true, Icon::Floor } };
 	int n = 1;
+	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(7, 4));
 	for (const T& t : tools) {
 		char label[64];
 		std::snprintf(label, sizeof(label), "%s##tool%d", t.label, n++);
 		// Con un escenario del juego, el suelo y los muros no se tocan.
 		const bool locked = courseMode() && (t.terrain || t.tool == Tool::Walls || t.tool == Tool::Scatter);
 		if (locked) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.4f);
-		const bool pressedTool = choiceButton(label, tool_ == t.tool, ImVec2(-1, 40));
+		const bool pressedTool = choiceButton(label, tool_ == t.tool, ImVec2(-1, 34));
 		if (locked) ImGui::PopStyleVar();
 		if (pressedTool) {
 			if (courseMode() && (t.tool == Tool::Walls || t.tool == Tool::Scatter)) notify(1, tr("En los escenarios del juego todavía no se pueden poner muros ni decoración."));
@@ -1936,6 +2011,7 @@ void App::drawToolbox(const Rect& r)
 			// Icono a la izquierda y el atajo (número) a la derecha.
 			const ImVec2 ra = ImGui::GetItemRectMin(), rb = ImGui::GetItemRectMax();
 			ImDrawList* dl  = ImGui::GetWindowDrawList();
+			if (tool_ == t.tool) dl->AddRectFilled(ra, ImVec2(ra.x + 3.0f, rb.y), IM_COL32(183, 207, 75, 255), 2.0f);
 			const ImU32 ink = ImGui::GetColorU32(ImGuiCol_Text);
 			drawIcon(dl, ImVec2(ra.x + 22.0f, (ra.y + rb.y) * 0.5f), 10.0f, t.icon, ink);
 			char key[4];
@@ -1947,6 +2023,7 @@ void App::drawToolbox(const Rect& r)
 		if (t.tool == Tool::Floor) floorButtonRect_ = { a.x, a.y, b.x - a.x, b.y - a.y };
 		if (t.tool == Tool::Place) placeButtonRect_ = { a.x, a.y, b.x - a.x, b.y - a.y };
 	}
+	ImGui::PopStyleVar();
 	ImGui::Separator();
 	ImGui::BeginChild("toolopts");
 	drawToolOptions();
@@ -2165,16 +2242,16 @@ void App::drawPlaceOptions()
 			ImGui::PopID();
 		}
 	}
-	if (iconHeader(tr("Mallas propias (OBJ)"), Icon::More)) {
-		hint(tr("Partes del nivel hechas en Blender u otro programa (.obj con su .mtl y texturas PNG o JPG): suelos, troncos, cuevas, puentes... Se guardan en la carpeta del mapa y viajan con él."));
+	if (iconHeader(tr("Mallas propias (OBJ o DAE)"), Icon::More)) {
+		hint(tr("Partes del nivel hechas en Blender u otro programa (.obj con su .mtl, o .dae, y texturas PNG o JPG): suelos, troncos, cuevas, puentes... Se guardan en la carpeta del mapa y viajan con él."));
 		if (ed_.path.empty()) {
 			hint(tr("Guarda el mapa primero: las mallas van en su carpeta."));
 		} else {
 			static float importScale = 1.0f;
 			ImGui::SetNextItemWidth(160);
 			ImGui::DragFloat(tr("Escala al importar"), &importScale, 0.1f, 0.01f, 1000.0f, "%.2f");
-			if (ImGui::Button(tr("Importar OBJ..."))) {
-				const fs::path p = pikmin::launcher::platform::askForFile(tr("Elige la malla"), tr("Malla OBJ"), "*.obj");
+			if (ImGui::Button(tr("Importar OBJ o DAE..."))) {
+				const fs::path p = pikmin::launcher::platform::askForFile(tr("Elige la malla"), tr("Malla OBJ o DAE"), "*.obj *.OBJ *.dae *.DAE");
 				if (!p.empty()) {
 					std::string asset, err;
 					ObjInfo info;
@@ -4614,12 +4691,9 @@ void App::drawViewport(const Rect& r)
 
 	renderScene(vw, vh);
 	ImGui::Image(ImTextureID(std::intptr_t(target_.color)), avail, ImVec2(0, 1), ImVec2(1, 0));
-	viewportHovered_ = ImGui::IsItemHovered();
-	ImDrawList* dl   = ImGui::GetWindowDrawList();
-	// Marco fino de musgo: integra el visor 3D con los paneles sin robarle área.
-	dl->AddRect(origin, ImVec2(origin.x + avail.x, origin.y + avail.y), IM_COL32(112, 137, 57, 210), 0.0f, 0, 2.0f);
-
-	// Soltar decoración arrastrada desde la izquierda.
+	const bool imageHovered = ImGui::IsItemHovered();
+	// Debe ir inmediatamente después de Image: Dear ImGui usa el último item
+	// como destino. Los controles flotantes se dibujan después para no romperlo.
 	if (ImGui::BeginDragDropTarget()) {
 		V3 hit;
 		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("NM_ASSET")) {
@@ -4634,6 +4708,37 @@ void App::drawViewport(const Rect& r)
 		}
 		ImGui::EndDragDropTarget();
 	}
+	ImDrawList* dl   = ImGui::GetWindowDrawList();
+	// Marco fino y neutro; el acento queda reservado para selección y acciones.
+	dl->AddRect(origin, ImVec2(origin.x + avail.x, origin.y + avail.y), IM_COL32(75, 86, 77, 230), 0.0f, 0, 1.0f);
+
+	// Barra de transformación junto al lienzo, como en los editores 3D. Los
+	// mismos modos siguen disponibles en el panel y mediante W/E/R.
+	bool viewportControlHovered = false;
+	ImGui::SetCursorScreenPos(ImVec2(origin.x + 12, origin.y + 12));
+	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(3, 0));
+	if (choiceButton("W", tool_ == Tool::Move && transformMode_ == TransformMode::Move, ImVec2(38, 30))) {
+		tool_ = Tool::Move;
+		transformMode_ = TransformMode::Move;
+	}
+	viewportControlHovered |= ImGui::IsItemHovered();
+	ImGui::SetItemTooltip("%s", tr("Mover (W)"));
+	ImGui::SameLine();
+	if (choiceButton("E", tool_ == Tool::Move && transformMode_ == TransformMode::Rotate, ImVec2(38, 30))) {
+		tool_ = Tool::Move;
+		transformMode_ = TransformMode::Rotate;
+	}
+	viewportControlHovered |= ImGui::IsItemHovered();
+	ImGui::SetItemTooltip("%s", tr("Girar (E)"));
+	ImGui::SameLine();
+	if (choiceButton("R", tool_ == Tool::Move && transformMode_ == TransformMode::Scale, ImVec2(38, 30))) {
+		tool_ = Tool::Move;
+		transformMode_ = TransformMode::Scale;
+	}
+	viewportControlHovered |= ImGui::IsItemHovered();
+	ImGui::SetItemTooltip("%s", tr("Escalar (R)"));
+	ImGui::PopStyleVar();
+	viewportHovered_ = imageHovered && !viewportControlHovered;
 
 	if (showLabels_) drawLabels(origin, avail);
 	viewportMouse(mouseRay, origin, avail);
@@ -5024,7 +5129,9 @@ void App::viewportMouse(const Ray& ray, const ImVec2& origin, const ImVec2& size
 void App::renderScene(int w, int h)
 {
 	const M4 view = cam_.view(), proj = cam_.projection(float(w) / float(h));
-	renderer_.begin(target_, view, proj, Rgba { 0.36f, 0.47f, 0.58f, 1 });
+	// Fondo pizarra ligeramente frío: separa bien siluetas y gizmos sin
+	// competir con los colores naturales del mapa.
+	renderer_.begin(target_, view, proj, Rgba { 0.16f, 0.20f, 0.23f, 1 });
 	const MapDoc& d = ed_.doc;
 	if (baseGpu_) renderer_.drawModel(*baseGpu_, M4());
 
@@ -5665,7 +5772,7 @@ bool App::docSolid(float x, float z) const
 		float y;
 		if (meshField_.at(x, z, y)) return true;
 	}
-	if (!g.grid) return true;
+	if (!g.grid) return !g.none; // sin suelo propio, solo donde hay malla
 	// El suelo, interpolado como los triángulos del terreno.
 	const float cell = float(d.cell);
 	const float fx = (x - float(d.minX)) / cell, fz = (z - float(d.minZ)) / cell;

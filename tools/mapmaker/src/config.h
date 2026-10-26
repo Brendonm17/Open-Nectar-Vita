@@ -21,7 +21,7 @@ struct Config {
 	float snapStep = 25.0f, snapAngle = 15.0f;
 	// Disposición del editor. Se guardan en píxeles lógicos de ImGui para que
 	// el usuario conserve el espacio dedicado a herramientas y propiedades.
-	float toolboxWidth = 312.0f, sidePanelWidth = 352.0f;
+	float toolboxWidth = 300.0f, sidePanelWidth = 360.0f;
 	bool showToolbox = true, showSidePanel = true;
 	bool ignoreDecorSelection = false;
 	bool localGizmo = false;

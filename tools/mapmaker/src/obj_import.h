@@ -20,7 +20,14 @@ struct ObjInfo {
 /// juego).
 bool readObj(const std::string& objPath, float scale, nectar::MeshModInput& out, ObjInfo& info, std::string& error);
 
-/// Importa el .obj a <mapDir>/meshes/<nombre>.mod. En `asset`, la ruta para
+/// Lo mismo desde un Collada (.dae): la escena con sus transformaciones, una
+/// UV y la textura difusa; las mallas repetidas en el mismo sitio, una vez.
+bool readDae(const std::string& daePath, float scale, nectar::MeshModInput& out, ObjInfo& info, std::string& error);
+
+/// .obj o .dae según la extensión.
+bool readMesh(const std::string& path, float scale, nectar::MeshModInput& out, ObjInfo& info, std::string& error);
+
+/// Importa el .obj o .dae a <mapDir>/meshes/<nombre>.mod. En `asset`, la ruta para
 /// el prop ("map:meshes/<nombre>.mod").
 bool importObj(const std::string& objPath, const std::string& mapDir, float scale, std::string& asset, ObjInfo& info, std::string& error);
 

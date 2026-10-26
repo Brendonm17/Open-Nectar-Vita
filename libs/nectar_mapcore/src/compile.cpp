@@ -10,6 +10,7 @@
 #include <cstring>
 #include <functional>
 #include <map>
+#include <set>
 #include <sstream>
 
 #include "nectar_mapcore/i18n.h"
@@ -821,7 +822,8 @@ bool compileMap(const MapData& map, const GameFileReader& read, const std::strin
 	if (!map.grid) {
 		// Suelo en cuadrícula; dentro de las charcas se hunde y es agua.
 		const f32 cell   = map.cell;
-		const int cellsX = int((map.maxX - map.minX) / cell), cellsZ = int((map.maxZ - map.minZ) / cell);
+		// Sin suelo (nivel importado): ni un vértice; lo pisable son las mallas.
+		const int cellsX = map.noFloor ? -1 : int((map.maxX - map.minX) / cell), cellsZ = map.noFloor ? -1 : int((map.maxZ - map.minZ) / cell);
 		const int vertsX = cellsX + 1, vertsZ = cellsZ + 1;
 		auto grid = [&](int ix, int iz) { return iz * vertsX + ix; };
 		for (int iz = 0; iz < vertsZ; iz++) {
@@ -890,7 +892,7 @@ bool compileMap(const MapData& map, const GameFileReader& read, const std::strin
 
 		const V3 centre((map.minX + map.maxX) * 0.5f, wallH * 0.5f, (map.minZ + map.maxZ) * 0.5f);
 		const V3 corner[4] = { V3(map.minX, 0.0f, map.minZ), V3(map.maxX, 0.0f, map.minZ), V3(map.maxX, 0.0f, map.maxZ), V3(map.minX, 0.0f, map.maxZ) };
-		for (int k = 0; k < 4; k++) {
+		for (int k = 0; k < 4 && !map.noFloor; k++) {
 			const V3& a = corner[k];
 			const V3& b = corner[(k + 1) % 4];
 			addQuad(a, b, up(b, wallH), up(a, wallH), centre - (a + b) * 0.5f);
@@ -1841,7 +1843,8 @@ bool compileMap(const MapData& map, const GameFileReader& read, const std::strin
 	};
 	// La altura más cercana a la del terreno (para los puntos de paso).
 	auto ground = [&](f32 x, f32 z) {
-		const f32 want = map.grid ? terrainHeight(map, x, z) - pondDepth(map, x, z) : 0.0f;
+		// Sin suelo propio, la capa más alta (lo de fuera, no una cueva debajo).
+		const f32 want = map.grid ? terrainHeight(map, x, z) - pondDepth(map, x, z) : map.noFloor ? 1e9f : 0.0f;
 		f32 best = want, bestD = 1e9f;
 		for (f32 y : layers(x, z)) {
 			if (std::fabs(y - want) < bestD) {
@@ -1909,7 +1912,7 @@ bool compileMap(const MapData& map, const GameFileReader& read, const std::strin
 	std::vector<V3> points;
 	char line[160];
 	auto addPoint = [&](const V3& p) {
-		if (map.grid) {
+		if (map.grid || map.noFloor) {
 			snprintf(line, sizeof(line), "\tpoint {\n\t\tindex\t%d\n\t\tstate\t1\n\t\tpos\t%f %f %f\n\t\twidth\t50.000000\n\t\t}\n\n",
 			         int(points.size()), p.x, p.y, p.z);
 		} else {
@@ -1930,35 +1933,50 @@ bool compileMap(const MapData& map, const GameFileReader& read, const std::strin
 		}
 	}
 	std::vector<std::pair<int, int>> links;
+	std::vector<std::pair<int, int>> priorityLinks; // pasos y enlaces puestos a mano
 	for (int iz = 0; iz < pz; iz++) {
 		for (int ix = 0; ix < px; ix++) {
 			for (const int i : index[std::size_t(iz) * px + ix]) {
-			for (int dz = -1; dz <= 1; dz++) {
-				for (int dx = -1; dx <= 1; dx++) {
-					const int nx = ix + dx, nz = iz + dz;
-					if ((!dx && !dz) || nx < 0 || nx >= px || nz < 0 || nz >= pz) continue;
-					for (const int j : index[std::size_t(nz) * px + nx]) {
-					const V3 a = points[std::size_t(i)], b = points[std::size_t(j)];
-					// El muro de cada base solo se cruza por los puntos de paso.
-					bool crosses = false;
-					for (f32 bx : map.barrierX) crosses = crosses || (a.x - bx) * (b.x - bx) < 0.0f;
-					if (crosses) continue;
-					bool clear = true;
-					for (int k = 1; k < 10 && clear; k++) clear = !blocked(a + (b - a) * (k / 10.0f), 25.0f);
-					// Nada de cuestas por las que se resbala (más de ~30°), y suelo
-					// seguido de un punto al otro (a la altura de la línea).
-					const f32 run = std::sqrt((b.x - a.x) * (b.x - a.x) + (b.z - a.z) * (b.z - a.z));
-					clear         = clear && std::fabs(b.y - a.y) <= run * 0.55f;
-					for (int k = 1; k < 10 && clear; k++) {
-						const V3 q = a + (b - a) * (k / 10.0f);
-						clear      = surfaceNear(q.x, q.z, q.y, 20.0f + run * 0.06f);
+				for (int dz = -1; dz <= 1; dz++) {
+					for (int dx = -1; dx <= 1; dx++) {
+						const int nx = ix + dx, nz = iz + dz;
+						if ((!dx && !dz) || nx < 0 || nx >= px || nz < 0 || nz >= pz) continue;
+						// Una malla importada puede tener varias superficies a distinta
+						// altura en la misma celda. Unirlas todas superaría los ocho
+						// enlaces que admite WayPoint en el juego. Conservamos el vecino
+						// transitable con menor diferencia vertical de cada dirección.
+						int best = -1;
+						f32 bestDy = 1e9f, bestDistance = 1e9f;
+						for (const int j : index[std::size_t(nz) * px + nx]) {
+							const V3 a = points[std::size_t(i)], b = points[std::size_t(j)];
+							// El muro de cada base solo se cruza por los puntos de paso.
+							bool crosses = false;
+							for (f32 bx : map.barrierX) crosses = crosses || (a.x - bx) * (b.x - bx) < 0.0f;
+							if (crosses) continue;
+							bool clear = true;
+							for (int k = 1; k < 10 && clear; k++) clear = !blocked(a + (b - a) * (k / 10.0f), 25.0f);
+							// Nada de cuestas por las que se resbala (más de ~30°), y suelo
+							// seguido de un punto al otro (a la altura de la línea).
+							const f32 run = std::sqrt((b.x - a.x) * (b.x - a.x) + (b.z - a.z) * (b.z - a.z));
+							clear         = clear && std::fabs(b.y - a.y) <= run * 0.55f;
+							for (int k = 1; k < 10 && clear; k++) {
+								const V3 q = a + (b - a) * (k / 10.0f);
+								clear      = surfaceNear(q.x, q.z, q.y, 20.0f + run * 0.06f);
+							}
+							if (clear) {
+								const f32 dy = std::fabs(b.y - a.y), distance = (b - a).length();
+								if (dy < bestDy || (dy == bestDy && distance < bestDistance)) {
+									best         = j;
+									bestDy       = dy;
+									bestDistance = distance;
+								}
+							}
+						}
+						if (best >= 0) links.push_back({ i, best });
 					}
-					if (clear) links.push_back({ i, j });
-					}
-				}
-			}
 			}
 		}
+	}
 	}
 	// Puntos de paso, unidos al punto más cercano de cada lado.
 	const std::size_t firstPass = points.size();
@@ -1979,8 +1997,8 @@ bool compileMap(const MapData& map, const GameFileReader& read, const std::strin
 				}
 			}
 			if (best >= 0) {
-				links.push_back({ gp, best });
-				links.push_back({ best, gp });
+				priorityLinks.push_back({ gp, best });
+				priorityLinks.push_back({ best, gp });
 			}
 		}
 	}
@@ -2012,13 +2030,28 @@ bool compileMap(const MapData& map, const GameFileReader& read, const std::strin
 				}
 			}
 			if (best >= 0) {
-				links.push_back({ ends[e], best });
-				links.push_back({ best, ends[e] });
+				priorityLinks.push_back({ ends[e], best });
+				priorityLinks.push_back({ best, ends[e] });
 			}
 		}
-		links.push_back({ ends[0], ends[1] });
-		links.push_back({ ends[1], ends[0] });
+		priorityLinks.push_back({ ends[0], ends[1] });
+		priorityLinks.push_back({ ends[1], ends[0] });
 	}
+	// Defensa final del formato: WayPoint::mLinkIndices solo tiene ocho
+	// entradas. Los enlaces intencionados se conservan antes que los de la
+	// cuadrícula; duplicados o excedentes nunca llegan al juego.
+	std::vector<std::pair<int, int>> cappedLinks;
+	std::vector<int> degree(points.size(), 0);
+	std::set<std::pair<int, int>> seenLinks;
+	auto keepLink = [&](const std::pair<int, int>& link) {
+		if (link.first < 0 || link.second < 0 || std::size_t(link.first) >= points.size() || std::size_t(link.second) >= points.size()) return;
+		if (degree[std::size_t(link.first)] >= 8 || !seenLinks.insert(link).second) return;
+		cappedLinks.push_back(link);
+		degree[std::size_t(link.first)]++;
+	};
+	for (const auto& link : priorityLinks) keepLink(link);
+	for (const auto& link : links) keepLink(link);
+	links.swap(cappedLinks);
 	for (const auto& l : links) {
 		snprintf(line, sizeof(line), "\tlink { %d %d }\n", l.first, l.second);
 		ini += line;

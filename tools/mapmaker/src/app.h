@@ -201,6 +201,8 @@ private:
 
 	// ── Archivo ──
 	void newMap(nectar::TerrainShape shape);
+	/// Mapa sin suelo propio: el suelo es un nivel entero de un .obj o .dae.
+	void newMapFromModel();
 	bool coursePickers();
 	bool templatePickers(float size);
 	unsigned templateThumb(const TemplateInfo& t);
@@ -335,7 +337,7 @@ private:
 	// Vista
 	bool showTwins_ = true, mirrorEdits_ = true;
 	int viewDay_ = 0; ///< misiones: ver solo lo que hay ese día (0 = todo)
-	bool showCollision_ = false, showRoutes_ = false, showSlopesOverlay_ = false, showWaterOverlay_ = true, showLabels_ = true;
+	bool showCollision_ = false, showRoutes_ = false, showSlopesOverlay_ = false, showWaterOverlay_ = true, showLabels_ = false;
 	bool viewportHovered_ = false;
 	int splitterDrag_     = 0; ///< 0 ninguno, 1 herramientas, 2 propiedades
 	float viewAspect_     = 1.0f;

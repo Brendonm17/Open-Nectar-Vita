@@ -231,10 +231,17 @@ bool readObj(const std::string& objPath, float scale, nectar::MeshModInput& out,
 	return true;
 }
 
+bool readMesh(const std::string& path, float scale, nectar::MeshModInput& out, ObjInfo& info, std::string& error)
+{
+	std::string ext = fs::path(path).extension().string();
+	for (char& c : ext) c = char(std::tolower(static_cast<unsigned char>(c)));
+	return ext == ".dae" ? readDae(path, scale, out, info, error) : readObj(path, scale, out, info, error);
+}
+
 bool importObj(const std::string& objPath, const std::string& mapDir, float scale, std::string& asset, ObjInfo& info, std::string& error)
 {
 	nectar::MeshModInput mesh;
-	if (!readObj(objPath, scale, mesh, info, error)) return false;
+	if (!readMesh(objPath, scale, mesh, info, error)) return false;
 	std::vector<std::uint8_t> bytes;
 	if (!nectar::writeMeshMod(mesh, bytes, error)) return false;
 	std::error_code ec;

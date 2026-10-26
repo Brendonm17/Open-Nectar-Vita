@@ -60,8 +60,8 @@ bool Config::load()
 		language     = j.value("language", std::string("en"));
 		snapStep     = j.value("snapStep", 25.0f);
 		snapAngle    = j.value("snapAngle", 15.0f);
-		toolboxWidth = j.value("toolboxWidth", 312.0f);
-		sidePanelWidth = j.value("sidePanelWidth", 352.0f);
+		toolboxWidth = j.value("toolboxWidth", 300.0f);
+		sidePanelWidth = j.value("sidePanelWidth", 360.0f);
 		showToolbox  = j.value("showToolbox", true);
 		showSidePanel = j.value("showSidePanel", true);
 		ignoreDecorSelection = j.value("ignoreDecorSelection", false);

@@ -131,6 +131,9 @@ struct DocMaterial {
 /// Sin él (grid = false) el suelo es el rectángulo llano de siempre.
 struct DocTerrain {
 	bool grid = false;
+	/// Sin suelo propio (grid = false): lo que se pisa lo ponen las mallas
+	/// marcadas como suelo (un nivel entero importado de un .obj o .dae).
+	bool none = false;
 	int nx = 0, nz = 0;
 	std::vector<std::int16_t> heights;
 	std::vector<std::uint8_t> floor; ///< hay suelo donde pasa de 128
@@ -479,6 +482,7 @@ struct MapData {
 	float sunDir[3];
 	// Terreno editable (grid = false: el rectángulo llano).
 	bool grid = false;
+	bool noFloor = false; ///< ni llano ni paredes del contorno: el suelo son las mallas (DocTerrain::none)
 	int nx = 0, nz = 0;
 	std::vector<float> heights;
 	std::vector<std::uint8_t> floor, water; // por punto, como en DocTerrain

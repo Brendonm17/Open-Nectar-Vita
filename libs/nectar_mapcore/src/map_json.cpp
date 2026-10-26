@@ -273,7 +273,8 @@ void parseDoc(const json& root, MapDoc& m)
 
 	const json& t          = root.at("terrain");
 	const std::string type = t.at("type").get<std::string>();
-	if (type != "flat" && type != "grid") throw std::runtime_error(tr("terreno desconocido: \"") + type + tr("\" (flat o grid)"));
+	if (type != "flat" && type != "grid" && type != "none") throw std::runtime_error(tr("terreno desconocido: \"") + type + tr("\" (flat, grid o none)"));
+	m.terrain.none = type == "none";
 	m.sourceMod = t.at("source").get<std::string>();
 	m.cell      = t.at("cell").get<double>();
 	if (type == "grid") {
@@ -908,6 +909,7 @@ bool expandMap(const MapDoc& d, MapData& m, std::string& error, bool validate)
 		m.maxZ      = float(d.maxZ);
 		m.wallHeight = float(d.wallHeight);
 		m.cell       = float(d.cell);
+		m.noFloor    = !d.terrain.grid && d.terrain.none;
 		if (d.terrain.grid) {
 			const DocTerrain& g = d.terrain;
 			const std::size_t nv = g.vertexCount();
@@ -1214,7 +1216,7 @@ std::string writeMapDoc(const MapDoc& d)
 	if (d.brightness != 1) root["environment"]["brightness"] = d.brightness;
 	if (d.fogScale != 1) root["environment"]["fog"] = d.fogScale;
 	if (d.tint[0] != 255 || d.tint[1] != 255 || d.tint[2] != 255) root["environment"]["tint"] = { d.tint[0], d.tint[1], d.tint[2] };
-	root["terrain"]     = { { "type", "flat" }, { "source", d.sourceMod }, { "cell", d.cell } };
+	root["terrain"]     = { { "type", d.terrain.none ? "none" : "flat" }, { "source", d.sourceMod }, { "cell", d.cell } };
 	if (d.terrain.grid) {
 		const DocTerrain& g = d.terrain;
 		std::vector<std::uint8_t> h;
