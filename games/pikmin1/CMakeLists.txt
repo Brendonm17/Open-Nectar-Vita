@@ -202,6 +202,10 @@ add_compile_definitions(
 # Librerías compartidas con el editor de mapas (raíz del repo).
 set(NECTAR_LIBS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../libs")
 
+if(NOT TARGET nectar_paths)
+    add_subdirectory("${NECTAR_LIBS_DIR}/nectar_paths" "${CMAKE_BINARY_DIR}/nectar_paths")
+endif()
+
 # ─── Include paths ───
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -626,7 +630,7 @@ if (WIN32)
         OBJECT_DEPENDS "${CMAKE_BINARY_DIR}/generated/nectar_version.h")
 endif()
 target_compile_options(${NECTAR_GAME} PRIVATE ${NATIVE_COMPILE_OPTIONS})
-target_link_libraries(${NECTAR_GAME} PRIVATE ${NECTAR_LEGACY})
+target_link_libraries(${NECTAR_GAME} PRIVATE ${NECTAR_LEGACY} nectar_paths)
 if(NECTAR_ONLINE)
     if(NOT TARGET nectar_net)
         add_subdirectory("${NECTAR_LIBS_DIR}/nectar_net" "${CMAKE_BINARY_DIR}/nectar_net")
@@ -1073,7 +1077,7 @@ if(PIKMIN_BUILD_LAUNCHER)
         target_compile_definitions(pikmin_launcher PRIVATE PIKMIN_LAUNCHER_NETPLAY=1)
     endif()
     target_include_directories(pikmin_launcher PRIVATE ${SDL2_INCLUDE_DIRS})
-    target_link_libraries(pikmin_launcher PRIVATE pikmin_disc_image ${SDL2_LIBRARIES} Threads::Threads)
+    target_link_libraries(pikmin_launcher PRIVATE pikmin_disc_image nectar_paths ${SDL2_LIBRARIES} Threads::Threads)
     if (WIN32)
         # Diálogo de archivo clásico, selector de carpeta del shell y COM.
         target_link_libraries(pikmin_launcher PRIVATE comdlg32 ole32 shell32 uuid winhttp)
@@ -1125,7 +1129,13 @@ if(PIKMIN_BUILD_TESTS AND PIKMIN_BUILD_LAUNCHER)
     if (WIN32)
         target_link_libraries(prepared_image_test PRIVATE comdlg32 ole32 shell32 uuid winhttp)
     endif()
+    target_link_libraries(prepared_image_test PRIVATE nectar_paths)
     add_test(NAME prepared_image_test COMMAND prepared_image_test)
+
+    add_executable(nectar_paths_test "${NECTAR_LIBS_DIR}/nectar_paths/tests/paths_test.cpp")
+    target_link_libraries(nectar_paths_test PRIVATE nectar_paths)
+    target_compile_options(nectar_paths_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+    add_test(NAME nectar_paths_test COMMAND nectar_paths_test)
 
     if(PIKMIN_NETPLAY_BUILD)
         # Host Co-op / Join Co-op flow with a fake game.

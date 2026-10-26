@@ -3,6 +3,7 @@
 // el launcher recurre a su instalador en modo texto.
 
 #include "launcher_platform.h"
+#include "nectar_paths/paths.h"
 
 #include <cstdint>
 #include <cstdlib>
@@ -253,16 +254,7 @@ fs::path askForConverter()
     return {};
 }
 
-fs::path cacheDirectory()
-{
-    fs::path dir;
-    if (const char* xdg = std::getenv("XDG_CACHE_HOME"); xdg && *xdg) dir = fs::path(xdg) / "open-nectar";
-    else if (const char* home = std::getenv("HOME")) dir = fs::path(home) / ".cache/open-nectar";
-    else dir = fs::temp_directory_path() / "open-nectar-cache";
-    std::error_code ignored;
-    fs::create_directories(dir, ignored);
-    return dir;
-}
+fs::path cacheDirectory() { return nectar::paths::userCacheDirectory(); }
 
 bool downloadFile(const std::string& url, const fs::path& destination, std::string& error)
 {

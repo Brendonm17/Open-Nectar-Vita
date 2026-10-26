@@ -7,6 +7,7 @@
 #include "netplay/pc_netplay_session.h"
 #include "settings/pc_settings.h"
 #include "pc_coop.h"
+#include "nectar_paths/paths.h"
 
 #include <cstdarg>
 #include <cstdio>
@@ -248,7 +249,8 @@ void make_run_dir(int argc, char** argv)
 		const char* local      = getenv_nonempty("LOCALAPPDATA");
 		if (!exe_dir().empty() && dir_writable(exeBase)) {
 			base = exeBase;
-		} else if (local != nullptr && dir_writable(fs::path(local) / "Nectar" / "netplay")) {
+		} else if (!nectar::paths::isPortableMode() && local != nullptr
+		           && dir_writable(fs::path(local) / "Nectar" / "netplay")) {
 			base = fs::path(local) / "Nectar" / "netplay";
 			printf("[netplay] launch: %s is not writable; run folders go to %s\n", exeBase.string().c_str(),
 			       base.string().c_str());

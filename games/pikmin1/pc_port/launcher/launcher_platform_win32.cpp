@@ -10,6 +10,7 @@
 // extractor.
 
 #include "launcher_platform.h"
+#include "nectar_paths/paths.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -246,15 +247,7 @@ fs::path askForConverter()
     return GetOpenFileNameW(&dialog) ? fs::path(selected.data()) : fs::path();
 }
 
-fs::path cacheDirectory()
-{
-    fs::path dir;
-    if (const wchar_t* local = _wgetenv(L"LOCALAPPDATA"); local && *local) dir = fs::path(local) / L"Open Nectar" / L"cache";
-    else dir = fs::temp_directory_path() / L"Open Nectar cache";
-    std::error_code ignored;
-    fs::create_directories(dir, ignored);
-    return dir;
-}
+fs::path cacheDirectory() { return nectar::paths::userCacheDirectory(); }
 
 bool downloadFile(const std::string& url, const fs::path& destination, std::string& error)
 {

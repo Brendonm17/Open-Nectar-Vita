@@ -10,6 +10,7 @@
  */
 #include "pc_hd_model_convert.h"
 
+#include "nectar_paths/paths.h"
 #include "stb_image.h"
 
 #include <algorithm>
@@ -1993,12 +1994,8 @@ fs::path findPikmin2Szs()
 	std::vector<fs::path> candidates;
 	if (const char* env = std::getenv("NECTAR_PIKMIN2_DIR"); env && *env) candidates.emplace_back(env);
 	{
-		std::ifstream in(pc_pikmin2_dir_file());
-		std::string line;
-		if (in && std::getline(in, line)) {
-			while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) line.pop_back();
-			if (!line.empty()) candidates.emplace_back(fs::u8path(line));
-		}
+		const fs::path remembered = nectar::paths::readStoredPath(nectar::paths::configFile("pikmin2_dir"));
+		if (!remembered.empty()) candidates.emplace_back(remembered);
 	}
 	candidates.emplace_back("../pikmin2");
 	candidates.emplace_back("pikmin2");
@@ -2133,17 +2130,8 @@ int pc_hd_models_convert_file(const char* pathStr, int expected, char* message, 
 
 std::string pc_pikmin2_dir_file(void)
 {
-#if defined(_WIN32)
-	const char* base = std::getenv("LOCALAPPDATA");
-	if (!base || !*base) return std::string();
-	return (fs::path(base) / "Open Nectar" / "pikmin2_dir").string();
-#else
-	fs::path base;
-	if (const char* xdg = std::getenv("XDG_CONFIG_HOME"); xdg && *xdg) base = xdg;
-	else if (const char* home = std::getenv("HOME"); home && *home) base = fs::path(home) / ".config";
-	else return std::string();
-	return (base / "open-nectar" / "pikmin2_dir").string();
-#endif
+	const fs::path file = nectar::paths::configFile("pikmin2_dir");
+	return file.empty() ? std::string() : file.string();
 }
 
 bool pc_pikmin2_detected(void)

@@ -27,7 +27,8 @@ int pc_hd_models_convert_file(const char* path, int expected, char* message, uns
 #include <string>
 
 /// Fichero de usuario donde el launcher guarda la carpeta de Pikmin 2
-/// (~/.config/open-nectar/pikmin2_dir o %LOCALAPPDATA%\Open Nectar\pikmin2_dir).
+/// (~/.config/open-nectar/pikmin2_dir, %LOCALAPPDATA%\Open Nectar\pikmin2_dir,
+/// o <install>/config/pikmin2_dir en modo portable).
 std::string pc_pikmin2_dir_file(void);
 
 /// True si se encuentra Pikmin 2 instalado (NECTAR_PIKMIN2_DIR, el fichero

@@ -12,6 +12,7 @@
 #include "launcher_gui.h"
 #include "crash_report.h"
 #include "launcher_platform.h"
+#include "nectar_paths/paths.h"
 #include "release_update.h"
 #include "texture_pack_download.h"
 #include "nectar_assets/charpack.h"
@@ -782,46 +783,27 @@ fs::path pikmin2GameDirectory(const fs::path& installDirectory) { return install
 // Pikmin 2 puede instalarse en cualquier carpeta: su ruta se guarda en un
 // fichero de usuario para que el launcher lo encuentre al abrirse desde otro
 // sitio y para que Pikmin 1 use su Louie (pc_pikmin2_dir_file, misma ruta).
-fs::path pikmin2DirFile()
-{
-#ifdef _WIN32
-    const char* base = std::getenv("LOCALAPPDATA");
-    if (!base || !*base) return {};
-    return fs::path(base) / "Open Nectar" / "pikmin2_dir";
-#else
-    fs::path base;
-    if (const char* xdg = std::getenv("XDG_CONFIG_HOME"); xdg && *xdg) base = xdg;
-    else if (const char* home = std::getenv("HOME"); home && *home) base = fs::path(home) / ".config";
-    else return {};
-    return base / "open-nectar" / "pikmin2_dir";
-#endif
-}
+fs::path pikmin2DirFile() { return nectar::paths::configFile("pikmin2_dir"); }
 
-fs::path rememberedPikmin2Directory()
-{
-    std::ifstream in(pikmin2DirFile());
-    std::string line;
-    if (!in || !std::getline(in, line)) return {};
-    while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) line.pop_back();
-    return line.empty() ? fs::path() : fs::u8path(line);
-}
+fs::path rememberedPikmin2Directory() { return nectar::paths::readStoredPath(pikmin2DirFile()); }
 
 // Guarda la carpeta y la exporta a los juegos que lance este proceso.
 void rememberPikmin2Directory(const fs::path& directory)
 {
     std::error_code ec;
     const fs::path absolute = fs::absolute(directory, ec);
-    const std::string text = (ec ? directory : absolute).u8string();
+    const fs::path resolved  = ec ? directory : absolute;
+    const std::string text   = resolved.u8string();
 #ifdef _WIN32
     _putenv_s("NECTAR_PIKMIN2_DIR", text.c_str());
 #else
     setenv("NECTAR_PIKMIN2_DIR", text.c_str(), 1);
 #endif
     const fs::path file = pikmin2DirFile();
-    if (file.empty() || rememberedPikmin2Directory() == fs::u8path(text)) return;
-    fs::create_directories(file.parent_path(), ec);
-    std::ofstream out(file, std::ios::trunc);
-    if (out) out << text << '\n';
+    if (file.empty()) return;
+    const fs::path previous = rememberedPikmin2Directory();
+    if (!previous.empty() && fs::equivalent(previous, resolved, ec)) return;
+    nectar::paths::writeStoredPath(file, resolved);
 }
 
 bool installPikmin2Assets(const fs::path& image, const fs::path& gameDirectory, std::string& failure,
@@ -1034,20 +1016,9 @@ bool sameContents(const fs::path& lhs, const fs::path& rhs)
 // La carpeta de instalación se recuerda (junto a pikmin2_dir) para que el
 // launcher descargado de GitHub, si se vuelve a abrir, mande al instalado en
 // vez de instalar otra vez.
-fs::path installDirFile()
-{
-    const fs::path pikmin2File = pikmin2DirFile();
-    return pikmin2File.empty() ? fs::path() : pikmin2File.parent_path() / "install_dir";
-}
+fs::path installDirFile() { return nectar::paths::configFile("install_dir"); }
 
-fs::path rememberedInstallDirectory()
-{
-    std::ifstream in(installDirFile());
-    std::string line;
-    if (!in || !std::getline(in, line)) return {};
-    while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) line.pop_back();
-    return line.empty() ? fs::path() : fs::u8path(line);
-}
+fs::path rememberedInstallDirectory() { return nectar::paths::readStoredPath(installDirFile()); }
 
 // Guarda la carpeta y, si es nueva, pone en el escritorio el acceso directo a
 // su launcher. Solo la primera vez: si el usuario lo borra, no vuelve.
@@ -1060,20 +1031,13 @@ void rememberInstallDirectory(const fs::path& directory)
     if (file.empty()) return;
     const fs::path previous = rememberedInstallDirectory();
     if (!previous.empty() && fs::equivalent(previous, install, ec)) return;
-    fs::create_directories(file.parent_path(), ec);
-    std::ofstream out(file, std::ios::trunc);
-    if (!(out << install.u8string() << '\n')) return;
-    out.close();
-    platform::createDesktopShortcut(install / kLauncherExecutable);
+    if (!nectar::paths::writeStoredPath(file, install)) return;
+    if (!nectar::paths::isPortableMode()) platform::createDesktopShortcut(install / kLauncherExecutable);
 }
 
 // La ruta de dolphin-tool elegida también se recuerda (junto a pikmin2_dir):
 // instalar el otro juego más tarde no vuelve a pedirla (#171).
-fs::path converterFile()
-{
-    const fs::path pikmin2File = pikmin2DirFile();
-    return pikmin2File.empty() ? fs::path() : pikmin2File.parent_path() / "dolphin_tool";
-}
+fs::path converterFile() { return nectar::paths::configFile("dolphin_tool"); }
 
 // Recordada (si sigue existiendo), junto al launcher / en PATH, o la que elija
 // el usuario si `ask`. La encontrada se guarda para la próxima vez.
@@ -1082,20 +1046,12 @@ fs::path locateConverter(bool ask)
     std::error_code ec;
     const fs::path file = converterFile();
     {
-        std::ifstream in(file);
-        std::string line;
-        if (in && std::getline(in, line)) {
-            while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) line.pop_back();
-            if (!line.empty() && fs::is_regular_file(fs::u8path(line), ec)) return fs::u8path(line);
-        }
+        const fs::path remembered = nectar::paths::readStoredPath(file);
+        if (!remembered.empty() && fs::is_regular_file(remembered, ec)) return remembered;
     }
     fs::path converter = platform::findConverter();
     if (converter.empty() && ask) converter = platform::askForConverter();
-    if (!converter.empty() && !file.empty()) {
-        fs::create_directories(file.parent_path(), ec);
-        std::ofstream out(file, std::ios::trunc);
-        if (out) out << fs::absolute(converter, ec).u8string() << '\n';
-    }
+    if (!converter.empty() && !file.empty()) nectar::paths::writeStoredPath(file, fs::absolute(converter, ec));
     return converter;
 }
 
