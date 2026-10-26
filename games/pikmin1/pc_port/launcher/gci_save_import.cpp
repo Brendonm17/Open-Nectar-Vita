@@ -1,8 +1,9 @@
 #include "gci_save_import.h"
 
+#include "dolphin_stubs/pc_card_save_root.h"
+
 #include <algorithm>
 #include <cctype>
-#include <cstdlib>
 #include <cstring>
 #include <fstream>
 
@@ -103,10 +104,10 @@ bool gciMatchesInstalledGame(const std::string& gciGameId, const std::string& in
 
 fs::path card0DirectoryForInstall(const fs::path& gameInstallDir)
 {
-    if (const char* env = std::getenv("NECTAR_SAVE_DIR"); env != nullptr && *env != '\0') {
-        return fs::path(env) / "card0";
-    }
-    return gameInstallDir / "save" / "card0";
+    PcCardSaveRootOptions options;
+    options.installDir = gameInstallDir;
+    options.logMigration = false;
+    return pc_card_card0_directory(options);
 }
 
 GciCardMeta metaFromGci(const ParsedGci& gci)

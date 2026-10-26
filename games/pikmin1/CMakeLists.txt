@@ -395,6 +395,7 @@ set(PC_PORT_SOURCES
     pc_port/dolphin_stubs/pad_stubs.cpp
     pc_port/dolphin_stubs/vi_stubs.cpp
     pc_port/dolphin_stubs/card_stubs.cpp
+    pc_port/dolphin_stubs/pc_card_save_root.cpp
     pc_port/dolphin_stubs/audio_stubs.cpp
     pc_port/dolphin_stubs/jaudio_hw_stubs.cpp
     pc_port/dolphin_stubs/misc_stubs.cpp
@@ -1037,6 +1038,7 @@ if(PIKMIN_BUILD_LAUNCHER)
         pc_port/launcher/launcher_main.cpp
         pc_port/launcher/launcher_gui.cpp
         pc_port/launcher/gci_save_import.cpp
+        pc_port/dolphin_stubs/pc_card_save_root.cpp
         pc_port/launcher/crash_report.cpp
         pc_port/launcher/bti_decode.cpp
         pc_port/launcher/settings_model.cpp
@@ -1106,8 +1108,9 @@ if(PIKMIN_BUILD_TESTS AND PIKMIN_BUILD_LAUNCHER)
     add_test(NAME sha256_test COMMAND sha256_test)
 
     add_executable(gci_save_import_test pc_port/launcher/gci_save_import_test.cpp
-        pc_port/launcher/gci_save_import.cpp)
-    target_include_directories(gci_save_import_test PRIVATE pc_port/launcher)
+        pc_port/launcher/gci_save_import.cpp
+        pc_port/dolphin_stubs/pc_card_save_root.cpp)
+    target_include_directories(gci_save_import_test PRIVATE pc_port/launcher ${PC_PORT_DIR})
     target_compile_options(gci_save_import_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
     add_test(NAME gci_save_import_test COMMAND gci_save_import_test)
 

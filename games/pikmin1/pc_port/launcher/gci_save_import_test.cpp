@@ -1,6 +1,9 @@
 #include "gci_save_import.h"
 
+#include "dolphin_stubs/pc_card_save_root.h"
+
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -105,6 +108,41 @@ int main()
             std::fprintf(stderr, "expected overwrite guard\n");
             ++failures;
         }
+    }
+
+    // Legacy card present, no install/save yet: resolving the card path must
+    // migrate first, then GCI import must land beside the migrated save.
+    {
+        const fs::path scenario = fs::temp_directory_path() / "gci_legacy_migration_test";
+        fs::remove_all(scenario, ec);
+        const fs::path install = scenario / "install";
+        const fs::path fakeHome = scenario / "home";
+        const fs::path legacyCard = fakeHome / ".local" / "share" / "pikmin-native" / "save" / "card0";
+        fs::create_directories(legacyCard, ec);
+        {
+            std::ofstream legacy(legacyCard / "legacy_progress.dat");
+            legacy << "keep";
+        }
+        if (!fs::exists(install / "save", ec)) {
+            setenv("HOME", fakeHome.string().c_str(), 1);
+            unsetenv("NECTAR_SAVE_DIR");
+            unsetenv("XDG_DATA_HOME");
+            PcCardSaveRootOptions options;
+            options.installDir = install;
+            options.logMigration = false;
+            const fs::path card0 = pikmin::launcher::card0DirectoryForInstall(install);
+            if (card0 != install / "save" / "card0" || !fs::exists(card0 / "legacy_progress.dat")) {
+                std::fprintf(stderr, "legacy migration before import failed\n");
+                ++failures;
+            } else if (!pikmin::launcher::importGciToCard(parsed, card0, true, error)) {
+                std::fprintf(stderr, "import after migration failed: %s\n", error.c_str());
+                ++failures;
+            } else if (!fs::exists(card0 / "legacy_progress.dat") || !fs::exists(card0 / "Pikmin dataFile")) {
+                std::fprintf(stderr, "expected both legacy and imported saves on card0\n");
+                ++failures;
+            }
+        }
+        fs::remove_all(scenario, ec);
     }
 
     fs::remove_all(root, ec);
