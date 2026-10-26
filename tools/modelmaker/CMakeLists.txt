@@ -16,6 +16,9 @@ set(MM_MAPMAKER "${MM_ROOT}/tools/mapmaker/src")
 if(NOT TARGET nectar_mapcore)
     add_subdirectory("${MM_ROOT}/libs/nectar_mapcore" "${CMAKE_CURRENT_BINARY_DIR}/nectar_mapcore")
 endif()
+if(NOT TARGET nectar_paths)
+    add_subdirectory("${MM_ROOT}/libs/nectar_paths" "${CMAKE_CURRENT_BINARY_DIR}/nectar_paths")
+endif()
 
 find_package(Threads REQUIRED)
 if(NOT SDL2_LIBRARIES)
@@ -97,7 +100,7 @@ target_include_directories(nectar_modelmaker PRIVATE
     "${MM_P1}/third_party/imgui"
     "${MM_P1}/third_party/imgui/backends"
     ${SDL2_INCLUDE_DIRS})
-target_link_libraries(nectar_modelmaker PRIVATE nectar_mapcore ${MM_IMGUI} ${SDL2_LIBRARIES} Threads::Threads)
+target_link_libraries(nectar_modelmaker PRIVATE nectar_mapcore nectar_paths ${MM_IMGUI} ${SDL2_LIBRARIES} Threads::Threads)
 if(WIN32)
     target_link_libraries(nectar_modelmaker PRIVATE comdlg32 ole32 shell32 uuid winhttp)
     set_target_properties(nectar_modelmaker PROPERTIES WIN32_EXECUTABLE ON)
