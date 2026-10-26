@@ -1481,6 +1481,13 @@ void pc_window_poll_events(PADStatus* pad) {
         // prompts, and consume then clears this pad. Both masks omit a finger.
         keys.clickLeft  = pc_menu_pad_click(sRealMouseButtons, sMousePressedMask, SDL_BUTTON_LEFT);
         keys.clickRight = pc_menu_pad_click(sRealMouseButtons, sMousePressedMask, SDL_BUTTON_RIGHT);
+        // A pointer menu hit-tests its own clicks and right clicks (pc_menu_click). There a
+        // mouse button is not also A or B, so a click on empty space cannot activate the
+        // highlighted row or back out. Keyboard and controller are unchanged.
+        if (pc_menu_click_pointer_menu_active()) {
+            keys.clickLeft  = false;
+            keys.clickRight = false;
+        }
         auto keyBindHeld = [&](int bind) {
             if (bind <= 0 || bind >= SDL_NUM_SCANCODES)
                 return false;
