@@ -54,12 +54,29 @@ std::string gameIdFromGciDir(const GciDirEntry& dir)
     return std::string(dir.gameName, dir.gameName + 4) + std::string(dir.company, dir.company + 2);
 }
 
-bool parseGciBytes(const std::vector<std::uint8_t>& bytes, ParsedGci& out, std::string& error)
+namespace {
+
+bool notAGci(std::string& error)
 {
-    if (bytes.size() < kGciHeaderSize) {
-        error = "This file is too small to be a GameCube save (.gci).";
-        return false;
-    }
+    error = kNotAGciMessage;
+    return false;
+}
+
+bool isIdChar(std::uint8_t c) { return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'); }
+
+bool parseGci(const std::vector<std::uint8_t>& bytes, ParsedGci& out, std::string& error)
+{
+    // A .gci is a 64-byte directory entry (game id, file name, block count)
+    // followed by exactly blockCount card blocks. Anything else is some other
+    // file the picker let through.
+    if (bytes.size() < kGciHeaderSize) return notAGci(error);
+    for (std::size_t i = 0; i < 6; ++i)
+        if (!isIdChar(bytes[i])) return notAGci(error);
+    if (bytes[8] == 0) return notAGci(error);
+    const std::uint16_t blocks = static_cast<std::uint16_t>((bytes[0x38] << 8) | bytes[0x39]);
+    if (blocks == 0 || blocks > kCardMaxUserBlocks
+        || bytes.size() != kGciHeaderSize + static_cast<std::size_t>(blocks) * kCardBlockSize)
+        return notAGci(error);
     std::memcpy(&out.dir, bytes.data(), kGciHeaderSize);
     // GCI headers are stored big-endian (GameCube byte order); convert to host order.
     const auto be16 = [&](std::size_t o) {
@@ -77,17 +94,7 @@ bool parseGciBytes(const std::vector<std::uint8_t>& bytes, ParsedGci& out, std::
     out.dir.blockCount = be16(0x38);
     out.dir.reserved3A = be16(0x3A);
     out.dir.commentAddr = be32(0x3C);
-    if (out.dir.blockCount == 0) {
-        error = "The save header says it uses zero data blocks.";
-        return false;
-    }
-    const std::uint64_t payloadBytes = static_cast<std::uint64_t>(out.dir.blockCount) * kCardBlockSize;
-    const std::uint64_t expectedSize = kGciHeaderSize + payloadBytes;
-    if (bytes.size() < expectedSize) {
-        error = "The file is shorter than the save header claims (" + std::to_string(expectedSize)
-                + " bytes expected).";
-        return false;
-    }
+    const std::size_t expectedSize = bytes.size();
     out.payload.assign(bytes.begin() + kGciHeaderSize, bytes.begin() + static_cast<std::ptrdiff_t>(expectedSize));
     out.saveFileName = trimCardName(out.dir.fileName, kCardFilenameMax);
     if (out.saveFileName.empty()) {
@@ -98,11 +105,18 @@ bool parseGciBytes(const std::vector<std::uint8_t>& bytes, ParsedGci& out, std::
     return true;
 }
 
+} // namespace
+
+bool parseGciBytes(const std::vector<std::uint8_t>& bytes, ParsedGci& out, std::string& error)
+{
+    return parseGci(bytes, out, error);
+}
+
 bool parseGciFile(const fs::path& path, ParsedGci& out, std::string& error)
 {
     std::vector<std::uint8_t> bytes;
     if (!readFileBytes(path, bytes, error)) return false;
-    return parseGciBytes(bytes, out, error);
+    return parseGci(bytes, out, error);
 }
 
 bool gciMatchesInstalledGame(const std::string& gciGameId, const std::string& installedDiscId)
@@ -396,6 +410,217 @@ bool importGciToCard(const ParsedGci& gci, const fs::path& card0Dir, bool overwr
     const auto* metaBytes = reinterpret_cast<const std::uint8_t*>(&meta);
     const std::vector<std::uint8_t> metaData(metaBytes, metaBytes + sizeof(meta));
     return commitCardPair(card0Dir, gci.saveFileName, gci.payload, &metaData, error, backupMade);
+}
+
+SaveGame saveGameForId(const std::string& gameId)
+{
+    if (gameId.rfind("GPI", 0) == 0) return SaveGame::Pikmin1;
+    if (gameId.rfind("GPV", 0) == 0) return SaveGame::Pikmin2;
+    return SaveGame::Unknown;
+}
+
+const char* saveGameName(SaveGame game)
+{
+    return game == SaveGame::Pikmin1 ? "Pikmin" : game == SaveGame::Pikmin2 ? "Pikmin 2" : "another game";
+}
+
+const char* nativeSaveFileName(SaveGame game)
+{
+    return game == SaveGame::Pikmin1 ? "Pikmin dataFile" : game == SaveGame::Pikmin2 ? "Pikmin2_SaveData" : "";
+}
+
+namespace {
+
+std::uint32_t readBe32(const std::vector<std::uint8_t>& b, std::size_t o)
+{
+    return (std::uint32_t(b[o]) << 24) | (std::uint32_t(b[o + 1]) << 16) | (std::uint32_t(b[o + 2]) << 8)
+         | std::uint32_t(b[o + 3]);
+}
+
+// MemoryCard::calcChecksum (plugPikiColin/memoryCard.cpp): words read
+// big-endian, as on GameCube. `bigEndian` false is calcChecksumLegacy, the
+// host-order sum older PC builds wrote, which the game still accepts.
+std::uint32_t pikmin1Checksum(const std::uint8_t* data, std::uint32_t length, bool bigEndian)
+{
+    std::uint32_t sum = 0x32546532u;
+    for (std::uint32_t i = 0; i < length / 4; ++i) {
+        const std::uint8_t* w = data + i * 4;
+        const std::uint32_t value = bigEndian
+            ? (std::uint32_t(w[0]) << 24) | (std::uint32_t(w[1]) << 16) | (std::uint32_t(w[2]) << 8) | w[3]
+            : (std::uint32_t(w[3]) << 24) | (std::uint32_t(w[2]) << 16) | (std::uint32_t(w[1]) << 8) | w[0];
+        const std::uint8_t i2 = static_cast<std::uint8_t>(i);
+        sum += (std::uint32_t(i2) << 24) | (std::uint32_t(std::uint8_t(i2 + 1)) << 16)
+             | (std::uint32_t(std::uint8_t(i2 - 1)) << 8) | std::uint32_t(std::uint8_t(i2 + 2));
+        sum += value;
+    }
+    return 0x32546532u - sum;
+}
+
+bool hasMagic(const std::vector<std::uint8_t>& b, std::size_t o, const char* magic)
+{
+    // Either byte order: the PC port may store the u32 host-endian.
+    return (b[o] == magic[0] && b[o + 1] == magic[1] && b[o + 2] == magic[2] && b[o + 3] == magic[3])
+        || (b[o] == magic[3] && b[o + 1] == magic[2] && b[o + 2] == magic[1] && b[o + 3] == magic[0]);
+}
+
+std::string idFromMeta(const GciCardMeta& meta)
+{
+    return std::string(meta.gameName, meta.gameName + 4) + std::string(meta.company, meta.company + 2);
+}
+
+std::uint32_t cardTimeNow()
+{
+    const std::time_t now = std::time(nullptr);
+    return now > 946684800 ? static_cast<std::uint32_t>(now - 946684800) : 0; // seconds since 2000, as on GC
+}
+
+std::string mismatchMessage(const std::string& saveId, SaveGame saveGame, const std::string& installedDiscId)
+{
+    const std::string what = saveGame == SaveGame::Unknown ? saveId
+                                                           : std::string(saveGameName(saveGame)) + " (" + saveId + ")";
+    return "This save is for " + what + ", but this install is " + installedDiscId + ".";
+}
+
+} // namespace
+
+SaveGame detectNativeSave(const std::vector<std::uint8_t>& bytes)
+{
+    if (bytes.size() == kPikmin1SaveFileSize) {
+        // Banner block: checksum of 0x1FFC bytes stored big-endian at 0x1FFC.
+        const std::uint32_t stored = readBe32(bytes, 0x1FFC);
+        if (stored == pikmin1Checksum(bytes.data(), 0x1FFC, true)
+            || stored == pikmin1Checksum(bytes.data(), 0x1FFC, false))
+            return SaveGame::Pikmin1;
+    }
+    if (bytes.size() == kPikmin2SaveFileSize) {
+        // Header 0x2000, two 0x2000 option blocks ('OpVa'), then four
+        // 0xC000 player blocks ('PlVa'); see Game/MemoryCard/Mgr.h.
+        for (std::size_t o : { 0x2000, 0x4000 })
+            if (hasMagic(bytes, o, "OpVa")) return SaveGame::Pikmin2;
+        for (std::size_t i = 0; i < 4; ++i)
+            if (hasMagic(bytes, 0x6000 + i * 0xC000, "PlVa")) return SaveGame::Pikmin2;
+    }
+    return SaveGame::Unknown;
+}
+
+GciCardMeta synthesizeNativeMeta(const std::string& fileName, std::uint32_t length, const std::string& discId)
+{
+    GciCardMeta meta {};
+    std::strncpy(meta.fileName, fileName.c_str(), kCardFilenameMax - 1);
+    meta.length = length;
+    meta.time = cardTimeNow();
+    std::memcpy(meta.gameName, discId.data(), std::min<std::size_t>(4, discId.size()));
+    if (discId.size() >= 6) std::memcpy(meta.company, discId.data() + 4, 2);
+    else std::memcpy(meta.company, "01", 2);
+    meta.iconAddr = meta.commentAddr = 0xffffffffu;
+    meta.offsetData = length;
+    return meta;
+}
+
+PrepareResult prepareSaveImport(const fs::path& picked, const std::string& installedDiscId, const fs::path& card0Dir,
+                                PreparedSave& out, std::string& message)
+{
+    out = PreparedSave {};
+    std::vector<std::uint8_t> bytes;
+    if (!readFileBytes(picked, bytes, message)) return PrepareResult::Error;
+    const std::string pickedName = picked.filename().string();
+    const SaveGame installGame = saveGameForId(installedDiscId);
+
+    std::string gciError;
+    ParsedGci gci;
+    if (parseGci(bytes, gci, gciError)) {
+        if (!gciMatchesInstalledGame(gci.gameId, installedDiscId)) {
+            message = mismatchMessage(gci.gameId, saveGameForId(gci.gameId), installedDiscId);
+            return PrepareResult::Error;
+        }
+        out.saveFileName = gci.saveFileName;
+        out.data = std::move(gci.payload);
+        const GciCardMeta meta = metaFromGci(gci);
+        const auto* m = reinterpret_cast<const std::uint8_t*>(&meta);
+        out.meta.assign(m, m + sizeof(meta));
+    } else {
+        if (pickedName.rfind(".meta_", 0) == 0) {
+            message = "That is a save's .meta_ file. Pick the save file next to it, \"" + pickedName.substr(6)
+                    + "\", instead.";
+            return PrepareResult::Error;
+        }
+        const SaveGame native = detectNativeSave(bytes);
+        if (native == SaveGame::Unknown) {
+            const bool namedLikeSave = pickedName == nativeSaveFileName(SaveGame::Pikmin1)
+                                    || pickedName == nativeSaveFileName(SaveGame::Pikmin2);
+            const bool sizedLikeSave = bytes.size() == kPikmin1SaveFileSize || bytes.size() == kPikmin2SaveFileSize;
+            message = namedLikeSave || sizedLikeSave
+                        ? "This looks like an Open Nectar save file, but it is damaged or incomplete, so it can't be "
+                          "imported."
+                        : kNotAGciMessage;
+            return PrepareResult::Error;
+        }
+        if (installGame != SaveGame::Unknown && native != installGame) {
+            message = std::string("This is a ") + saveGameName(native) + " save file, but this install is "
+                    + saveGameName(installGame) + ".";
+            return PrepareResult::Error;
+        }
+        out.native = true;
+        out.saveFileName = nativeSaveFileName(native);
+        out.data = std::move(bytes);
+
+        // Its .meta_ record, when one sits beside it; otherwise one like the
+        // card layer makes for a new file.
+        GciCardMeta meta {};
+        std::vector<std::uint8_t> siblingBytes;
+        bool hasSibling = false;
+        std::string ignored;
+        const fs::path sibling = picked.parent_path() / (".meta_" + pickedName);
+        if (readIfExists(sibling, siblingBytes, hasSibling, ignored) && hasSibling
+            && siblingBytes.size() == sizeof(GciCardMeta)) {
+            std::memcpy(&meta, siblingBytes.data(), sizeof(meta));
+            static const char kNoGame[4] = { 0, 0, 0, 0 };
+            if (std::memcmp(meta.gameName, kNoGame, 4) == 0) {
+                // Old builds left the id zeroed; the card layer heals that on read.
+                const GciCardMeta fresh = synthesizeNativeMeta(out.saveFileName, 0, installedDiscId);
+                std::memcpy(meta.gameName, fresh.gameName, 4);
+                std::memcpy(meta.company, fresh.company, 2);
+            } else if (!gciMatchesInstalledGame(idFromMeta(meta), installedDiscId)) {
+                message = mismatchMessage(idFromMeta(meta), saveGameForId(idFromMeta(meta)), installedDiscId);
+                return PrepareResult::Error;
+            }
+            std::memset(meta.fileName, 0, sizeof(meta.fileName));
+            std::strncpy(meta.fileName, out.saveFileName.c_str(), kCardFilenameMax - 1);
+            meta.length = static_cast<std::uint32_t>(out.data.size());
+        } else {
+            meta = synthesizeNativeMeta(out.saveFileName, static_cast<std::uint32_t>(out.data.size()),
+                                        installedDiscId);
+            out.syntheticMeta = true;
+        }
+        const auto* m = reinterpret_cast<const std::uint8_t*>(&meta);
+        out.meta.assign(m, m + sizeof(meta));
+    }
+
+    // The very file already on this card, or the same bytes.
+    const fs::path current = card0Dir / out.saveFileName;
+    std::error_code ec;
+    if (fs::is_regular_file(current, ec)) {
+        std::vector<std::uint8_t> currentBytes;
+        std::string readError;
+        if (fs::equivalent(picked, current, ec)
+            || (readFileBytes(current, currentBytes, readError) && currentBytes == out.data)) {
+            message = kAlreadyCurrentMessage;
+            return PrepareResult::AlreadyCurrent;
+        }
+    }
+    return PrepareResult::Ready;
+}
+
+bool importPreparedSave(const PreparedSave& save, const fs::path& card0Dir, bool overwrite, std::string& error,
+                        CardBackup* backupMade)
+{
+    std::error_code ec;
+    if (!overwrite && (fs::exists(card0Dir / save.saveFileName, ec)
+                       || fs::exists(card0Dir / (".meta_" + save.saveFileName), ec))) {
+        error = "A save named \"" + save.saveFileName + "\" is already on the memory card.";
+        return false;
+    }
+    return commitCardPair(card0Dir, save.saveFileName, save.data, &save.meta, error, backupMade);
 }
 
 bool restoreLatestCardBackup(const fs::path& card0Dir, std::string& error, CardBackup* restoredFrom,

@@ -647,6 +647,7 @@ struct Hub {
     bool gciNoteIsError = false;
     std::string savesStatus;
     bool savesFolderExists = false;
+    bool backupsFolderExists = false;
     int savesStatusGame = -1;
     float savesStatusAge = 0.0f;
     std::string savesBackupTime; // newest backup, "Oct 25, 8:37 PM"; empty when none
@@ -1208,13 +1209,6 @@ struct Hub {
         gciNoteIsError = isError;
     }
 
-    static const char* gameNameForId(const std::string& id)
-    {
-        if (id.rfind("GPI", 0) == 0) return "Pikmin";
-        if (id.rfind("GPV", 0) == 0) return "Pikmin 2";
-        return nullptr;
-    }
-
     void tryImportGciSave()
     {
         gciNote.clear();
@@ -1228,51 +1222,50 @@ struct Hub {
             return;
         }
         const int gameIndex = settingsGame;
-        startFilePick("gci", "Import GameCube save", "GameCube save (.gci)", "*.gci *.GCI",
-                      [this, gameIndex](const fs::path& picked) { importPickedGci(gameIndex, picked); });
+        // .gci exports, plus Open Nectar's own card files, which have no
+        // extension ("Pikmin dataFile", "Pikmin2_SaveData").
+        startFilePick("gci", "Import a save", "GameCube or Open Nectar save", "*.gci *.GCI *dataFile *_SaveData",
+                      [this, gameIndex](const fs::path& picked) { importPickedSave(gameIndex, picked); });
     }
 
     // Runs between frames once the picker returns a file (see finishFilePick).
-    void importPickedGci(int gameIndex, const fs::path& picked)
+    void importPickedSave(int gameIndex, const fs::path& picked)
     {
         const GameInstall& game = state.games[gameIndex];
         const std::string discId = game.discId.empty() ? (gameIndex == 0 ? "GPIE01" : "GPVE01") : game.discId;
-        ParsedGci parsed;
+        const fs::path card0 = card0DirectoryForInstall(fs::path(game.directory));
+        PreparedSave save;
         std::string error;
-        if (!parseGciFile(picked, parsed, error)) {
-            setGciNote(error, true);
-            return;
-        }
-        if (!gciMatchesInstalledGame(parsed.gameId, discId)) {
-            const char* savedFor = gameNameForId(parsed.gameId);
-            const std::string what = savedFor ? std::string(savedFor) + " (" + parsed.gameId + ")" : parsed.gameId;
-            setGciNote("This save is for " + what + ", but this install is " + discId + ".", true);
-            return;
+        switch (prepareSaveImport(picked, discId, card0, save, error)) {
+        case PrepareResult::Error: setGciNote(error, true); return;
+        case PrepareResult::AlreadyCurrent: setGciNote(error, false); return;
+        case PrepareResult::Ready: break;
         }
 
-        const fs::path card0 = card0DirectoryForInstall(fs::path(game.directory));
         std::error_code ec;
         bool overwrite = false;
-        if (fs::exists(card0 / parsed.saveFileName, ec) || fs::exists(card0 / (".meta_" + parsed.saveFileName), ec)) {
+        if (fs::exists(card0 / save.saveFileName, ec) || fs::exists(card0 / (".meta_" + save.saveFileName), ec)) {
             if (!askModal) {
                 setGciNote("A save already exists; the launcher could not show a confirmation dialog.", true);
                 return;
             }
             // One file holds every slot and the options, in both games.
             const std::string prompt =
-                "Importing replaces all save slots and options on this install's memory card with the ones in the "
-                ".gci file.\n\nYour current save is backed up first, and you can bring it back from this page with "
-                "\"Restore previous save\".";
+                std::string("Importing replaces all save slots and options on this install's memory card with the "
+                            "ones in ")
+                + (save.native ? "the save file you picked." : "the .gci file.")
+                + "\n\nYour current save is backed up first, and you can bring it back from this page with "
+                  "\"Restore previous save\".";
             const int answer = askModal("Replace your save?", prompt, "Replace", "", false, "Cancel");
             if (answer != 0) return;
             overwrite = true;
         }
         CardBackup backup;
-        if (!importGciToCard(parsed, card0, overwrite, error, &backup)) {
+        if (!importPreparedSave(save, card0, overwrite, error, &backup)) {
             setGciNote(error, true);
             return;
         }
-        toast = "Imported \"" + parsed.saveFileName + "\" to the memory card. It will appear on the file select screen.";
+        toast = "Imported \"" + save.saveFileName + "\" to the memory card. It will appear on the file select screen.";
         toastTime = 4.5f;
         setGciNote(backup.dir.empty() ? toast : toast + " Your previous save was backed up.", false);
         savesStatusGame = -1; // re-read the card on the next frame
@@ -1326,11 +1319,14 @@ struct Hub {
         savesStatus.clear();
         savesBackupTime.clear();
         savesFolderExists = false;
+        backupsFolderExists = false;
         const GameInstall& game = state.games[settingsGame];
         if (game.directory.empty()) return;
         const fs::path card0 = card0DirectoryForInstall(fs::path(game.directory));
         const std::vector<CardBackup> backups = listCardBackups(card0);
         if (!backups.empty()) savesBackupTime = describeBackupTime(backups.front());
+        std::error_code backupsEc;
+        backupsFolderExists = fs::is_directory(cardBackupRoot(card0), backupsEc);
         std::error_code ec;
         std::vector<std::string> names;
         if (fs::is_directory(card0, ec)) {
@@ -1347,12 +1343,11 @@ struct Hub {
                                 + " save. Importing will ask before replacing it.";
     }
 
-    void openSaveFolder()
+    void openFolder(const fs::path& folder)
     {
-        const fs::path card0 = card0DirectoryForInstall(fs::path(state.games[settingsGame].directory));
         // file:// URL: forward slashes, a leading slash before a drive letter,
         // and the characters a URL can't carry as-is escaped.
-        const std::string path = card0.generic_string();
+        const std::string path = folder.generic_string();
         std::string url = path.empty() || path[0] != '/' ? "file:///" : "file://";
         for (const char c : path) {
             if (c == ' ' || c == '%' || c == '#' || c == '?') {
@@ -1363,8 +1358,12 @@ struct Hub {
                 url += c;
             }
         }
-        if (SDL_OpenURL(url.c_str()) != 0)
-            setGciNote("Could not open the folder: " + card0.string(), true);
+        if (SDL_OpenURL(url.c_str()) != 0) setGciNote("Could not open the folder: " + folder.string(), true);
+    }
+
+    fs::path saveCardFolder() const
+    {
+        return card0DirectoryForInstall(fs::path(state.games[settingsGame].directory));
     }
 
     // Saves page, laid out like Texture Packs.
@@ -1377,17 +1376,18 @@ struct Hub {
         ImGui::Separator();
         ImGui::PushTextWrapPos(0.0f);
         ImGui::TextColored(ImVec4(1.0f, 0.93f, 0.80f, 0.85f),
-                           "Bring a save from Dolphin or a real GameCube memory card (.gci) into this install. "
-                           "It shows up on the game's file select screen.");
+                           "Bring a save into this install: a GameCube export (.gci) from Dolphin or a real "
+                           "memory card, or an Open Nectar save file from another install or a backup. It shows up "
+                           "on the game's file select screen.");
         ImGui::Dummy(ImVec2(0, 6));
         ImGui::TextColored(ImVec4(0.62f, 0.58f, 0.44f, 1.0f), "%s", savesStatus.c_str());
         ImGui::PopTextWrapPos();
         ImGui::Dummy(ImVec2(0, 10));
-        if (glassButton(filePickLabel("gci", "Import a GameCube save (.gci)").c_str(), ImVec2(300.0f, 46.0f), false,
+        if (glassButton(filePickLabel("gci", "Import a save...").c_str(), ImVec2(300.0f, 46.0f), false,
                         busy || filePickOpen()))
             tryImportGciSave();
         ImGui::SameLine(0.0f, 12.0f);
-        if (glassButton("Open save folder", ImVec2(200.0f, 46.0f), false, !savesFolderExists)) openSaveFolder();
+        if (glassButton("Open save folder", ImVec2(200.0f, 46.0f), false, !savesFolderExists)) openFolder(saveCardFolder());
 
         ImGui::Dummy(ImVec2(0, 18));
         ImGui::PushFont(fonts.caption);
@@ -1399,15 +1399,20 @@ struct Hub {
                            "Before a save is replaced, the old one is copied to a card0-backups folder next to the "
                            "memory card. The newest %d are kept.",
                            kCardBackupKeep);
+        if (!savesBackupTime.empty()) {
+            ImGui::Dummy(ImVec2(0, 6));
+            ImGui::TextColored(ImVec4(0.62f, 0.58f, 0.44f, 1.0f), "Latest backup: %s", savesBackupTime.c_str());
+        }
         ImGui::PopTextWrapPos();
-        if (savesBackupTime.empty()) return;
         ImGui::Dummy(ImVec2(0, 10));
-        const float rowY = ImGui::GetCursorPosY();
-        if (glassButton("Restore previous save", ImVec2(300.0f, 46.0f), false, busy || filePickOpen()))
-            tryRestoreSave();
-        ImGui::SameLine(0.0f, 14.0f);
-        ImGui::SetCursorPosY(rowY + (46.0f - ImGui::GetTextLineHeight()) * 0.5f);
-        ImGui::TextColored(ImVec4(0.62f, 0.58f, 0.44f, 1.0f), "Backed up %s", savesBackupTime.c_str());
+        // 300 + 12 + 240 px: fits the rows panel at the 960 px minimum width.
+        if (!savesBackupTime.empty()) {
+            if (glassButton("Restore previous save", ImVec2(300.0f, 46.0f), false, busy || filePickOpen()))
+                tryRestoreSave();
+            ImGui::SameLine(0.0f, 12.0f);
+        }
+        if (glassButton("Open backups folder", ImVec2(240.0f, 46.0f), false, !backupsFolderExists))
+            openFolder(cardBackupRoot(saveCardFolder()));
     }
 #endif
 

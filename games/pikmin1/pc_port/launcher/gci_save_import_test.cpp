@@ -73,6 +73,185 @@ bool hasTempFiles(const fs::path& card0)
         }                                                  \
     } while (0)
 
+// Test-side copy of MemoryCard::calcChecksum, so the fixtures are what the
+// game would write.
+std::uint32_t pikmin1Sum(const std::vector<std::uint8_t>& b, std::uint32_t length, bool bigEndian)
+{
+    std::uint32_t sum = 0x32546532u;
+    for (std::uint32_t i = 0; i < length / 4; ++i) {
+        const std::uint8_t* w = b.data() + i * 4;
+        const std::uint32_t v = bigEndian ? (std::uint32_t(w[0]) << 24) | (std::uint32_t(w[1]) << 16) | (std::uint32_t(w[2]) << 8) | w[3]
+                                          : (std::uint32_t(w[3]) << 24) | (std::uint32_t(w[2]) << 16) | (std::uint32_t(w[1]) << 8) | w[0];
+        const std::uint8_t i2 = static_cast<std::uint8_t>(i);
+        sum += (std::uint32_t(i2) << 24) | (std::uint32_t(std::uint8_t(i2 + 1)) << 16)
+             | (std::uint32_t(std::uint8_t(i2 - 1)) << 8) | std::uint32_t(std::uint8_t(i2 + 2));
+        sum += v;
+    }
+    return 0x32546532u - sum;
+}
+
+std::vector<std::uint8_t> makePikmin1Save(std::uint8_t marker, bool bigEndianSum = true)
+{
+    std::vector<std::uint8_t> file(pikmin::launcher::kPikmin1SaveFileSize, 0);
+    std::memcpy(file.data(), "Pikmin\0\0", 8);
+    file[0x100] = marker;
+    file[0x10000] = marker;
+    writeBe32(file, 0x1FFC, pikmin1Sum(file, 0x1FFC, bigEndianSum));
+    return file;
+}
+
+std::vector<std::uint8_t> makePikmin2Save()
+{
+    std::vector<std::uint8_t> file(pikmin::launcher::kPikmin2SaveFileSize, 0xCD);
+    std::memcpy(file.data() + 0x2000, "OpVa0002", 8);
+    return file;
+}
+
+void writeAll(const fs::path& path, const std::vector<std::uint8_t>& bytes)
+{
+    fs::create_directories(path.parent_path());
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+}
+
+pikmin::launcher::GciCardMeta metaOf(const std::vector<std::uint8_t>& bytes)
+{
+    pikmin::launcher::GciCardMeta meta {};
+    if (bytes.size() == sizeof(meta)) std::memcpy(&meta, bytes.data(), sizeof(meta));
+    return meta;
+}
+
+// Open Nectar card files picked instead of a .gci.
+int nativeTests(const std::vector<std::uint8_t>& gciBytes)
+{
+    namespace L = pikmin::launcher;
+    int failures = 0;
+    const fs::path root = fs::temp_directory_path() / "gci_native_import_test";
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    const fs::path card0 = root / "save" / "card0";
+    fs::create_directories(card0);
+    const fs::path other = root / "other-install";
+    L::PreparedSave save;
+    std::string msg;
+
+    // Detection uses the game's own checks.
+    CHECK(L::detectNativeSave(makePikmin1Save(1)) == L::SaveGame::Pikmin1, "pikmin 1 save detected");
+    CHECK(L::detectNativeSave(makePikmin1Save(1, false)) == L::SaveGame::Pikmin1, "legacy host-order sum accepted");
+    CHECK(L::detectNativeSave(makePikmin2Save()) == L::SaveGame::Pikmin2, "pikmin 2 save detected");
+    CHECK(L::detectNativeSave(std::vector<std::uint8_t>(L::kPikmin1SaveFileSize, 0)) == L::SaveGame::Unknown,
+          "zeroed file of the right size rejected");
+
+    // 1. With a .meta_ beside it: that record is used.
+    const std::vector<std::uint8_t> first = makePikmin1Save(1);
+    writeAll(other / "Pikmin dataFile", first);
+    L::GciCardMeta sibling = L::synthesizeNativeMeta("Pikmin dataFile", 155648, "GPIE01");
+    sibling.time = 777;
+    sibling.iconAddr = 0x40;
+    const auto* sp = reinterpret_cast<const std::uint8_t*>(&sibling);
+    writeAll(other / ".meta_Pikmin dataFile", std::vector<std::uint8_t>(sp, sp + sizeof(sibling)));
+    CHECK(L::prepareSaveImport(other / "Pikmin dataFile", "GPIE01", card0, save, msg) == L::PrepareResult::Ready,
+          "native save with sibling meta is ready");
+    CHECK(save.native && !save.syntheticMeta && save.saveFileName == "Pikmin dataFile", "sibling meta used");
+    CHECK(metaOf(save.meta).time == 777 && metaOf(save.meta).iconAddr == 0x40, "sibling meta fields kept");
+    CHECK(L::importPreparedSave(save, card0, false, msg), "native import with sibling meta");
+    CHECK(readAll(card0 / "Pikmin dataFile") == first, "native data written");
+    CHECK(metaOf(readAll(card0 / ".meta_Pikmin dataFile")).iconAddr == 0x40, "sibling meta written");
+
+    // 2. No .meta_ beside it (and renamed): one is made like the card layer's.
+    const std::vector<std::uint8_t> second = makePikmin1Save(2);
+    writeAll(root / "loose" / "my old save", second);
+    CHECK(L::prepareSaveImport(root / "loose" / "my old save", "GPIE01", card0, save, msg) == L::PrepareResult::Ready,
+          "native save without meta is ready");
+    const L::GciCardMeta made = metaOf(save.meta);
+    CHECK(save.syntheticMeta && save.saveFileName == "Pikmin dataFile", "meta synthesized");
+    CHECK(std::strcmp(made.fileName, "Pikmin dataFile") == 0 && made.length == 155648
+              && std::memcmp(made.gameName, "GPIE", 4) == 0 && std::memcmp(made.company, "01", 2) == 0
+              && made.iconAddr == 0xffffffffu && made.commentAddr == 0xffffffffu && made.offsetData == 155648
+              && made.time > 0,
+          "synthesized meta matches card_stubs defaultStat");
+    L::CardBackup backup;
+    CHECK(L::importPreparedSave(save, card0, true, msg, &backup) && !backup.dir.empty(), "overwrite backs up");
+    CHECK(readAll(card0 / "Pikmin dataFile") == second, "renamed native file imported under the game's name");
+    CHECK(readAll(backup.dir / "Pikmin dataFile") == first, "backup holds the previous save");
+    CHECK(!hasTempFiles(card0), "no temp files after native import");
+
+    // A file from card0-backups imports like any other.
+    CHECK(L::prepareSaveImport(backup.dir / "Pikmin dataFile", "GPIE01", card0, save, msg) == L::PrepareResult::Ready
+              && !save.syntheticMeta,
+          "backup folder save is importable with its meta");
+
+    // 3. Wrong game, by contents and size; and the wrong region in a sibling meta.
+    writeAll(other / "Pikmin2_SaveData", makePikmin2Save());
+    CHECK(L::prepareSaveImport(other / "Pikmin2_SaveData", "GPIE01", card0, save, msg) == L::PrepareResult::Error
+              && msg.find("Pikmin 2 save file") != std::string::npos,
+          "pikmin 2 file rejected by a pikmin install");
+    CHECK(L::prepareSaveImport(other / "Pikmin dataFile", "GPVE01", card0, save, msg) == L::PrepareResult::Error
+              && msg.find("Pikmin save file, but this install is Pikmin 2") != std::string::npos,
+          "pikmin file rejected by a pikmin 2 install");
+    CHECK(L::prepareSaveImport(other / "Pikmin dataFile", "GPIP01", card0, save, msg) == L::PrepareResult::Error
+              && msg.find("GPIE01") != std::string::npos,
+          "sibling meta from another region rejected");
+
+    // 4. The install's current save, by path or by bytes: nothing happens.
+    const std::size_t backupsBefore = L::listCardBackups(card0).size();
+    CHECK(L::prepareSaveImport(card0 / "Pikmin dataFile", "GPIE01", card0, save, msg)
+                  == L::PrepareResult::AlreadyCurrent
+              && msg == L::kAlreadyCurrentMessage,
+          "current save by path");
+    writeAll(root / "copy" / "Pikmin dataFile", second);
+    CHECK(L::prepareSaveImport(root / "copy" / "Pikmin dataFile", "GPIE01", card0, save, msg)
+              == L::PrepareResult::AlreadyCurrent,
+          "current save by identical bytes");
+    CHECK(L::listCardBackups(card0).size() == backupsBefore && readAll(card0 / "Pikmin dataFile") == second,
+          "already-current pick changes nothing");
+
+    // 5. Anything else gets the not-a-.gci message.
+    std::vector<std::uint8_t> random(5000);
+    for (std::size_t i = 0; i < random.size(); ++i) random[i] = static_cast<std::uint8_t>(i * 131 + 7);
+    writeAll(root / "notes.txt", random);
+    CHECK(L::prepareSaveImport(root / "notes.txt", "GPIE01", card0, save, msg) == L::PrepareResult::Error
+              && msg == L::kNotAGciMessage,
+          "random file gets the non-GCI error");
+    writeAll(root / "broken" / "Pikmin dataFile", std::vector<std::uint8_t>(L::kPikmin1SaveFileSize, 0));
+    CHECK(L::prepareSaveImport(root / "broken" / "Pikmin dataFile", "GPIE01", card0, save, msg)
+                  == L::PrepareResult::Error
+              && msg.find("damaged") != std::string::npos,
+          "save-shaped file failing the checksum is called damaged");
+    writeAll(root / ".meta_Pikmin dataFile", std::vector<std::uint8_t>(sizeof(L::GciCardMeta), 0));
+    CHECK(L::prepareSaveImport(root / ".meta_Pikmin dataFile", "GPIE01", card0, save, msg) == L::PrepareResult::Error
+              && msg.find(".meta_") != std::string::npos,
+          "a .meta_ file points at its save");
+
+    // GCI header sanity: a huge block count or a wrong size is not a .gci.
+    L::ParsedGci parsed;
+    std::vector<std::uint8_t> huge = gciBytes;
+    writeBe16(huge, 0x38, 2044);
+    CHECK(!L::parseGciBytes(huge, parsed, msg) && msg == L::kNotAGciMessage, "block count over 2043 rejected");
+    std::vector<std::uint8_t> longer = gciBytes;
+    longer.push_back(0);
+    CHECK(!L::parseGciBytes(longer, parsed, msg) && msg == L::kNotAGciMessage, "size mismatch rejected");
+
+    // A .gci still goes through the same entry point.
+    writeAll(root / "export.gci", gciBytes);
+    CHECK(L::prepareSaveImport(root / "export.gci", "GPIE01", card0, save, msg) == L::PrepareResult::Ready
+              && !save.native && save.data.size() == kCardBlockSize,
+          "gci through prepareSaveImport");
+    CHECK(L::prepareSaveImport(root / "export.gci", "GPVE01", card0, save, msg) == L::PrepareResult::Error
+              && msg.find("This save is for Pikmin (GPIE01)") != std::string::npos,
+          "gci for the other game rejected");
+
+    // Optional: a real export, e.g. NECTAR_REAL_GCI=~/OpenNectar-pr179/test-gci/...gci
+    if (const char* real = std::getenv("NECTAR_REAL_GCI")) {
+        CHECK(L::parseGciFile(real, parsed, msg), "real .gci parses");
+        CHECK(L::detectNativeSave(parsed.payload) == L::SaveGame::Pikmin1, "real .gci payload passes the game's checksum");
+        std::printf("real gci: %s, %zu bytes payload\n", parsed.saveFileName.c_str(), parsed.payload.size());
+    }
+
+    fs::remove_all(root, ec);
+    return failures;
+}
+
 // Backups, restore, atomic writes and pruning, on a card of its own.
 int backupTests(const pikmin::launcher::ParsedGci& parsed)
 {
@@ -287,6 +466,7 @@ int main()
     }
 
     failures += backupTests(parsed);
+    failures += nativeTests(makeSyntheticGci());
 
     fs::remove_all(root, ec);
     if (failures == 0) std::printf("gci_save_import_test: PASS\n");
