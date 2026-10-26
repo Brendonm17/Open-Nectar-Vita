@@ -28,6 +28,7 @@
 #include "THP/THPPlayer.h"
 #include "audio/pc_dsp_host.h"
 #include "pc_speedrun.h"
+#include "pc_exit_after.h"
 
 RenderModeInfo gPcRenderInfoStore = {};
 
@@ -1638,6 +1639,13 @@ void VIWaitForRetrace()
 	pc_hang_heartbeat();
 	// Eventos de ventana/entrada via pc_window (capa compartida con Pikmin 1).
 	pc_window_poll_events(nullptr);
+	// PIKMIN_EXIT_AFTER_FRAMES=N: smoke tests quit after N retraces, once that
+	// frame has been presented, through the same path as closing the window.
+	static const u32 sExitAfterFrames = pc_exit_after_frames_parse(getenv("PIKMIN_EXIT_AFTER_FRAMES"));
+	if (pc_exit_after_frames_reached(sExitAfterFrames, sRetraceCount)) {
+		printf("[PC Port] PIKMIN_EXIT_AFTER_FRAMES=%u reached, quitting.\n", (unsigned)sExitAfterFrames);
+		pc_host_quit();
+	}
 	if (pc_window_should_close()) {
 		// std::exit() destruye objetos estaticos (p. ej. la condvar de
 		// mensajes) con hilos de audio aun esperando en ellos -> abort.

@@ -608,6 +608,9 @@ if(PIKMIN2_ENABLE_PORT_LAYER)
             ${PC_PORT_DIR}/pc_menu_pad_test.cpp
             ${PC_PORT_DIR}/pc_menu_pad.cpp
         )
+        pikmin2_add_host_test(p2_exit_after_test
+            ${PC_PORT_DIR}/pc_exit_after_test.cpp
+        )
         pikmin2_add_host_test(p2_photo_mode_test
             ${PC_PORT_DIR}/pc_photo_mode_test.cpp
             ${PC_PORT_DIR}/pc_photo_mode.cpp
