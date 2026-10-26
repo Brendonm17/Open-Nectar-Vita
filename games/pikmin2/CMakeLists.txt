@@ -373,6 +373,7 @@ if(PIKMIN2_ENABLE_PORT_LAYER)
         ${PC_PORT_DIR}/pc_record.cpp
         ${PC_PORT_DIR}/pc_p2_rules.cpp
         ${PC_PORT_DIR}/pc_p2_coop.cpp
+        ${PC_PORT_DIR}/pc_p2_coop_movie_protagonist.cpp
         ${PC_PORT_DIR}/pc_p2_captains.cpp
         ${PC_PORT_DIR}/pc_speedrun.cpp
         ${PC_PORT_DIR}/randomizer/pc_randomizer.cpp
@@ -607,6 +608,10 @@ if(PIKMIN2_ENABLE_PORT_LAYER)
         pikmin2_add_host_test(p2_menu_pad_test
             ${PC_PORT_DIR}/pc_menu_pad_test.cpp
             ${PC_PORT_DIR}/pc_menu_pad.cpp
+        )
+        pikmin2_add_host_test(p2_coop_movie_protagonist_test
+            ${PC_PORT_DIR}/pc_p2_coop_movie_protagonist_test.cpp
+            ${PC_PORT_DIR}/pc_p2_coop_movie_protagonist.cpp
         )
         pikmin2_add_host_test(p2_photo_mode_test
             ${PC_PORT_DIR}/pc_photo_mode_test.cpp

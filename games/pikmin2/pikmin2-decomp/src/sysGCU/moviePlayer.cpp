@@ -57,7 +57,13 @@ static void pcCoopMovieBegin(Game::MoviePlayer* player)
 		return;
 	}
 	Game::Navi* navi = nullptr;
-	if (player->mTargetObject && player->mTargetObject->isNavi()) {
+	if (void* tagged = pc_p2_coop_take_movie_protagonist()) {
+		navi = static_cast<Game::Navi*>(tagged);
+		if (!navi->isAlive()) {
+			navi = nullptr;
+		}
+	}
+	if (!navi && player->mTargetObject && player->mTargetObject->isNavi()) {
 		navi = static_cast<Game::Navi*>(player->mTargetObject);
 	}
 	if (!navi || !navi->isAlive()) {
@@ -69,6 +75,7 @@ static void pcCoopMovieBegin(Game::MoviePlayer* player)
 	if (!navi || navi->mNaviIndex > NAVIID_Louie) {
 		return;
 	}
+	player->mTargetNavi = navi;
 	Game::BaseGameSection* section = Game::gameSystem->mSection;
 	pc_p2_coop_set_movie_full(1);
 	if (section->mPrevNaviIdx != navi->mNaviIndex) {
