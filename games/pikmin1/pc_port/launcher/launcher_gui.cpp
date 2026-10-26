@@ -24,6 +24,7 @@
 #endif
 #include "gci_save_import.h"
 #include "launcher_platform.h"
+#include "launcher_sidebar_layout.h"
 #include "settings_model.h"
 #include "release_update.h"
 
@@ -1855,21 +1856,39 @@ struct Hub {
         // líneas caben completas aquí tanto en Pikmin 1 como en Pikmin 2.
         const float helpH = 104.0f;
 
-        // Grupos a la izquierda, como pestañas verticales.
+        // Grupos a la izquierda, como pestañas verticales. Tienen que acabar por
+        // encima de "Reset all" con cualquier altura y número de páginas.
+        const float resetH = 44.0f;
+        const float listTop = top + 24.0f;
+        const float listSpace = bottom - resetH - 12.0f - listTop;
+        const SidebarLayout sidebar = fitSidebar(lastPage + 1, listSpace);
+        ImVec2 listOrigin(margin, listTop);
+        if (sidebar.scroll) {
+            ImGui::SetCursorScreenPos(listOrigin);
+            ImGui::BeginChild("##pages", ImVec2(listW, std::max(1.0f, listSpace)), ImGuiChildFlags_None,
+                              ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar);
+            listOrigin = ImGui::GetCursorScreenPos();
+        }
         for (int g = 0; g <= lastPage; ++g) {
             const char* name = g == savesPage ? "Saves"
                              : g == packsPage ? "Texture Packs"
                              : g == modelsPage ? "HD Models"
                                                : groups[size_t(g)].name.c_str();
-            ImGui::SetCursorScreenPos(ImVec2(margin, top + 24.0f + float(g) * 50.0f));
+            ImGui::SetCursorScreenPos(ImVec2(listOrigin.x, listOrigin.y + float(g) * sidebar.step));
             ImGui::PushID(g);
-            if (glassButton(name, role::kSettingsGroup, 40.0f, g == settingsGroup)) settingsGroup = g;
+            if (glassButton(name, ImVec2(listW, sidebar.height), g == settingsGroup)) settingsGroup = g;
             ImGui::PopID();
+        }
+        if (sidebar.scroll) {
+            // Reserva el alto completo para que la región sepa cuánto puede desplazarse.
+            ImGui::SetCursorScreenPos(ImVec2(listOrigin.x, listOrigin.y + sidebar.content));
+            ImGui::Dummy(ImVec2(1.0f, 0.0f));
+            ImGui::EndChild();
         }
         // Restaurar: pide un segundo clic para confirmar.
         resetArmed = std::max(0.0f, resetArmed - dt);
-        ImGui::SetCursorScreenPos(ImVec2(margin, bottom - 44.0f));
-        if (glassButton(resetArmed > 0.0f ? "Sure? Click" : "Reset all", role::kSettingsGroup, 44.0f, false, busy)) {
+        ImGui::SetCursorScreenPos(ImVec2(margin, bottom - resetH));
+        if (glassButton(resetArmed > 0.0f ? "Sure? Click" : "Reset all", ImVec2(listW, resetH), false, busy)) {
             if (resetArmed > 0.0f) {
                 resetArmed = 0.0f;
                 optionOrder.clear();
