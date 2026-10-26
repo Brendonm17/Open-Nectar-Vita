@@ -71,8 +71,13 @@ int main()
     }
     setenv("NECTAR_EXECUTABLE_PATH", (movedRoot / "nectar-launcher").string().c_str(), 1);
 
+    // readStoredPath canonicalizes, so compare canonical forms: on macOS the
+    // temp folder is under /var, a symlink to /private/var.
     const fs::path resolved = nectar::paths::readStoredPath(movedRoot / "config/pikmin2_dir");
-    if (!expect(resolved == movedRoot / "pikmin2", "relative path resolves after relocate")) return 1;
+    const fs::path expected = fs::weakly_canonical(movedRoot / "pikmin2", ec);
+    if (!expect(!resolved.empty() && fs::weakly_canonical(resolved, ec) == expected,
+                "relative path resolves after relocate"))
+        return 1;
 
     const fs::path cache = nectar::paths::userCacheDirectory();
     if (!expect(cache == movedRoot / "cache", "cache lives beside install in portable mode")) return 1;
