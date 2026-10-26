@@ -28,10 +28,12 @@
 #include "THP/THPPlayer.h"
 #include "audio/pc_dsp_host.h"
 #include "pc_speedrun.h"
+#include "dolphin_stubs/pc_host_readable_os.h"
 
 RenderModeInfo gPcRenderInfoStore = {};
 
 #include <cstdarg>
+#include <cstdint>
 #include <signal.h>
 #include <cstdio>
 #include <cstdlib>
@@ -728,82 +730,28 @@ extern "C" bool pc_ptr_in_game_arena(const void* p)
 
 // Fin de la región legible que contiene p (nullptr si p no es legible). Fuera
 // de la arena (side table: memoria del host que el juego pasa al GX) no hay
-// tamaño conocido, así que se pregunta al SO por el mapeo y se cachea.
-#if defined(_WIN32)
-static const u8* hostReadableEndUncached(const u8* p)
-{
-	const u8* end = nullptr;
-	MEMORY_BASIC_INFORMATION mbi;
-	for (const u8* q = p; VirtualQuery(q, &mbi, sizeof(mbi)) == sizeof(mbi); q = end) {
-		const DWORD prot = mbi.Protect & 0xFF;
-		const bool readable = mbi.State == MEM_COMMIT && !(mbi.Protect & PAGE_GUARD) && prot != PAGE_NOACCESS
-		                   && prot != PAGE_EXECUTE;
-		if (!readable)
-			break;
-		end = (const u8*)mbi.BaseAddress + mbi.RegionSize;
-	}
-	return end;
-}
-#else
-// Rangos [ini, fin) legibles de /proc/self/maps, fusionando los contiguos.
-static std::vector<std::pair<uintptr_t, uintptr_t>> sHostMaps;
-static void hostMapsRefresh()
-{
-	sHostMaps.clear();
-	FILE* f = fopen("/proc/self/maps", "r");
-	if (!f)
-		return;
-	char line[512];
-	while (fgets(line, sizeof(line), f)) {
-		unsigned long lo = 0, hi = 0;
-		char perms[8] = {};
-		if (sscanf(line, "%lx-%lx %7s", &lo, &hi, perms) != 3 || perms[0] != 'r')
-			continue;
-		if (!sHostMaps.empty() && sHostMaps.back().second == lo)
-			sHostMaps.back().second = hi;
-		else
-			sHostMaps.emplace_back(lo, hi);
-	}
-	fclose(f);
-}
-static const u8* hostMapsLookup(uintptr_t a)
-{
-	auto it = std::upper_bound(sHostMaps.begin(), sHostMaps.end(), a,
-	                           [](uintptr_t v, const std::pair<uintptr_t, uintptr_t>& r) { return v < r.first; });
-	if (it == sHostMaps.begin())
-		return nullptr;
-	--it;
-	return a < it->second ? (const u8*)it->second : nullptr;
-}
-static const u8* hostReadableEndUncached(const u8* p)
-{
-	// Los mapeos cambian (mmap/munmap de malloc): ante un fallo se relee.
-	if (const u8* end = hostMapsLookup((uintptr_t)p))
-		return end;
-	// Un puntero basura repetido no debe releer /proc en cada llamada.
-	static Uint32 sLastRefresh = 0;
-	const Uint32 now = SDL_GetTicks();
-	if (!sHostMaps.empty() && now - sLastRefresh < 50)
-		return nullptr;
-	sLastRefresh = now;
-	hostMapsRefresh();
-	return hostMapsLookup((uintptr_t)p);
-}
-#endif
-
-static std::mutex sHostMapsMutex;
-extern "C" const void* pc_host_readable_end(const void* p)
+// tamaño conocido, así que se pregunta al SO (pc_host_readable_os.cpp,
+// compartido con Pikmin 1; en macOS vía mach_vm_region, issue #45).
+static const void* hostReadableEnd(const void* p, size_t want)
 {
 	if (!p)
 		return nullptr;
 	if (pc_ptr_in_game_arena(p))
 		return (const u8*)sArenaBase + kArenaSize;
-	std::lock_guard<std::mutex> lock(sHostMapsMutex);
 	const bool prevHost = pc_host_alloc_active();
-	pc_host_alloc_set(true); // la cache vive toda la partida, fuera de los heaps JKR
-	const u8* end = hostReadableEndUncached((const u8*)p);
+	pc_host_alloc_set(true); // la cache de /proc vive toda la partida, fuera de los heaps JKR
+	const void* end = nullptr;
+	const PcHostReadable r = pc_host_os_readable_end(p, want, &end);
 	pc_host_alloc_set(prevHost);
-	return end;
+	// Unknown: el SO no se puede consultar; sin límite, como antes de #166.
+	if (r == PcHostReadable::Unknown)
+		return (const void*)UINTPTR_MAX;
+	return r == PcHostReadable::Yes ? end : nullptr;
+}
+
+extern "C" const void* pc_host_readable_end(const void* p)
+{
+	return hostReadableEnd(p, 0);
 }
 
 // Cuántos de `want` bytes desde p se pueden leer. En la GC el GPU leía de más
@@ -812,7 +760,7 @@ extern "C" const void* pc_host_readable_end(const void* p)
 // bloque y daría SIGSEGV.
 extern "C" size_t pc_host_readable_bytes(const void* p, size_t want)
 {
-	const u8* end = (const u8*)pc_host_readable_end(p);
+	const u8* end = (const u8*)hostReadableEnd(p, want);
 	if (!end)
 		return 0;
 	const size_t left = (size_t)(end - (const u8*)p);
