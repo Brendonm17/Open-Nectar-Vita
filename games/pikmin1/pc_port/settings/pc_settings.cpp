@@ -1756,11 +1756,15 @@ bool menuMouseNorm(float* nx, float* ny) {
 // Accept: Enter, numpad Enter, Space, left click, and a non-mouse A binding.
 // Cancel: Escape, Backspace, right click, and a B binding that is not Shift.
 // A text field keeps Backspace for delete and does not call menuCancelKey.
-bool menuOkKey() {
+// The accept keys without the left click, for a panel whose rows take the click themselves.
+bool menuOkKeyNoClick() {
     return keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_KP_ENTER)
-        || keyWentDown(SDL_SCANCODE_SPACE) || menuAcceptClick()
+        || keyWentDown(SDL_SCANCODE_SPACE)
         || menuBindingWentDown(pc_window_get_key_binding(PC_KEY_ACT_A))
         || menuBindingWentDown(pc_window_get_key_binding2(PC_KEY_ACT_A));
+}
+bool menuOkKey() {
+    return menuOkKeyNoClick() || menuAcceptClick();
 }
 static bool menuCancelBinding(int bind) {
     if (bind == SDL_SCANCODE_LSHIFT || bind == SDL_SCANCODE_RSHIFT) return false;
@@ -6352,7 +6356,8 @@ void pcVsRulesInput()
     bool down   = keyWentDown(SDL_SCANCODE_DOWN) || keyWentDown(SDL_SCANCODE_S);
     bool left   = keyWentDown(SDL_SCANCODE_LEFT) || keyWentDown(SDL_SCANCODE_A);
     bool right  = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D);
-    bool accept = menuOkKey();
+    // The rows hit-test the left click, so a click on a row cycles it and is not also A.
+    bool accept = menuOkKeyNoClick();
     bool cancel = menuCancelKey();
     cancel |= pc_menu_click_take_back(); // a right click backs out; a mouse press only
     up |= (sTouchFrameButtons & PAD_BUTTON_UP) != 0;
