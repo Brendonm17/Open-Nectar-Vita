@@ -100,6 +100,7 @@ public:
     bool choosePaths(const std::function<std::string()>& chooseRom,
                      const std::function<std::string()>& chooseInstallDirectory,
                      std::string& rom, std::string& installDirectory) override;
+    std::string runDialog(const std::function<std::string()>& dialog, const std::string& what) override;
     void updateProgress(std::uint32_t percent, const std::string& currentFile,
                         const std::string& phase = "Extracting") override;
     void showError(const std::string& message) override;

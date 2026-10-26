@@ -18,6 +18,17 @@ public:
     virtual bool choosePaths(const std::function<std::string()>& chooseRom,
                              const std::function<std::string()>& chooseInstallDirectory,
                              std::string& rom, std::string& installDirectory) = 0;
+    // Runs a native dialog (a platform::askFor* call or showMessage) without
+    // freezing the window: on a worker thread while the window keeps drawing
+    // and shows "Waiting for the <what>...". Returns what `dialog` returned,
+    // or empty if the window was closed meanwhile (the dialog is closed too).
+    // Never returns while the dialog runs, so `dialog` may capture locals by
+    // reference.
+    virtual std::string runDialog(const std::function<std::string()>& dialog, const std::string& what)
+    {
+        (void)what;
+        return dialog();
+    }
     // Percent > 100 means an indeterminate phase (external disc conversion).
     virtual void updateProgress(std::uint32_t percent, const std::string& currentFile,
                                 const std::string& phase = "Extracting") = 0;
@@ -39,6 +50,7 @@ public:
     bool choosePaths(const std::function<std::string()>& chooseRom,
                      const std::function<std::string()>& chooseInstallDirectory,
                      std::string& rom, std::string& installDirectory) override;
+    std::string runDialog(const std::function<std::string()>& dialog, const std::string& what) override;
     void updateProgress(std::uint32_t percent, const std::string& currentFile,
                         const std::string& phase = "Extracting") override;
     void showError(const std::string& message) override;

@@ -656,10 +656,11 @@ struct Hub {
     // inside a frame and run by HubWindow between frames.
     std::function<void()> betweenFrames;
 
-    // A file picker runs on its own thread so the window keeps drawing while
-    // the dialog is open. The worker only calls platform::askForFile and
-    // writes `path`; everything else stays on the main thread. The thread
-    // holds its own reference, so it may outlive the hub if the launcher quits.
+    // A file or folder picker runs on its own thread so the window keeps
+    // drawing while the dialog is open. The worker only calls the platform
+    // dialog and writes `path`; everything else stays on the main thread. The
+    // thread holds its own reference, so it may outlive the hub if the
+    // launcher quits (HubWindow then closes the dialog, see ~Impl).
     struct FilePick {
         std::atomic<bool> done { false };
         fs::path path; // written by the worker before `done`
@@ -672,23 +673,34 @@ struct Hub {
 
     bool filePickOpen() const { return filePick != nullptr; }
 
-    std::string filePickLabel(const std::string& owner, const char* label) const
+    std::string filePickLabel(const std::string& owner, const char* label,
+                              const char* waiting = "Waiting for file picker...") const
     {
-        return filePickFor == owner ? "Waiting for file picker..." : label;
+        return filePickFor == owner ? waiting : label;
     }
 
-    void startFilePick(std::string owner, std::string title, std::string filterName, std::string patterns,
-                       std::function<void(const fs::path&)> then)
+    // `dialog` runs on the worker, so it must only call the platform dialog
+    // with values it owns (no references into the hub).
+    void startPick(std::string owner, std::function<fs::path()> dialog, std::function<void(const fs::path&)> then)
     {
         if (filePick) return;
         filePick = std::make_shared<FilePick>();
         filePickFor = std::move(owner);
         filePickThen = std::move(then);
-        std::thread([pick = filePick, title = std::move(title), filterName = std::move(filterName),
-                     patterns = std::move(patterns)] {
-            pick->path = platform::askForFile(title, filterName, patterns);
+        std::thread([pick = filePick, dialog = std::move(dialog)] {
+            pick->path = dialog();
             pick->done.store(true, std::memory_order_release);
         }).detach();
+    }
+
+    void startFilePick(std::string owner, std::string title, std::string filterName, std::string patterns,
+                       std::function<void(const fs::path&)> then)
+    {
+        startPick(std::move(owner),
+                  [title = std::move(title), filterName = std::move(filterName), patterns = std::move(patterns)] {
+                      return platform::askForFile(title, filterName, patterns);
+                  },
+                  std::move(then));
     }
 
     // Called by HubWindow between frames, never inside hub->frame(): the
@@ -1666,14 +1678,16 @@ struct Hub {
         const bool running = jobState == MoveJob::Running;
         pathBox(ImVec2(inner, y + 28.0f), ImVec2(inner + innerW - 132.0f, y + 72.0f), moveTarget, "No folder chosen");
         ImGui::SetCursorScreenPos(ImVec2(inner + innerW - 120.0f, y + 28.0f));
-        if (glassButton("Browse", ImVec2(120.0f, 44.0f), false, running)) {
-            const fs::path chosen = platform::askForInstallDirectory();
-            if (!chosen.empty()) {
+        if (glassButton(filePickLabel("move", "Browse", "Waiting...").c_str(), ImVec2(120.0f, 44.0f), false,
+                        running || filePickOpen())) {
+            // Off the render thread, like the file pickers: the window keeps
+            // drawing while the folder chooser is open.
+            startPick("move", [] { return platform::askForInstallDirectory(); }, [this](const fs::path& chosen) {
                 fs::path target;
                 moveNote.clear();
                 if (resolveMoveTarget(chosen, target, moveNote)) moveTarget = target.string();
                 else moveTarget.clear();
-            }
+            });
         }
         y += 96.0f;
 
@@ -2123,9 +2137,15 @@ struct HubWindow::Impl {
     std::string messageTitle, messageText, primaryLabel, secondaryLabel, cancelLabel;
     bool messageIsError = false;
     int answer = -1; // 0 principal, 1 secundario
+    // Non-empty while waitForDialog() has a native dialog open: names it for
+    // the "Waiting for the ..." veil, and the window takes no input.
+    std::string dialogWaiting;
 
     ~Impl()
     {
+        // A picker the hub started may still be open on its worker; close it
+        // so it does not stay on screen after the launcher window is gone.
+        if (hub && hub->filePickOpen()) platform::cancelDialogs();
         if (!window) return;
         if (hub) hub->release();
         hub.reset();
@@ -2329,13 +2349,19 @@ struct HubWindow::Impl {
         ImGui::NewFrame();
         const ImVec2 size = ImGui::GetIO().DisplaySize;
         // While a file picker is open the hub keeps animating but takes no input.
-        hub->frame(size, t, dt, modal == Modal::None && !hub->filePickOpen());
+        const bool waiting = !dialogWaiting.empty();
+        hub->frame(size, t, dt, modal == Modal::None && !hub->filePickOpen() && !waiting);
+        // A native dialog from waitForDialog(): the modal stays visible but
+        // cannot be clicked, so no second dialog opens from inside a frame.
+        ImGui::BeginDisabled(waiting);
         switch (modal) {
         case Modal::None: break;
         case Modal::Paths: drawPaths(size); break;
         case Modal::Progress: drawProgress(size, t); break;
         case Modal::Message: drawMessage(size); break;
         }
+        ImGui::EndDisabled();
+        if (waiting) drawDialogVeil(size);
         ImGui::Render();
 
         int fbW = 0, fbH = 0;
@@ -2349,6 +2375,48 @@ struct HubWindow::Impl {
         // calls frame() itself, so it must not run inside hub->frame().
         hub->finishFilePick();
         hub->runBetweenFrames();
+    }
+
+    void drawDialogVeil(ImVec2 size)
+    {
+        ImDrawList* dl = ImGui::GetForegroundDrawList();
+        dl->AddRectFilled(ImVec2(0, 0), size, IM_COL32(2, 12, 4, 150));
+        const std::string text = "Waiting for the " + dialogWaiting + "...";
+        const ImVec2 textSize = hub->fonts.body->CalcTextSizeA(22.0f, FLT_MAX, 0.0f, text.c_str());
+        dl->AddText(hub->fonts.body, 22.0f, ImVec2((size.x - textSize.x) * 0.5f, size.y - textSize.y - 48.0f),
+                    col(kOrange), text.c_str());
+    }
+
+    // Runs a blocking native dialog on a worker thread and keeps drawing the
+    // window (dimmed, without input) until it returns. `what` names it for the
+    // veil ("disc image picker"). If the window is closed meanwhile, the
+    // dialog is closed too and this returns empty with quitRequested still
+    // set. It never returns while the dialog runs, so `dialog` may capture the
+    // caller's locals by reference. Only call it between frames.
+    std::string waitForDialog(const std::function<std::string()>& dialog, const std::string& what)
+    {
+        if (!dialogWaiting.empty()) return {}; // never two at once
+        std::atomic<bool> done { false };
+        std::string result;
+        dialogWaiting = what.empty() ? std::string("dialog") : what;
+        std::thread worker([&] {
+            result = dialog();
+            done.store(true, std::memory_order_release);
+        });
+        bool cancelled = false;
+        while (!done.load(std::memory_order_acquire)) {
+            frame();
+            if (quitRequested && !cancelled) {
+                // POSIX: ends the dialog process, so `done` follows quickly.
+                // Windows: the dialog belongs to this process; keep drawing
+                // until the player closes it, as nothing else can.
+                cancelled = true;
+                platform::cancelDialogs();
+            }
+        }
+        worker.join();
+        dialogWaiting.clear();
+        return quitRequested ? std::string() : result;
     }
 
     // Muestra un mensaje hasta que se pulsa un botón. -1 si se cierra la ventana.
@@ -2563,10 +2631,12 @@ bool HubWindow::choosePaths(const std::function<std::string()>& chooseRom,
             m.frame();
             if (m.quitRequested) return false;
             if (m.pathsAction == 1) {
-                const std::string selected = chooseRom();
+                const std::string selected = m.waitForDialog(chooseRom, "disc image picker");
+                if (m.quitRequested) return false;
                 if (!selected.empty()) m.rom = selected;
             } else if (m.pathsAction == 2) {
-                const std::string selected = chooseInstallDirectory();
+                const std::string selected = m.waitForDialog(chooseInstallDirectory, "folder picker");
+                if (m.quitRequested) return false;
                 if (!selected.empty()) m.installDirectory = selected;
             } else if (m.pathsAction == 3) {
                 rom = m.rom;
@@ -2588,6 +2658,11 @@ bool HubWindow::choosePaths(const std::function<std::string()>& chooseRom,
             }
         }
     }
+}
+
+std::string HubWindow::runDialog(const std::function<std::string()>& dialog, const std::string& what)
+{
+    return mImpl->waitForDialog(dialog, what);
 }
 
 void HubWindow::updateProgress(std::uint32_t percent, const std::string& currentFile, const std::string& phase)
