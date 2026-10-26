@@ -12,6 +12,12 @@
 #include <string>
 #include <vector>
 
+// Same prefix as the launcher's dialogs (launcher_platform_*.cpp).
+static std::string dialogTitle(const char* title)
+{
+    return std::string("Open Nectar - ") + title;
+}
+
 #if defined(_WIN32)
 #include <windows.h>
 #include <commdlg.h>
@@ -40,7 +46,7 @@ bool pc_file_dialog_open(const char* title, const char* filterName, const char* 
     filter += L"*.*";
     filter.push_back(L'\0');
     filter.push_back(L'\0');
-    std::wstring wtitle = widen(title);
+    std::wstring wtitle = widen(dialogTitle(title).c_str());
 
     std::vector<wchar_t> selected(32768, L'\0');
     OPENFILENAMEW dialog {};
@@ -92,18 +98,18 @@ bool pc_file_dialog_open(const char* title, const char* filterName, const char* 
     out[0] = '\0';
     std::string selected;
     if (commandExists("zenity")) {
-        selected = runDialog("zenity --file-selection " + shellQuote(std::string("--title=") + title) + " "
+        selected = runDialog("zenity --file-selection " + shellQuote("--title=" + dialogTitle(title)) + " "
                              + shellQuote(std::string("--file-filter=") + filterName + " | " + patterns)
                              + " --file-filter='All files | *' 2>/dev/null");
     } else if (commandExists("kdialog")) {
         selected = runDialog("kdialog --getopenfilename . " + shellQuote(std::string(patterns) + "|" + filterName)
-                             + " --title " + shellQuote(title) + " 2>/dev/null");
+                             + " --title " + shellQuote(dialogTitle(title)) + " 2>/dev/null");
     } else {
 #if defined(__APPLE__)
         // osascript ships with macOS. Cancel prints nothing, so it reads as
         // "no file chosen". The patterns are not passed (see chooseFileScript):
         // the caller checks the chosen file.
-        selected = runDialog(pc_dialog::osascriptCommand(pc_dialog::chooseFileScript(title)));
+        selected = runDialog(pc_dialog::osascriptCommand(pc_dialog::chooseFileScript(dialogTitle(title))));
 #else
         snprintf(out, outSize, "No file dialog: install zenity or kdialog.");
         return false;

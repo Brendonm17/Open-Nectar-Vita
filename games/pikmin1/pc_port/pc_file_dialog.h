@@ -5,6 +5,7 @@
 
 // Native "open file" dialog for the desktop builds: the shell dialog on
 // Windows, zenity or kdialog on Linux/BSD, osascript's chooser on macOS.
+// The title gets the same "Open Nectar - " prefix as the launcher's dialogs.
 // Blocks until the user answers.
 // `patterns` is a space-separated glob list ("*.zip *.rar"). Returns false
 // when cancelled or when no dialog is available (Linux without zenity/kdialog:
