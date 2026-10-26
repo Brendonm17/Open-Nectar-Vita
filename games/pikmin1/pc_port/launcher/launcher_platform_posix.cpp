@@ -49,6 +49,12 @@ std::string runDialog(const char* program, const std::vector<std::string>& args)
 {
     int pipeFds[2];
     if (pipe(pipeFds) != 0) return {};
+    // Build argv before fork: another launcher thread may hold the allocator
+    // lock, so the child must not allocate before exec.
+    std::vector<char*> argv;
+    argv.push_back(const_cast<char*>(program));
+    for (const std::string& arg : args) argv.push_back(const_cast<char*>(arg.c_str()));
+    argv.push_back(nullptr);
     const pid_t child = fork();
     if (child == 0) {
         dup2(pipeFds[1], STDOUT_FILENO);
@@ -61,10 +67,6 @@ std::string runDialog(const char* program, const std::vector<std::string>& args)
             close(nullFd);
         }
         close(pipeFds[0]); close(pipeFds[1]);
-        std::vector<char*> argv;
-        argv.push_back(const_cast<char*>(program));
-        for (const std::string& arg : args) argv.push_back(const_cast<char*>(arg.c_str()));
-        argv.push_back(nullptr);
         execvp(program, argv.data());
         _exit(127);
     }
@@ -165,8 +167,9 @@ void showMessage(const std::string& title, const std::string& message, bool erro
         return;
     }
 #if defined(__APPLE__)
-    // "activate" brings osascript's dialog in front of the launcher window.
-    runDialog("osascript", { "-e", "activate", "-e",
+    // No "activate": it adds about 2 s before the dialog shows, and the
+    // dialog already opens above the launcher window without it.
+    runDialog("osascript", { "-e",
         "display dialog " + appleScriptString(message) + " with title " + appleScriptString(title)
             + " buttons {\"OK\"} default button \"OK\" with icon " + (error ? "stop" : "note") });
     return;
@@ -244,9 +247,9 @@ fs::path askForFile(const std::string& title, const std::string& filterName, con
     }
 #if defined(__APPLE__)
     // No type filter, as in askForImage: callers validate the chosen file.
-    // "activate" brings osascript's dialog in front of the launcher window.
+    // No "activate" (see showMessage); the panel opens above the launcher.
     // Cancel makes osascript exit non-zero, which runDialog returns as empty.
-    return runDialog("osascript", { "-e", "activate", "-e",
+    return runDialog("osascript", { "-e",
         "POSIX path of (choose file with prompt " + appleScriptString("Open Nectar - " + title) + ")" });
 #else
     return {};

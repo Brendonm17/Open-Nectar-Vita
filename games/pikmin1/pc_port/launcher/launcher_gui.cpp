@@ -642,13 +642,55 @@ struct Hub {
                       const std::string&)>
         askModal;
     std::string gciNote;
-    // Set by the Import button; HubWindow::Impl::frame() runs the import after
-    // the frame is rendered, because the "Replace save?" modal runs its own
-    // frame loop and must not be entered from inside an ImGui window.
-    bool gciImportRequested = false;
 #endif
 
+    // A file picker runs on its own thread so the window keeps drawing while
+    // the dialog is open. The worker only calls platform::askForFile and
+    // writes `path`; everything else stays on the main thread. The thread
+    // holds its own reference, so it may outlive the hub if the launcher quits.
+    struct FilePick {
+        std::atomic<bool> done { false };
+        fs::path path; // written by the worker before `done`
+    };
+    std::shared_ptr<FilePick> filePick;
+    std::string filePickFor; // which button opened it, for its label
+    std::function<void(const fs::path&)> filePickThen;
+
     Hub(const HubState& s, HubResult& r) : state(s), result(r) {}
+
+    bool filePickOpen() const { return filePick != nullptr; }
+
+    std::string filePickLabel(const std::string& owner, const char* label) const
+    {
+        return filePickFor == owner ? "Waiting for file picker..." : label;
+    }
+
+    void startFilePick(std::string owner, std::string title, std::string filterName, std::string patterns,
+                       std::function<void(const fs::path&)> then)
+    {
+        if (filePick) return;
+        filePick = std::make_shared<FilePick>();
+        filePickFor = std::move(owner);
+        filePickThen = std::move(then);
+        std::thread([pick = filePick, title = std::move(title), filterName = std::move(filterName),
+                     patterns = std::move(patterns)] {
+            pick->path = platform::askForFile(title, filterName, patterns);
+            pick->done.store(true, std::memory_order_release);
+        }).detach();
+    }
+
+    // Called by HubWindow between frames, never inside hub->frame(): the
+    // continuation may open a modal, which runs its own frame loop.
+    void finishFilePick()
+    {
+        if (!filePick || !filePick->done.load(std::memory_order_acquire)) return;
+        const fs::path picked = filePick->path;
+        std::function<void(const fs::path&)> then = std::move(filePickThen);
+        filePick.reset();
+        filePickFor.clear();
+        filePickThen = nullptr;
+        if (!picked.empty() && then) then(picked);
+    }
 
 #if PIKMIN_LAUNCHER_NETPLAY
     // Online co-op panel (netplay builds of the game): the game runs as a
@@ -1048,9 +1090,10 @@ struct Hub {
         if (snap.texturePacks.empty()) ImGui::TextColored(ImVec4(0.62f, 0.58f, 0.44f, 1.0f), "No packs installed yet.");
         ImGui::EndDisabled();
         ImGui::Dummy(ImVec2(0, 10));
-        if (glassButton("Install a pack from a .zip", ImVec2(300.0f, 46.0f), false, busy)) {
-            const fs::path zip = platform::askForFile("Choose the texture pack zip", "Texture pack zip", "*.zip *.ZIP");
-            if (!zip.empty()) queue({ "--texpack-install", zip.string() }, "Installing the pack...");
+        if (glassButton(filePickLabel("texpack", "Install a pack from a .zip").c_str(), ImVec2(300.0f, 46.0f), false,
+                        busy || filePickOpen())) {
+            startFilePick("texpack", "Choose the texture pack zip", "Texture pack zip", "*.zip *.ZIP",
+                          [this](const fs::path& zip) { queue({ "--texpack-install", zip.string() }, "Installing the pack..."); });
         }
     }
 
@@ -1085,12 +1128,14 @@ struct Hub {
                 ImGui::TextColored(ImVec4(0.62f, 0.58f, 0.44f, 1.0f), "Not installed");
             }
             ImGui::SameLine(ImGui::GetContentRegionMax().x - buttonW);
-            if (glassButton(model.installed ? "Replace..." : "Install...", ImVec2(buttonW, 40.0f), false, busy)) {
-                const fs::path zip = platform::askForFile("Choose the zip for " + model.name, "Model zip", "*.zip *.ZIP");
-                if (!zip.empty()) {
-                    queue({ "--hdmodel-install", std::to_string(model.row), zip.string() },
-                                          "Converting the model...");
-                }
+            const std::string pickOwner = "model" + std::to_string(model.row);
+            if (glassButton(filePickLabel(pickOwner, model.installed ? "Replace..." : "Install...").c_str(),
+                            ImVec2(buttonW, 40.0f), false, busy || filePickOpen())) {
+                const int row = model.row;
+                startFilePick(pickOwner, "Choose the zip for " + model.name, "Model zip", "*.zip *.ZIP",
+                              [this, row](const fs::path& zip) {
+                                  queue({ "--hdmodel-install", std::to_string(row), zip.string() }, "Converting the model...");
+                              });
             }
             ImGui::PopID();
         }
@@ -1151,17 +1196,22 @@ struct Hub {
             gciNote = "Import needs a graphical file picker (zenity or kdialog on Linux).";
             return;
         }
-        const fs::path picked =
-            platform::askForFile("Import GameCube save", "GameCube save (.gci)", "*.gci *.GCI");
-        if (picked.empty()) return;
+        const int gameIndex = settingsGame;
+        startFilePick("gci", "Import GameCube save", "GameCube save (.gci)", "*.gci *.GCI",
+                      [this, gameIndex](const fs::path& picked) { importPickedGci(gameIndex, picked); });
+    }
 
+    // Runs between frames once the picker returns a file (see finishFilePick).
+    void importPickedGci(int gameIndex, const fs::path& picked)
+    {
+        const GameInstall& game = state.games[gameIndex];
+        const std::string discId = game.discId.empty() ? (gameIndex == 0 ? "GPIE01" : "GPVE01") : game.discId;
         ParsedGci parsed;
         std::string error;
         if (!parseGciFile(picked, parsed, error)) {
             gciNote = error;
             return;
         }
-        const std::string discId = game.discId.empty() ? (settingsGame == 0 ? "GPIE01" : "GPVE01") : game.discId;
         if (!gciMatchesInstalledGame(parsed.gameId, discId)) {
             gciNote = "This save is for " + parsed.gameId + ", but this install is " + discId + ".";
             return;
@@ -1203,7 +1253,9 @@ struct Hub {
         dl->AddText(fonts.body, 19.0f, ImVec2(panelA.x + 16.0f, panelA.y + 12.0f), col(kOrange),
                     "Bring a Dolphin or GameCube memory-card save into this install.");
         ImGui::SetCursorScreenPos(ImVec2(panelB.x - 296.0f, panelA.y + 34.0f));
-        if (glassButton("Import GameCube save (.gci)", ImVec2(280.0f, 40.0f))) gciImportRequested = true;
+        if (glassButton(filePickLabel("gci", "Import GameCube save (.gci)").c_str(), ImVec2(280.0f, 40.0f), false,
+                        filePickOpen()))
+            tryImportGciSave();
         if (!gciNote.empty()) {
             dl->AddText(fonts.caption, 16.0f, ImVec2(panelA.x + 16.0f, panelA.y + 52.0f),
                         col(ImVec4(1.0f, 0.55f, 0.40f, 1.0f)), gciNote.c_str(), nullptr, width - 32.0f);
@@ -2103,7 +2155,8 @@ struct HubWindow::Impl {
         }
         ImGui::NewFrame();
         const ImVec2 size = ImGui::GetIO().DisplaySize;
-        hub->frame(size, t, dt, modal == Modal::None);
+        // While a file picker is open the hub keeps animating but takes no input.
+        hub->frame(size, t, dt, modal == Modal::None && !hub->filePickOpen());
         switch (modal) {
         case Modal::None: break;
         case Modal::Paths: drawPaths(size); break;
@@ -2119,14 +2172,9 @@ struct HubWindow::Impl {
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         SDL_GL_SwapWindow(window);
-#ifndef __ANDROID__
-        // Between frames: the file picker blocks and the confirmation modal
-        // calls frame() itself, so neither may run inside hub->frame().
-        if (hub->gciImportRequested) {
-            hub->gciImportRequested = false;
-            hub->tryImportGciSave();
-        }
-#endif
+        // Between frames: what follows a picked file may open a modal, which
+        // calls frame() itself, so it must not run inside hub->frame().
+        hub->finishFilePick();
     }
 
     // Muestra un mensaje hasta que se pulsa un botón. -1 si se cierra la ventana.
