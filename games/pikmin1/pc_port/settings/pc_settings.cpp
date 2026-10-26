@@ -561,6 +561,11 @@ std::atomic<bool> sHdModelInstallActive{false};
 bool sHdModelRestartPrompt = false;
 int sTexturePacksSelection = 0;      // 0 = instalar, 1.. = packs instalados
 std::atomic<bool> sTexturePackPickerActive{false}; // picker abierto o extracción en curso (hilo Java)
+#ifndef __ANDROID__
+// Tags of the desktop file picker requests (pc_file_dialog). The picker stays
+// open across frames; pollFilePicker() handles its answer.
+enum : int { kPickTexturePack = 1, kPickNectarPack = 2, kPickHdModel = 100 /* + row */ };
+#endif
 std::atomic<int> sTexturePackInstallFiles{0};  // ficheros extraídos (hilo Java)
 // Mensaje de la última acción (instalación o aviso de sobremesa).
 bool sTexturePackRestartPrompt = false; // modal "reiniciar para aplicar"
@@ -2978,16 +2983,11 @@ void texturePacksRowAction(int row, const std::vector<std::string>& packs) {
             sTexturePackPickerActive = true;
             pc_texpack_android_open_picker();
 #else
-            // Desktop: native picker, then the zip is extracted into
+            // Desktop: native picker; the game keeps drawing while it is
+            // open. pollFilePicker() then extracts the zip into
             // Load/Textures with the same path rule as Android.
-            char chosen[4096];
-            if (pc_file_dialog_open("Choose the texture pack zip", "Texture pack zip", "*.zip *.ZIP", chosen, sizeof(chosen))) {
-                char msg[192];
-                const int written = pc_texpack_install_zip(chosen, msg, sizeof(msg));
-                texturePackNotice(written <= 0, msg);
-            } else if (chosen[0] != '\0') {
-                texturePackNotice(true, chosen); // no dialog available: says why
-            }
+            if (pc_file_dialog_begin(kPickTexturePack, "Choose the texture pack zip", "Texture pack zip", "*.zip *.ZIP"))
+                sTexturePackPickerActive = true;
 #endif
         }
         return;
@@ -3032,20 +3032,13 @@ void hdModelsRowAction(int row) {
     sHdModelInstallActive = true;
     pc_modelpack_android_open_picker(row);
 #else
-    // Desktop: native picker, then convert the chosen rip in place.
+    // Desktop: native picker; pollFilePicker() converts the chosen rip.
     static const char* kTitles[6] = {
         "Choose the Pikmin 3 Olimar zip", "Choose the Pikmin 2 Louie zip", "Choose the Pikmin 3 Louie zip",
         "Choose the Pikmin 3 Pikmin zip", "Choose the Pikmin 3 Bulborb zip", "Choose the Pikmin 3 Dwarf Bulborb zip",
     };
-    char chosen[4096];
-    if (pc_file_dialog_open(kTitles[row], "Model zip", "*.zip *.ZIP", chosen, sizeof(chosen))) {
-        char msg[192];
-        const int written = pc_hd_models_convert_file(chosen, row, msg, sizeof(msg));
-        texturePackNotice(written <= 0, msg);
-        if (written > 0) sHdModelRestartPrompt = true;
-    } else if (chosen[0] != '\0') {
-        texturePackNotice(true, chosen); // no dialog available: says why
-    }
+    if (row >= 0 && row < 6 && pc_file_dialog_begin(kPickHdModel + row, kTitles[row], "Model zip", "*.zip *.ZIP"))
+        sTexturePackPickerActive = true;
 #endif
         
 }
@@ -6778,18 +6771,12 @@ void pcMissionPromptInput()
         return;
     }
     if (sMissionScreen == MS_List && sMissionSavedDay == 0 && (erase || keyWentDown(SDL_SCANCODE_I))) {
-        // Importar un paquete (.nectarpack) con el diálogo del sistema.
-        char chosen[1024] = {};
-        if (pc_file_dialog_open("Import a .nectarpack", "Nectar pack", "*.nectarpack *.zip", chosen, sizeof(chosen))) {
-            std::string msg;
-            sMissionInfo.clear();
-            sMissionError.clear();
-            if (importPack(chosen, msg)) sMissionInfo = (pc_settings_get_language() == 3 ? "Instalado: " : "Installed: ") + msg;
-            else sMissionError = msg;
-            missionRescan(true);
-        } else if (chosen[0]) {
-            sMissionError = chosen; // sin diálogo disponible: el motivo
-        }
+        // Importar un paquete (.nectarpack) con el diálogo del sistema; la
+        // respuesta llega por pollFilePicker() sin parar el dibujo.
+#ifndef __ANDROID__
+        if (!pc_file_dialog_begin(kPickNectarPack, "Import a .nectarpack", "Nectar pack", "*.nectarpack *.zip"))
+            sMissionError = "A file picker is already open.";
+#endif
         return;
     }
     if (sMissionScreen == MS_Mods) {
@@ -8099,7 +8086,49 @@ void pc_settings_draw_achievement_toast(void) {
     (void)screenH;
 }
 
+#ifndef __ANDROID__
+// Answer of the desktop file picker (pc_file_dialog.h). Runs every frame,
+// menu open or not, so an answer is never lost when the menu was closed.
+static void pollFilePicker()
+{
+    int tag = 0;
+    bool chosen = false;
+    char path[4096];
+    if (pc_file_dialog_poll(&tag, &chosen, path, sizeof(path)) != PC_FILE_DIALOG_DONE) return;
+    if (tag == kPickNectarPack) {
+        if (chosen) {
+            std::string msg;
+            sMissionInfo.clear();
+            sMissionError.clear();
+            if (importPack(path, msg)) sMissionInfo = (pc_settings_get_language() == 3 ? "Instalado: " : "Installed: ") + msg;
+            else sMissionError = msg;
+            missionRescan(true);
+        } else if (path[0]) {
+            sMissionError = path; // sin diálogo disponible: el motivo
+        }
+        return;
+    }
+    sTexturePackPickerActive = false;
+    if (!chosen) {
+        if (path[0]) texturePackNotice(true, path); // no dialog available: says why
+        return;
+    }
+    char msg[192];
+    if (tag == kPickTexturePack) {
+        const int written = pc_texpack_install_zip(path, msg, sizeof(msg));
+        texturePackNotice(written <= 0, msg);
+    } else if (tag >= kPickHdModel && tag < kPickHdModel + 6) {
+        const int written = pc_hd_models_convert_file(path, tag - kPickHdModel, msg, sizeof(msg));
+        texturePackNotice(written <= 0, msg);
+        if (written > 0) sHdModelRestartPrompt = true;
+    }
+}
+#endif
+
 void pc_settings_draw(void) {
+#ifndef __ANDROID__
+    pollFilePicker();
+#endif
     if (!sMenuOpen) return;
     if (!gsys || !gsys->mDGXGfx) return;
     DGXGraphics* gfx = static_cast<DGXGraphics*>(gsys->mDGXGfx);

@@ -1150,6 +1150,14 @@ if(PIKMIN_BUILD_TESTS AND PIKMIN_BUILD_LAUNCHER)
         add_test(NAME launcher_dialog_test COMMAND launcher_dialog_test)
     endif()
 
+    # The game's file picker: title prefix, and opening, answering and closing
+    # the dialog process without blocking the frame loop.
+    if (NOT WIN32)
+        add_executable(pc_file_dialog_test pc_port/pc_file_dialog_test.cpp pc_port/pc_file_dialog.cpp)
+        target_compile_options(pc_file_dialog_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+        add_test(NAME pc_file_dialog_test COMMAND pc_file_dialog_test)
+    endif()
+
     if(PIKMIN_NETPLAY_BUILD)
         # Host Co-op / Join Co-op flow with a fake game.
         add_executable(launcher_coop_test pc_port/launcher/launcher_coop_test.cpp pc_port/launcher/launcher_coop.cpp)
