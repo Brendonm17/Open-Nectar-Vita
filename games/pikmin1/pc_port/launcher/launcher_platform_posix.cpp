@@ -81,6 +81,19 @@ std::string runDialog(const char* program, const std::vector<std::string>& args)
     return result;
 }
 
+#if defined(__APPLE__)
+// Quote text as an AppleScript string literal: escape backslashes and quotes.
+std::string appleScriptString(const std::string& text)
+{
+    std::string quoted = "\"";
+    for (const char c : text) {
+        if (c == '\\' || c == '"') quoted += '\\';
+        quoted += c;
+    }
+    return quoted + "\"";
+}
+#endif
+
 } // namespace
 
 fs::path executablePath()
@@ -151,6 +164,13 @@ void showMessage(const std::string& title, const std::string& message, bool erro
         runDialog("kdialog", { error ? "--error" : "--msgbox", message, "--title", title });
         return;
     }
+#if defined(__APPLE__)
+    // "activate" brings osascript's dialog in front of the launcher window.
+    runDialog("osascript", { "-e", "activate", "-e",
+        "display dialog " + appleScriptString(message) + " with title " + appleScriptString(title)
+            + " buttons {\"OK\"} default button \"OK\" with icon " + (error ? "stop" : "note") });
+    return;
+#endif
     std::cerr << title << ": " << message << '\n';
 }
 
@@ -222,7 +242,15 @@ fs::path askForFile(const std::string& title, const std::string& filterName, con
     if (commandExists("kdialog")) {
         return runDialog("kdialog", { "--getopenfilename", ".", patterns + "|" + filterName });
     }
+#if defined(__APPLE__)
+    // No type filter, as in askForImage: callers validate the chosen file.
+    // "activate" brings osascript's dialog in front of the launcher window.
+    // Cancel makes osascript exit non-zero, which runDialog returns as empty.
+    return runDialog("osascript", { "-e", "activate", "-e",
+        "POSIX path of (choose file with prompt " + appleScriptString("Open Nectar - " + title) + ")" });
+#else
     return {};
+#endif
 }
 
 fs::path findConverter()
