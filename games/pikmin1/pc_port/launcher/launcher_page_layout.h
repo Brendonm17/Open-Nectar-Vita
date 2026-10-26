@@ -103,4 +103,30 @@ inline GamesLayout fitGames(float windowW, float available, float rows, bool upd
     return out;
 }
 
+// Ajustes: filas arriba, caja de ayuda debajo. La caja cede primero (hasta dos
+// líneas) para que las filas conserven unas tres opciones; si ni así caben, se
+// oculta y las filas se quedan todo el alto.
+struct SettingsPanelFit {
+    float rowsH = 0.0f;
+    float helpH = 0.0f; // 0: sin caja de ayuda
+};
+
+inline constexpr float kSettingsHelpFull = 104.0f; // cuatro líneas
+inline constexpr float kSettingsHelpMin = 54.0f;   // dos líneas
+inline constexpr float kSettingsRowsComfort = 250.0f;
+inline constexpr float kSettingsRowsMin = 140.0f;
+inline constexpr float kSettingsGap = 12.0f;
+
+inline SettingsPanelFit fitSettingsPanel(float total)
+{
+    SettingsPanelFit out;
+    if (total - kSettingsGap - kSettingsHelpMin < kSettingsRowsMin) {
+        out.rowsH = std::max(1.0f, total);
+        return out;
+    }
+    out.helpH = std::clamp(total - kSettingsGap - kSettingsRowsComfort, kSettingsHelpMin, kSettingsHelpFull);
+    out.rowsH = total - kSettingsGap - out.helpH;
+    return out;
+}
+
 } // namespace pikmin::launcher

@@ -78,6 +78,25 @@ int main()
     check(near(logoHeightCap(699.99f), 118.0f) && near(logoHeightCap(600.0f), 84.0f), "logo shrinks below 700 px");
     check(near(logoHeightCap(300.0f), 56.0f), "logo minimum");
 
+    // Settings: the help box gives way first, then hides; rows never collapse.
+    SettingsPanelFit s = fitSettingsPanel(500.0f);
+    check(near(s.helpH, kSettingsHelpFull) && near(s.rowsH, 500.0f - 12.0f - 104.0f), "settings: roomy");
+    s = fitSettingsPanel(300.0f);
+    check(near(s.helpH, kSettingsHelpMin) && near(s.rowsH, 300.0f - 12.0f - 54.0f), "settings: help shrinks");
+    s = fitSettingsPanel(206.0f);
+    check(near(s.helpH, kSettingsHelpMin) && near(s.rowsH, kSettingsRowsMin), "settings: rows at their minimum");
+    s = fitSettingsPanel(200.0f);
+    check(s.helpH == 0.0f && near(s.rowsH, 200.0f), "settings: help hidden");
+    s = fitSettingsPanel(-40.0f);
+    check(s.helpH == 0.0f && s.rowsH >= 1.0f, "settings: never a zero or negative child height");
+    float lastRows = 0.0f;
+    for (float total = 206.0f; total <= 900.0f; total += 1.0f) {
+        s = fitSettingsPanel(total);
+        check(s.rowsH >= kSettingsRowsMin - 0.01f && s.rowsH + 0.01f >= lastRows, "settings: rows grow with the height");
+        check(near(s.rowsH + kSettingsGap + s.helpH, total), "settings: fills the space");
+        lastRows = s.rowsH;
+    }
+
     std::cout << "launcher_page_layout_test: ok\n";
     return 0;
 }

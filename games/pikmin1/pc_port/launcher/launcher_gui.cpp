@@ -1786,13 +1786,15 @@ struct Hub {
         const float panelX = margin + listW + 18.0f;
         const float panelW = size.x - margin - panelX;
         const float bottom = size.y - 64.0f;
-        const float helpH = 104.0f;
+        // Como en las páginas de un juego: en ventanas bajas la ayuda cede ante las filas.
+        const SettingsPanelFit panelFit = fitSettingsPanel(bottom - (top + 24.0f));
+        const float helpH = panelFit.helpH;
 
         ImGui::SetCursorScreenPos(ImVec2(margin, top + 24.0f));
         glassButton("Folders", ImVec2(listW, 40.0f), true);
 
         ImGui::SetCursorScreenPos(ImVec2(panelX, top + 24.0f));
-        ImGui::BeginChild("launcherRows", ImVec2(panelW, bottom - helpH - 12.0f - (top + 24.0f)), ImGuiChildFlags_Borders);
+        ImGui::BeginChild("launcherRows", ImVec2(panelW, panelFit.rowsH), ImGuiChildFlags_Borders);
         const float controlW = std::min(300.0f, panelW * 0.45f);
         const ImVec4 label(1.0f, 0.93f, 0.80f, 1.0f), dim(0.62f, 0.58f, 0.44f, 1.0f);
         ImGui::Dummy(ImVec2(0, 4));
@@ -1851,17 +1853,21 @@ struct Hub {
         }
 
         const ImVec2 a(panelX, bottom - helpH), b(panelX + panelW, bottom);
-        dl->AddRectFilled(a, b, IM_COL32(4, 22, 8, 215), 14.0f);
-        dl->AddRect(a, b, col(kOrangeDeep, 0.6f), 14.0f, 0, 1.5f);
-        std::string note = info.note;
-        ImVec4 noteColour(1.0f, 0.93f, 0.80f, 0.95f);
-        // While locked the reason stays first, even when hovering the row.
-        if (!help.empty()) note = info.canChange || note.empty() ? help : note + "\n" + help;
-        else if (!launcherMessage.empty()) {
-            note = launcherMessage;
-            if (launcherMessageIsError) noteColour = ImVec4(1.0f, 0.55f, 0.40f, 1.0f);
+        if (helpH > 0.0f) {
+            dl->AddRectFilled(a, b, IM_COL32(4, 22, 8, 215), 14.0f);
+            dl->AddRect(a, b, col(kOrangeDeep, 0.6f), 14.0f, 0, 1.5f);
+            std::string note = info.note;
+            ImVec4 noteColour(1.0f, 0.93f, 0.80f, 0.95f);
+            // While locked the reason stays first, even when hovering the row.
+            if (!help.empty()) note = info.canChange || note.empty() ? help : note + "\n" + help;
+            else if (!launcherMessage.empty()) {
+                note = launcherMessage;
+                if (launcherMessageIsError) noteColour = ImVec4(1.0f, 0.55f, 0.40f, 1.0f);
+            }
+            dl->PushClipRect(a, b, true);
+            dl->AddText(fonts.body, 19.0f, ImVec2(a.x + 16.0f, a.y + 8.0f), col(noteColour), note.c_str(), nullptr, panelW - 32.0f);
+            dl->PopClipRect();
         }
-        dl->AddText(fonts.body, 19.0f, ImVec2(a.x + 16.0f, a.y + 8.0f), col(noteColour), note.c_str(), nullptr, panelW - 32.0f);
     }
 
     void drawSettingsLocked(float top, ImVec2 size, float dt)
@@ -1899,9 +1905,10 @@ struct Hub {
         const float panelX = margin + listW + 18.0f;
         const float panelW = size.x - margin - panelX;
         const float bottom = size.y - 64.0f;
-        // Algunas opciones de desarrollo documentan varias teclas. Cuatro
-        // líneas caben completas aquí tanto en Pikmin 1 como en Pikmin 2.
-        const float helpH = 104.0f;
+        // Algunas opciones de desarrollo documentan varias teclas: con sitio
+        // caben cuatro líneas. En ventanas bajas la caja cede ante las filas.
+        const SettingsPanelFit panelFit = fitSettingsPanel(bottom - (top + 24.0f));
+        const float helpH = panelFit.helpH;
 
         // Grupos a la izquierda, como pestañas verticales. Tienen que acabar por
         // encima de "Reset all" con cualquier altura y número de páginas.
@@ -1959,7 +1966,7 @@ struct Hub {
 
         // Filas del grupo, con scroll.
         ImGui::SetCursorScreenPos(ImVec2(panelX, top + 24.0f));
-        ImGui::BeginChild("rows", ImVec2(panelW, bottom - helpH - 12.0f - (top + 24.0f)), ImGuiChildFlags_Borders);
+        ImGui::BeginChild("rows", ImVec2(panelW, panelFit.rowsH), ImGuiChildFlags_Borders);
         int pick[2] = { -1, -1 }; // fila y opción elegidas este fotograma
         std::string help;
         const SettingsGroup* shownGroup = settingsGroup < packsPage ? &groups[size_t(settingsGroup)] : nullptr;
@@ -2015,26 +2022,35 @@ struct Hub {
         }
         ImGui::EndChild();
 
-        // Barra de ayuda debajo.
+        // Barra de ayuda debajo (si cabe).
         const ImVec2 a(panelX, bottom - helpH), b(panelX + panelW, bottom);
-        dl->AddRectFilled(a, b, IM_COL32(4, 22, 8, 215), 14.0f);
-        dl->AddRect(a, b, col(kOrangeDeep, 0.6f), 14.0f, 0, 1.5f);
-        // Prioridad: trabajando, error, resultado de instalar, ayuda de la fila.
-        std::string note = help;
-        ImVec4 noteColour(1.0f, 0.93f, 0.80f, 0.95f);
-        if (busy) note = settings->busyLabel;
-        else if (!settings->error.empty()) { note = settings->error; noteColour = ImVec4(1.0f, 0.55f, 0.40f, 1.0f); }
+        if (helpH > 0.0f) {
+            dl->AddRectFilled(a, b, IM_COL32(4, 22, 8, 215), 14.0f);
+            dl->AddRect(a, b, col(kOrangeDeep, 0.6f), 14.0f, 0, 1.5f);
+            // Prioridad: trabajando, error, resultado de instalar, ayuda de la fila.
+            std::string note = help;
+            ImVec4 noteColour(1.0f, 0.93f, 0.80f, 0.95f);
+            if (busy) note = settings->busyLabel;
+            else if (!settings->error.empty()) { note = settings->error; noteColour = ImVec4(1.0f, 0.55f, 0.40f, 1.0f); }
 #ifndef __ANDROID__
-        else if (settingsGroup == savesPage && help.empty()) {
-            note = gciNote;
-            if (gciNoteIsError) noteColour = ImVec4(1.0f, 0.55f, 0.40f, 1.0f);
-        }
+            else if (settingsGroup == savesPage && help.empty()) {
+                note = gciNote;
+                if (gciNoteIsError) noteColour = ImVec4(1.0f, 0.55f, 0.40f, 1.0f);
+            }
 #endif
-        else if (!snap.message.empty() && help.empty() && messageGame == settingsGame && messageGroup == settingsGroup) {
-            note = snap.message;
-            if (snap.messageIsError) noteColour = ImVec4(1.0f, 0.55f, 0.40f, 1.0f);
+            else if (!snap.message.empty() && help.empty() && messageGame == settingsGame && messageGroup == settingsGroup) {
+                note = snap.message;
+                if (snap.messageIsError) noteColour = ImVec4(1.0f, 0.55f, 0.40f, 1.0f);
+            }
+            // Vacía, la caja explica para qué sirve en vez de quedarse en blanco.
+            if (note.empty() && shownGroup) {
+                note = "Hover a setting to see what it does.";
+                noteColour = ImVec4(0.62f, 0.58f, 0.44f, 1.0f);
+            }
+            dl->PushClipRect(a, b, true);
+            dl->AddText(fonts.body, 19.0f, ImVec2(a.x + 16.0f, a.y + 8.0f), col(noteColour), note.c_str(), nullptr, panelW - 32.0f);
+            dl->PopClipRect();
         }
-        dl->AddText(fonts.body, 19.0f, ImVec2(a.x + 16.0f, a.y + 8.0f), col(noteColour), note.c_str(), nullptr, panelW - 32.0f);
 
         if (pick[0] >= 0 && shownGroup) {
             queue({ "--settings-set", std::to_string(shownGroup->id), std::to_string(pick[0]),
