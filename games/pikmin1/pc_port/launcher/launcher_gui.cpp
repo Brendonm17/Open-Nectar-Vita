@@ -77,6 +77,9 @@ const ImVec4 kOrangeDeep = ImVec4(0.94f, 0.53f, 0.08f, 1.00f); // ~#F08714, el c
 const ImVec4 kLeaf       = ImVec4(0.24f, 0.60f, 0.26f, 1.00f);
 const ImVec4 kLeafBright = ImVec4(0.36f, 0.76f, 0.34f, 1.00f);
 const ImVec4 kLeafDark   = ImVec4(0.13f, 0.38f, 0.16f, 1.00f);
+// Grosor del borde de todos los controles: botones dibujados a mano y
+// desplegables de ImGui (FrameBorderSize).
+constexpr float kControlBorder = 2.0f;
 
 ImU32 col(const ImVec4& c, float alpha = 1.0f)
 {
@@ -218,7 +221,6 @@ struct GameArt {
     bool loaded = false;
     Texture worldMap;          // w_map: paisaje del mapa del mundo
     std::vector<Texture> logs; // *_snap: fotos de zona del diario de Olimar
-    Texture pill;              // w08_160: panel de cristal del HUD, para los botones
     Texture sparkle;           // sun_64: destello
 
     void load(const std::string& dataDirectory)
@@ -233,7 +235,6 @@ struct GameArt {
             Texture t = bti(name);
             if (t.valid()) logs.push_back(t);
         }
-        pill = bti("w08_160");
         sparkle = bti("sun_64");
         loaded = worldMap.valid() || !logs.empty();
     }
@@ -242,7 +243,6 @@ struct GameArt {
     {
         freeTexture(worldMap);
         for (Texture& t : logs) freeTexture(t);
-        freeTexture(pill);
         freeTexture(sparkle);
     }
 };
@@ -260,7 +260,7 @@ void applyTheme()
     s.ScrollbarRounding = 14.0f;
     s.WindowBorderSize = 0.0f;
     s.ChildBorderSize = 2.0f;
-    s.FrameBorderSize = 2.0f;
+    s.FrameBorderSize = kControlBorder;
     s.PopupBorderSize = 2.0f;
     s.FramePadding = ImVec2(16.0f, 9.0f);
     s.ItemSpacing = ImVec2(12.0f, 12.0f);
@@ -748,9 +748,28 @@ struct Hub {
         }
     }
 
-    // Botón de cristal como los del HUD del juego: la píldora w08_160 teñida
-    // de verde, partida en tres para que las esquinas no se deformen. Sin la
-    // textura, un degradado con brillo que imita el mismo cristal.
+    // Marco de cristal común a todo lo que el launcher dibuja a mano (botones,
+    // aviso de versión): relleno, brillo y borde comparten rectángulo y radio,
+    // así que el relleno nunca asoma por fuera del borde ni deja una segunda
+    // línea oscura dentro. El borde mide lo mismo que FrameBorderSize, para
+    // que case con los desplegables de ImGui.
+    void glassFrame(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 fill, ImU32 border, float glossAlpha)
+    {
+        const float h = b.y - a.y;
+        const float r = h * 0.5f;
+        const float inset = kControlBorder * 0.5f;
+        // El relleno acaba bajo el borde, no más allá.
+        dl->AddRectFilled(ImVec2(a.x + inset, a.y + inset), ImVec2(b.x - inset, b.y - inset), fill, r - inset);
+        // Brillo de cristal en la mitad de arriba, dentro del borde.
+        const float glossTop = a.y + kControlBorder + 1.0f;
+        const float glossBottom = a.y + h * 0.36f;
+        dl->AddRectFilled(ImVec2(a.x + r, glossTop), ImVec2(b.x - r, glossBottom),
+                          col(ImVec4(1.0f, 1.0f, 1.0f, glossAlpha)), (glossBottom - glossTop) * 0.5f);
+        dl->AddRect(a, b, border, r, 0, kControlBorder);
+    }
+
+    // Botón de cristal como los del HUD del juego. Todos los botones del
+    // launcher pasan por aquí, así que todos se ven igual.
     bool glassButton(const char* label, ImVec2 size, bool selected = false, bool disabled = false)
     {
         const ImVec2 at = ImGui::GetCursorScreenPos();
@@ -758,32 +777,15 @@ struct Hub {
         const bool hovered = ImGui::IsItemHovered() && !disabled;
         const bool held = ImGui::IsItemActive() && !disabled;
         if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        const ImVec2 b(at.x + size.x, at.y + size.y);
         const ImVec4 tint = disabled ? ImVec4(0.35f, 0.42f, 0.36f, 1.0f)
                           : held      ? kLeafDark
                           : hovered   ? kLeafBright
                           : selected  ? kLeaf
                                       : ImVec4(0.16f, 0.45f, 0.20f, 1.0f);
-        const float r = size.y * 0.5f;
-        if (art.pill.valid()) {
-            // La píldora es gris: el color lo pone el tinte. Tapas de 44 px de
-            // 160 de ancho, escaladas a la altura del botón.
-            dl->AddRectFilled(at, b, col(tint, 0.55f), r);
-            const float cap = size.y * 44.0f / 88.0f;
-            const float u = 44.0f / 160.0f;
-            const ImU32 tintU32 = col(ImVec4(std::min(1.0f, tint.x * 1.6f), std::min(1.0f, tint.y * 1.6f),
-                                             std::min(1.0f, tint.z * 1.6f), 1.0f));
-            const ImTextureID id = art.pill.imgui();
-            dl->AddImage(id, at, ImVec2(at.x + cap, b.y), ImVec2(0, 0), ImVec2(u, 1), tintU32);
-            dl->AddImage(id, ImVec2(at.x + cap, at.y), ImVec2(b.x - cap, b.y), ImVec2(u, 0), ImVec2(1 - u, 1), tintU32);
-            dl->AddImage(id, ImVec2(b.x - cap, at.y), b, ImVec2(1 - u, 0), ImVec2(1, 1), tintU32);
-        } else {
-            dl->AddRectFilled(at, b, col(tint, 0.9f), r);
-            dl->AddRectFilled(ImVec2(at.x + r * 0.6f, at.y + 3.0f), ImVec2(b.x - r * 0.6f, at.y + size.y * 0.45f),
-                              IM_COL32(255, 255, 255, disabled ? 18 : 48), r * 0.6f);
-        }
-        dl->AddRect(at, b, col(selected || hovered ? kOrange : kOrangeDeep, disabled ? 0.4f : 1.0f), r, 0, 2.0f);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImVec2 b(at.x + size.x, at.y + size.y);
+        glassFrame(dl, at, b, col(tint, 0.9f), col(selected || hovered ? kOrange : kOrangeDeep, disabled ? 0.4f : 1.0f),
+                   disabled ? 0.04f : 0.10f);
         centredText(dl, fonts.body, 21.0f, ImVec2(at.x + size.x * 0.5f, at.y + size.y * 0.5f),
                     col(kOrange, disabled ? 0.45f : 1.0f), label);
         return clicked && !disabled;
@@ -856,7 +858,10 @@ struct Hub {
             dl->AddImageRounded(covers[index].imgui(), a, b, uv0, uv1, tint, rounding);
         } else {
             // Sin portada todavía (descargando o sin conexión): tarjeta dibujada.
-            dl->AddRectFilledMultiColor(a, b, col(kLeaf), col(kLeaf), col(kLeafDark), col(kLeafDark));
+            // Todo redondeado: un degradado cuadrado asomaría por las esquinas
+            // del borde.
+            dl->AddRectFilled(a, b, col(kLeaf), rounding);
+            dl->AddRectFilled(ImVec2(a.x, (a.y + b.y) * 0.5f), b, col(kLeafDark, 0.6f), rounding, ImDrawFlags_RoundCornersBottom);
             dl->AddRectFilled(a, b, col(kLeafDark, 0.35f), rounding);
             drawFlower(dl, ImVec2(centre.x, centre.y - half.y * 0.25f), half.x * 0.35f, 5, IM_COL32(255, 255, 250, 255),
                        IM_COL32(255, 196, 40, 255), t * 0.2f);
@@ -1415,8 +1420,7 @@ struct Hub {
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const float pulse = 0.5f + 0.5f * std::sin(t * 3.0f);
         dl->AddRectFilled(ImVec2(a.x - 4, a.y - 4), ImVec2(b.x + 4, b.y + 4), col(kOrange, 0.10f + 0.12f * pulse), 24.0f);
-        dl->AddRectFilled(a, b, hovered ? col(kLeafBright) : col(kLeaf), 20.0f);
-        dl->AddRect(a, b, col(kOrange), 20.0f, 0, 2.5f);
+        glassFrame(dl, a, b, hovered ? col(kLeafBright) : col(kLeaf), col(kOrange), 0.10f);
         dl->AddText(fonts.body, 19.0f, ImVec2(a.x + 20.0f, a.y + (b.y - a.y - 19.0f) * 0.5f), col(ImVec4(1.0f, 0.93f, 0.80f, 1.0f)),
                     text.c_str());
         if (clicked) choose(HubAction::Update, HubGame::Pikmin1);
