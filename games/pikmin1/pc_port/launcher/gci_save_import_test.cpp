@@ -7,6 +7,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -42,6 +43,146 @@ std::vector<std::uint8_t> makeSyntheticGci()
     file[kGciHeaderSize] = 0xAB;
     file[kGciHeaderSize + 1] = 0xCD;
     return file;
+}
+
+std::vector<std::uint8_t> readAll(const fs::path& path)
+{
+    std::ifstream in(path, std::ios::binary);
+    return std::vector<std::uint8_t>((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+pikmin::launcher::ParsedGci withFirstByte(pikmin::launcher::ParsedGci gci, std::uint8_t value)
+{
+    gci.payload[0] = value;
+    return gci;
+}
+
+bool hasTempFiles(const fs::path& card0)
+{
+    std::error_code ec;
+    for (const auto& entry : fs::directory_iterator(card0, ec))
+        if (entry.path().filename().string().rfind(".tmp_", 0) == 0) return true;
+    return false;
+}
+
+#define CHECK(cond, msg)                                   \
+    do {                                                   \
+        if (!(cond)) {                                     \
+            std::fprintf(stderr, "FAIL: %s\n", msg);       \
+            ++failures;                                    \
+        }                                                  \
+    } while (0)
+
+// Backups, restore, atomic writes and pruning, on a card of its own.
+int backupTests(const pikmin::launcher::ParsedGci& parsed)
+{
+    namespace L = pikmin::launcher;
+    int failures = 0;
+    std::error_code ec;
+    const fs::path root = fs::temp_directory_path() / "gci_backup_test";
+    fs::remove_all(root, ec);
+    const fs::path card0 = root / "save" / "card0";
+    const fs::path data = card0 / "Pikmin dataFile";
+    const fs::path meta = card0 / ".meta_Pikmin dataFile";
+    std::string error;
+
+    CHECK(L::cardBackupRoot(card0) == root / "save" / "card0-backups", "backup root is beside card0");
+    CHECK(L::cardBackupRoot(root / "save" / "card0" / "") == root / "save" / "card0-backups",
+          "backup root with trailing slash");
+
+    // First import: nothing to back up.
+    L::CardBackup made;
+    CHECK(L::importGciToCard(parsed, card0, false, error, &made), "first import");
+    CHECK(made.dir.empty() && L::listCardBackups(card0).empty(), "no backup when card was empty");
+    const std::vector<std::uint8_t> firstData = readAll(data), firstMeta = readAll(meta);
+
+    // Overwrite: the old bytes go to a backup outside card0.
+    CHECK(L::importGciToCard(withFirstByte(parsed, 0x11), card0, true, error, &made), "overwrite import");
+    std::vector<L::CardBackup> backups = L::listCardBackups(card0);
+    CHECK(backups.size() == 1 && !made.dir.empty() && backups[0].dir == made.dir, "overwrite made one backup");
+    CHECK(made.dir.parent_path() == L::cardBackupRoot(card0), "backup lives in card0-backups");
+    CHECK(readAll(made.dir / "Pikmin dataFile") == firstData, "backup holds the old data bytes");
+    CHECK(readAll(made.dir / ".meta_Pikmin dataFile") == firstMeta, "backup holds the old meta bytes");
+    CHECK(readAll(data)[0] == 0x11, "card has the new save");
+    CHECK(!hasTempFiles(card0), "no temp files after overwrite");
+
+    // Failures before the swap leave the card exactly as it was, with no
+    // partial files and no new backup.
+    const std::vector<std::uint8_t> beforeData = readAll(data), beforeMeta = readAll(meta);
+    for (const L::CardWriteStep step : { L::CardWriteStep::WriteData, L::CardWriteStep::WriteMeta,
+                                         L::CardWriteStep::Backup, L::CardWriteStep::RenameData,
+                                         L::CardWriteStep::RenameMeta }) {
+        const std::size_t backupsBefore = L::listCardBackups(card0).size();
+        L::failNextCardWriteForTesting(step);
+        std::string failed;
+        CHECK(!L::importGciToCard(withFirstByte(parsed, 0x22), card0, true, failed), "injected failure reported");
+        CHECK(!failed.empty(), "injected failure has a message");
+        CHECK(readAll(data) == beforeData && readAll(meta) == beforeMeta, "failed write left the old save intact");
+        CHECK(!hasTempFiles(card0), "failed write left no temp files");
+        const std::size_t backupsAfter = L::listCardBackups(card0).size();
+        const bool swapStep = step == L::CardWriteStep::RenameData || step == L::CardWriteStep::RenameMeta;
+        CHECK(swapStep ? backupsAfter <= backupsBefore + 1 : backupsAfter == backupsBefore,
+              "failed write before the swap made no backup");
+        L::failNextCardWriteForTesting(L::CardWriteStep::None);
+    }
+
+    // Restore: puts the newest backup back and backs up what was on the card.
+    const std::vector<std::uint8_t> currentData = readAll(data);
+    const L::CardBackup newest = L::listCardBackups(card0).front();
+    const std::vector<std::uint8_t> newestData = readAll(newest.dir / "Pikmin dataFile");
+    L::CardBackup from;
+    std::string restoredName;
+    CHECK(L::restoreLatestCardBackup(card0, error, &from, &restoredName), "restore");
+    CHECK(from.dir == newest.dir && restoredName == "Pikmin dataFile", "restore used the newest backup");
+    CHECK(readAll(data) == newestData, "restore brought back the backed-up bytes");
+    backups = L::listCardBackups(card0);
+    CHECK(!backups.empty() && readAll(backups.front().dir / "Pikmin dataFile") == currentData,
+          "restore backed up the save it replaced");
+    CHECK(!hasTempFiles(card0), "no temp files after restore");
+
+    // Restore of the very first backup brings back the original bytes.
+    {
+        const fs::path solo = root / "solo" / "card0";
+        CHECK(L::importGciToCard(parsed, solo, false, error), "solo import");
+        const std::vector<std::uint8_t> original = readAll(solo / "Pikmin dataFile");
+        CHECK(L::importGciToCard(withFirstByte(parsed, 0x33), solo, true, error), "solo overwrite");
+        CHECK(L::restoreLatestCardBackup(solo, error), "solo restore");
+        CHECK(readAll(solo / "Pikmin dataFile") == original, "solo restore has the original bytes");
+        const std::vector<L::CardBackup> soloBackups = L::listCardBackups(solo);
+        CHECK(soloBackups.size() == 2 && readAll(soloBackups.front().dir / "Pikmin dataFile")[0] == 0x33,
+              "solo restore can be undone");
+        CHECK(L::restoreLatestCardBackup(solo, error) && readAll(solo / "Pikmin dataFile")[0] == 0x33,
+              "undoing a restore");
+    }
+
+    // Pruning keeps the newest five.
+    for (int i = 0; i < 8; ++i)
+        CHECK(L::importGciToCard(withFirstByte(parsed, static_cast<std::uint8_t>(0x40 + i)), card0, true, error),
+              "repeated import");
+    backups = L::listCardBackups(card0);
+    CHECK(backups.size() == static_cast<std::size_t>(L::kCardBackupKeep), "pruned to five backups");
+    CHECK(!backups.empty() && readAll(backups.front().dir / "Pikmin dataFile")[0] == 0x46,
+          "newest backup is the save just replaced");
+    CHECK(!backups.empty() && readAll(backups.back().dir / "Pikmin dataFile")[0] == 0x42,
+          "oldest kept backup is the fifth newest");
+
+    // Labels and stray folders.
+    {
+        const fs::path labelCard = root / "label" / "card0";
+        fs::create_directories(L::cardBackupRoot(labelCard) / "20261025-203700", ec);
+        fs::create_directories(L::cardBackupRoot(labelCard) / "20260102-000500-01", ec);
+        fs::create_directories(L::cardBackupRoot(labelCard) / "not-a-backup", ec);
+        const std::vector<L::CardBackup> labels = L::listCardBackups(labelCard);
+        CHECK(labels.size() == 2, "only dated folders count as backups");
+        CHECK(labels.size() == 2 && L::describeBackupTime(labels[0]) == "Oct 25, 8:37 PM", "PM label");
+        CHECK(labels.size() == 2 && L::describeBackupTime(labels[1]) == "Jan 2, 12:05 AM", "midnight label");
+        std::string none;
+        CHECK(!L::restoreLatestCardBackup(root / "empty" / "card0", none) && !none.empty(),
+              "restore without backups fails cleanly");
+    }
+
+    fs::remove_all(root, ec);
+    return failures;
 }
 
 } // namespace
@@ -144,6 +285,8 @@ int main()
         }
         fs::remove_all(scenario, ec);
     }
+
+    failures += backupTests(parsed);
 
     fs::remove_all(root, ec);
     if (failures == 0) std::printf("gci_save_import_test: PASS\n");

@@ -649,7 +649,11 @@ struct Hub {
     bool savesFolderExists = false;
     int savesStatusGame = -1;
     float savesStatusAge = 0.0f;
+    std::string savesBackupTime; // newest backup, "Oct 25, 8:37 PM"; empty when none
 #endif
+    // Work that may open a modal (which runs its own frame loop), queued from
+    // inside a frame and run by HubWindow between frames.
+    std::function<void()> betweenFrames;
 
     // A file picker runs on its own thread so the window keeps drawing while
     // the dialog is open. The worker only calls platform::askForFile and
@@ -697,6 +701,13 @@ struct Hub {
         filePickFor.clear();
         filePickThen = nullptr;
         if (!picked.empty() && then) then(picked);
+    }
+
+    void runBetweenFrames()
+    {
+        std::function<void()> work = std::move(betweenFrames);
+        betweenFrames = nullptr;
+        if (work) work();
     }
 
 #if PIKMIN_LAUNCHER_NETPLAY
@@ -1240,28 +1251,69 @@ struct Hub {
         }
 
         const fs::path card0 = card0DirectoryForInstall(fs::path(game.directory));
-        const fs::path dataPath = card0 / parsed.saveFileName;
+        std::error_code ec;
         bool overwrite = false;
-        if (fs::exists(dataPath)) {
+        if (fs::exists(card0 / parsed.saveFileName, ec) || fs::exists(card0 / (".meta_" + parsed.saveFileName), ec)) {
             if (!askModal) {
                 setGciNote("A save already exists; the launcher could not show a confirmation dialog.", true);
                 return;
             }
-            const std::string prompt = "A save named \"" + parsed.saveFileName
-                                       + "\" is already on the memory card.\n\nReplace it with the imported file?";
-            const int answer = askModal("Replace save?", prompt, "Replace", "", false, "Cancel");
+            // One file holds every slot and the options, in both games.
+            const std::string prompt =
+                "Importing replaces all save slots and options on this install's memory card with the ones in the "
+                ".gci file.\n\nYour current save is backed up first, and you can bring it back from this page with "
+                "\"Restore previous save\".";
+            const int answer = askModal("Replace your save?", prompt, "Replace", "", false, "Cancel");
             if (answer != 0) return;
             overwrite = true;
         }
-        if (!importGciToCard(parsed, card0, overwrite, error)) {
+        CardBackup backup;
+        if (!importGciToCard(parsed, card0, overwrite, error, &backup)) {
             setGciNote(error, true);
             return;
         }
-        setGciNote("Imported \"" + parsed.saveFileName + "\" to the memory card. It will appear on the file select screen.",
-                   false);
-        toast = gciNote;
+        toast = "Imported \"" + parsed.saveFileName + "\" to the memory card. It will appear on the file select screen.";
         toastTime = 4.5f;
+        setGciNote(backup.dir.empty() ? toast : toast + " Your previous save was backed up.", false);
         savesStatusGame = -1; // re-read the card on the next frame
+    }
+
+    void tryRestoreSave()
+    {
+        gciNote.clear();
+        const int gameIndex = settingsGame;
+        betweenFrames = [this, gameIndex] { restorePreviousSave(gameIndex); };
+    }
+
+    // Runs between frames (see runBetweenFrames): it asks first.
+    void restorePreviousSave(int gameIndex)
+    {
+        const fs::path card0 = card0DirectoryForInstall(fs::path(state.games[gameIndex].directory));
+        const std::vector<CardBackup> backups = listCardBackups(card0);
+        if (backups.empty()) {
+            setGciNote("There is no backup to restore.", true);
+            return;
+        }
+        const std::string when = describeBackupTime(backups.front());
+        if (!askModal) {
+            setGciNote("The launcher could not show a confirmation dialog.", true);
+            return;
+        }
+        const std::string prompt =
+            "This puts back the save that was backed up on " + when
+            + ", replacing all save slots and options on this install's memory card.\n\nYour current save is "
+              "backed up first, so you can undo this with \"Restore previous save\".";
+        const int answer = askModal("Restore previous save?", prompt, "Restore", "", false, "Cancel");
+        if (answer != 0) return;
+        std::string error;
+        if (!restoreLatestCardBackup(card0, error)) {
+            setGciNote(error, true);
+            return;
+        }
+        toast = "Restored the save from " + when + ". It will appear on the file select screen.";
+        toastTime = 4.5f;
+        setGciNote(toast + " The save it replaced was backed up.", false);
+        savesStatusGame = -1;
     }
 
     // One line about this game's memory card: which save files are on it.
@@ -1272,10 +1324,13 @@ struct Hub {
         savesStatusGame = settingsGame;
         savesStatusAge = 0.0f;
         savesStatus.clear();
+        savesBackupTime.clear();
         savesFolderExists = false;
         const GameInstall& game = state.games[settingsGame];
         if (game.directory.empty()) return;
         const fs::path card0 = card0DirectoryForInstall(fs::path(game.directory));
+        const std::vector<CardBackup> backups = listCardBackups(card0);
+        if (!backups.empty()) savesBackupTime = describeBackupTime(backups.front());
         std::error_code ec;
         std::vector<std::string> names;
         if (fs::is_directory(card0, ec)) {
@@ -1285,13 +1340,11 @@ struct Hub {
                 if (!name.empty() && name[0] != '.' && entry.is_regular_file(ec)) names.push_back(name);
             }
         }
-        std::sort(names.begin(), names.end());
-        if (names.empty()) {
-            savesStatus = "No save on the memory card yet.";
-            return;
-        }
-        savesStatus = "On the memory card: ";
-        for (size_t i = 0; i < names.size(); ++i) savesStatus += (i ? ", \"" : "\"") + names[i] + "\"";
+        const char* gameName = settingsGame == 0 ? "Pikmin" : "Pikmin 2";
+        savesStatus = names.empty()
+                          ? "No save yet. An imported save will appear on the file select screen."
+                          : std::string("You already have a ") + gameName
+                                + " save. Importing will ask before replacing it.";
     }
 
     void openSaveFolder()
@@ -1335,6 +1388,26 @@ struct Hub {
             tryImportGciSave();
         ImGui::SameLine(0.0f, 12.0f);
         if (glassButton("Open save folder", ImVec2(200.0f, 46.0f), false, !savesFolderExists)) openSaveFolder();
+
+        ImGui::Dummy(ImVec2(0, 18));
+        ImGui::PushFont(fonts.caption);
+        ImGui::TextColored(kOrangeDeep, "BACKUPS");
+        ImGui::PopFont();
+        ImGui::Separator();
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextColored(ImVec4(0.62f, 0.58f, 0.44f, 1.0f),
+                           "Before a save is replaced, the old one is copied to a card0-backups folder next to the "
+                           "memory card. The newest %d are kept.",
+                           kCardBackupKeep);
+        ImGui::PopTextWrapPos();
+        if (savesBackupTime.empty()) return;
+        ImGui::Dummy(ImVec2(0, 10));
+        const float rowY = ImGui::GetCursorPosY();
+        if (glassButton("Restore previous save", ImVec2(300.0f, 46.0f), false, busy || filePickOpen()))
+            tryRestoreSave();
+        ImGui::SameLine(0.0f, 14.0f);
+        ImGui::SetCursorPosY(rowY + (46.0f - ImGui::GetTextLineHeight()) * 0.5f);
+        ImGui::TextColored(ImVec4(0.62f, 0.58f, 0.44f, 1.0f), "Backed up %s", savesBackupTime.c_str());
     }
 #endif
 
@@ -2265,6 +2338,7 @@ struct HubWindow::Impl {
         // Between frames: what follows a picked file may open a modal, which
         // calls frame() itself, so it must not run inside hub->frame().
         hub->finishFilePick();
+        hub->runBetweenFrames();
     }
 
     // Muestra un mensaje hasta que se pulsa un botón. -1 si se cierra la ventana.

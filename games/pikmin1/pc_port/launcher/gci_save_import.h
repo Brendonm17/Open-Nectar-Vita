@@ -76,9 +76,48 @@ std::filesystem::path card0DirectoryForInstall(const std::filesystem::path& game
 
 GciCardMeta metaFromGci(const ParsedGci& gci);
 
-// Writes <card0>/<saveFileName> and .meta_<saveFileName>. Replaces existing files when overwrite is true.
+// How many dated backups to keep in <save root>/card0-backups.
+constexpr int kCardBackupKeep = 5;
+
+// One backup folder, <save root>/card0-backups/<YYYYMMDD-HHMMSS>[-NN]. The
+// name is the local time the backup was made.
+struct CardBackup {
+    std::filesystem::path dir;
+    std::string name;
+    int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+};
+
+// Next to card0, never inside it, so the game's card layer never lists it.
+std::filesystem::path cardBackupRoot(const std::filesystem::path& card0Dir);
+
+// Backups for this card, newest first.
+std::vector<CardBackup> listCardBackups(const std::filesystem::path& card0Dir);
+
+// "Oct 25, 8:37 PM" (the local time in the backup's name).
+std::string describeBackupTime(const CardBackup& backup);
+
+// Copies <card0>/<saveFileName> and its .meta_ file (whichever exist) into a
+// new dated backup folder, then prunes to kCardBackupKeep. Does nothing and
+// returns true when neither file exists. `made` gets the new folder.
+bool backupCardSave(const std::filesystem::path& card0Dir, const std::string& saveFileName, std::string& error,
+                    CardBackup* made = nullptr);
+
+// Writes <card0>/<saveFileName> and .meta_<saveFileName>. Both are written to
+// .tmp_ names in card0 first; only when both are complete is the existing pair
+// backed up and the new pair renamed into place. On failure the old save is
+// left as it was. `overwrite` false refuses to replace an existing save.
 bool importGciToCard(const ParsedGci& gci, const std::filesystem::path& card0Dir, bool overwrite,
-                     std::string& error);
+                     std::string& error, CardBackup* backupMade = nullptr);
+
+// Puts the newest backup back on the card the same way, backing up the
+// current save first so the restore can be undone. `restoredFrom` gets the
+// backup that was put back, `restoredName` the save file's name.
+bool restoreLatestCardBackup(const std::filesystem::path& card0Dir, std::string& error,
+                             CardBackup* restoredFrom = nullptr, std::string* restoredName = nullptr);
+
+// Test hook: make the next card write fail at `step`.
+enum class CardWriteStep { None, WriteData, WriteMeta, Backup, RenameData, RenameMeta };
+void failNextCardWriteForTesting(CardWriteStep step);
 
 } // namespace launcher
 } // namespace pikmin
