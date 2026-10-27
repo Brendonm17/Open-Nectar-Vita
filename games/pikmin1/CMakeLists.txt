@@ -397,6 +397,7 @@ set(PC_PORT_SOURCES
     src/jaudio/pikiseq.c
     pc_port/dolphin_stubs/os_stubs.cpp
     pc_port/dolphin_stubs/pc_host_readable.cpp
+    pc_port/dolphin_stubs/pc_host_readable_os.cpp
     pc_port/dolphin_stubs/gx_stubs.cpp
     pc_port/dolphin_stubs/dvd_stubs.cpp
     pc_port/dolphin_stubs/pad_stubs.cpp
@@ -1266,6 +1267,15 @@ if(PIKMIN_BUILD_TESTS)
     target_include_directories(pc_menu_repeat_test PRIVATE pc_port)
     target_compile_options(pc_menu_repeat_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
     add_test(NAME pc_menu_repeat_test COMMAND pc_menu_repeat_test)
+
+    # Readable host memory for the GX bounds (issue #45: macOS has no /proc)
+    add_executable(pc_host_readable_test
+        pc_port/dolphin_stubs/pc_host_readable_test.cpp
+        pc_port/dolphin_stubs/pc_host_readable.cpp
+        pc_port/dolphin_stubs/pc_host_readable_os.cpp)
+    target_compile_definitions(pc_host_readable_test PRIVATE PC_HOST_READABLE_TEST_P1)
+    target_compile_options(pc_host_readable_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+    add_test(NAME pc_host_readable_test COMMAND pc_host_readable_test)
 
     # Host software DSP test (not linked into main game)
     add_executable(pc_dsp_host_test

@@ -389,6 +389,7 @@ if(PIKMIN2_ENABLE_PORT_LAYER)
         ${PC_PORT_DIR}/dolphin_stubs/pc_thp.cpp
         ${PC_PORT_DIR}/dolphin_stubs/card_stubs.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/../pikmin1/pc_port/dolphin_stubs/pc_card_save_root.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../pikmin1/pc_port/dolphin_stubs/pc_host_readable_os.cpp
         ${PC_PORT_DIR}/dolphin_stubs/p2_cpp_link.cpp
         ${PC_PORT_DIR}/audio/pc_aram.cpp
         ${PC_PORT_DIR}/audio/pc_dsp_host.cpp
@@ -560,6 +561,11 @@ if(PIKMIN2_ENABLE_PORT_LAYER)
             set(P2_HOST_TEST_TARGETS ${P2_HOST_TEST_TARGETS} ${target} PARENT_SCOPE)
         endfunction()
 
+        # Readable host memory for the GX bounds (issue #45: macOS has no /proc)
+        pikmin2_add_host_test(p2_host_readable_test
+            ${CMAKE_CURRENT_SOURCE_DIR}/../pikmin1/pc_port/dolphin_stubs/pc_host_readable_test.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/../pikmin1/pc_port/dolphin_stubs/pc_host_readable_os.cpp
+        )
         pikmin2_add_host_test(p2_randomizer_test
             ${PC_PORT_DIR}/randomizer/pc_randomizer_test.cpp
             ${PC_PORT_DIR}/randomizer/pc_randomizer.cpp
