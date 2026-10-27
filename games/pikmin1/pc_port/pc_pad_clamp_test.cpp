@@ -3,8 +3,11 @@
  * @brief Checks GameCube PADClamp on already-scaled stick bytes.
  *
  * No window and no controller. The vectors are the integer results of
- * src/pad/Padclamp.c (dead zone 15, stick octagon 72/40, C-stick 59/31,
- * triggers 30..180 then shifted by 30).
+ * src/pad/Padclamp.c (dead zone 15, stick octagon 72 cardinal and a PC
+ * diagonal corner of 46, C-stick 59/31, triggers 30..180 then shifted by
+ * 30). The original GameCube diagonal corner is 40, about 0.789 of a run.
+ * Corner 46 is the smallest one where every full-rim angle still snaps to
+ * a full run, including a keyboard diagonal and a stick diagonal.
  *
  * The run and swarm checks then apply the game's own stick math to those
  * bytes: Controller divides by 74, Navi::makeVelocity caps each main-stick
@@ -213,13 +216,15 @@ int main()
 	    // 87 - 15 = 72, so this raw tilt already sits on the cap.
 	    {"stick at cap edge", 87, 0, 0, 0, 72, 0, 0, 0, 0, 0, 0, 0},
 	    {"stick one below cap", 86, 0, 0, 0, 71, 0, 0, 0, 0, 0, 0, 0},
-	    // Equal axes take the diagonal corner (xyStick 40).
-	    {"stick diagonal", 127, 127, 0, 0, 40, 40, 0, 0, 0, 0, 0, 0},
-	    {"stick diagonal signs", -127, 127, 0, 0, -40, 40, 0, 0, 0, 0, 0, 0},
-	    // First octagon branch: (90,20) -> (75,5) -> (68,4).
-	    {"stick octagon x-major", 90, 20, 0, 0, 68, 4, 0, 0, 0, 0, 0, 0},
-	    // Second octagon branch: (20,127) -> (5,112) -> (3,69).
-	    {"stick octagon y-major", 20, 127, 0, 0, 3, 69, 0, 0, 0, 0, 0, 0},
+	    // Equal axes take the PC diagonal corner (46). The GameCube corner is 40.
+	    {"stick diagonal", 127, 127, 0, 0, 46, 46, 0, 0, 0, 0, 0, 0},
+	    {"stick diagonal signs", -127, 127, 0, 0, -46, 46, 0, 0, 0, 0, 0, 0},
+	    // A circular stick's full diagonal is about 90 on each axis, not 127.
+	    {"stick analog diagonal", 90, 90, 0, 0, 46, 46, 0, 0, 0, 0, 0, 0},
+	    // First octagon branch: (90,20) -> (75,5) -> (69,4) with corner 46.
+	    {"stick octagon x-major", 90, 20, 0, 0, 69, 4, 0, 0, 0, 0, 0, 0},
+	    // Second octagon branch: (20,127) -> (5,112) -> (3,70) with corner 46.
+	    {"stick octagon y-major", 20, 127, 0, 0, 3, 70, 0, 0, 0, 0, 0, 0},
 	    // C-stick cap is 59 cardinal and 31 on the diagonal.
 	    {"c-stick cardinal", 0, 0, 127, 0, 0, 0, 59, 0, 0, 0, 0, 0},
 	    {"c-stick diagonal", 0, 0, -127, -127, 0, 0, -31, -31, 0, 0, 0, 0},
@@ -241,8 +246,8 @@ int main()
 		pads[3].stickX = 127;
 		pads[3].stickY = 127;
 		PADClamp(pads);
-		expect(pads[3].stickX, 40, "channel 3 diagonal X");
-		expect(pads[3].stickY, 40, "channel 3 diagonal Y");
+		expect(pads[3].stickX, 46, "channel 3 diagonal X");
+		expect(pads[3].stickY, 46, "channel 3 diagonal Y");
 		expect(pads[0].err, PAD_ERR_NO_CONTROLLER, "channel 0 still disconnected");
 	}
 
@@ -271,8 +276,12 @@ int main()
 	expectNear(mainRun(-127, 0, true), 1.0f, 0.0f, "clamped full left is a full run");
 	expectNear(mainRun(127, 0, false), 1.0f, 0.0f, "unclamped full cardinal is a full run");
 	expectNear(mainRun(127, 127, false), 1.0f, 0.0f, "unclamped keyboard diagonal is a full run");
-	expectNear(mainRun(127, 127, true), 0.789128f, 0.001f, "clamped keyboard diagonal");
-	expectNear(mainRun(-127, 127, true), 0.789128f, 0.001f, "clamped keyboard diagonal, other quadrant");
+	expectNear(mainRun(127, 127, true), 1.0f, 0.0f, "clamped keyboard diagonal is a full run");
+	expectNear(mainRun(-127, 127, true), 1.0f, 0.0f, "clamped keyboard diagonal, other quadrant");
+	expectNear(mainRun(90, 90, true), 1.0f, 0.0f, "clamped full stick diagonal is a full run");
+	expectNear(mainRun(-90, -90, true), 1.0f, 0.0f, "clamped full stick diagonal, other quadrant");
+	// Shallowest full-rim point with corner 46: about 38 degrees, bytes (100, 78).
+	expectNear(mainRun(100, 78, true), 1.0f, 0.0f, "clamped full stick off exact diagonal is a full run");
 	// 64 is half of the positive byte range: SDL 16384 / 256.
 	expectNear(mainRun(64, 0, false), 1.0f, 0.0f, "unclamped half tilt is a full run");
 	expectNear(mainRun(64, 0, true), 0.662162f, 0.001f, "clamped half tilt");

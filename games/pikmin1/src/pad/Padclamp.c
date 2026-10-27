@@ -21,7 +21,14 @@ static PADClampRegion ClampRegion = {
 	// Left stick
 	15,
 	72,
+#if defined(PIKI_PC_PORT)
+	// Intentionally diverges from the original GameCube PADClamp for quality
+	// of life, so a full diagonal still reaches a full run. The original
+	// octagon diagonal is 40, about 0.789 of a run.
+	46,
+#else
 	40,
+#endif
 
 	// Right stick
 	15,
