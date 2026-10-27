@@ -322,6 +322,9 @@ struct MoviePlayer : public JKRDisposer {
 	JPAResourceManager* mEfxManager;                               // _1F4
 #ifdef PIKI_PC_PORT
 	Navi* mPcPendingProtagonist; // captain bound to the current play() call
+	// True when mPcPendingProtagonist came from a queued MovieContext, including
+	// when that pointer is null (this demo had no tag and must not borrow one).
+	bool mPcPendingProtagonistSet;
 #endif
 
 	static JKRArchive* mArchive;

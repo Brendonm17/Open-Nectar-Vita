@@ -34,7 +34,12 @@ void pc_p2_coop_tag_movie_from_position(const Vector3f& pos);
 /** Clear any unconsumed global protagonist tag (section unload, queue reset). */
 void pc_p2_coop_clear_movie_protagonist(void);
 
-/** Per-queue-entry binding: prefer the tag consumed for this play, else fallback. */
+/**
+ * Captain for one demo at the moment it starts.
+ * `taggedProtagonist` is the explicit tag stored when that demo was requested
+ * (null if nobody tagged it). `resolvedFallback` is resolved from THIS demo's
+ * targets at playback, never from the demo that was already on screen.
+ */
 void* pc_p2_coop_movie_queue_slot_protagonist(void* taggedProtagonist, void* resolvedFallback);
 
 #else

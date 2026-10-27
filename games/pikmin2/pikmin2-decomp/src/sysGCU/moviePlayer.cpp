@@ -52,19 +52,20 @@ static bool pcCoopMovieNavis()
 	    && Game::naviMgr->getAt(NAVIID_Olimar) && Game::naviMgr->getAt(NAVIID_Louie);
 }
 
-static Game::Navi* pcCoopResolveProtagonist(Game::MoviePlayer* player, Game::Navi* tagged)
+// Captain implied by THIS movie's targets. Call this only once those targets
+// are current: the caller sets them before an immediate play(), and
+// playSuspended() restores them before a queued demo starts. Do not call it
+// while another demo is still the one on screen.
+static Game::Navi* pcCoopResolveProtagonist(Game::MoviePlayer* player)
 {
-	Game::Navi* navi = tagged;
-	if (navi && !navi->isAlive()) {
-		navi = nullptr;
-	}
-	if (!navi && player->mTargetObject && player->mTargetObject->isNavi()) {
+	Game::Navi* navi = nullptr;
+	if (player->mTargetObject && player->mTargetObject->isNavi()) {
 		navi = static_cast<Game::Navi*>(player->mTargetObject);
 	}
 	if (!navi || !navi->isAlive()) {
 		navi = player->mTargetNavi;
 	}
-	if (!navi || !navi->isAlive()) {
+	if ((!navi || !navi->isAlive()) && Game::naviMgr) {
 		navi = Game::naviMgr->getMovieNavi();
 	}
 	if (navi && !navi->isAlive()) {
@@ -73,20 +74,20 @@ static Game::Navi* pcCoopResolveProtagonist(Game::MoviePlayer* player, Game::Nav
 	return navi;
 }
 
-static Game::Navi* pcCoopConsumePlayProtagonist(Game::MoviePlayer* player)
-{
-	void* tagged = pc_p2_coop_take_movie_protagonist();
-	Game::Navi* navi = tagged ? static_cast<Game::Navi*>(tagged) : nullptr;
-	return pcCoopResolveProtagonist(player, navi);
-}
-
 static void pcCoopMovieBegin(Game::MoviePlayer* player, Game::Navi* pendingProtagonist)
 {
 	if (!pcCoopMovieNavis()) {
 		return;
 	}
-	Game::Navi* navi = pcCoopResolveProtagonist(player, pendingProtagonist);
-	if (!navi || navi->mNaviIndex > NAVIID_Louie) {
+	if (pendingProtagonist && !pendingProtagonist->isAlive()) {
+		pendingProtagonist = nullptr;
+	}
+	// Prefer the captain tagged for this demo. A missing tag resolves from this
+	// demo's own targets, not from whichever movie happened to be playing when
+	// this one was queued.
+	Game::Navi* navi = static_cast<Game::Navi*>(pc_p2_coop_movie_queue_slot_protagonist(
+	    pendingProtagonist, pcCoopResolveProtagonist(player)));
+	if (!navi || !navi->isAlive() || navi->mNaviIndex > NAVIID_Louie) {
 		return;
 	}
 	player->mTargetNavi = navi;
@@ -191,7 +192,8 @@ MoviePlayer::MoviePlayer()
 	mViewport     = nullptr;
 	mTargetObject = nullptr;
 #ifdef PIKI_PC_PORT
-	mPcPendingProtagonist = nullptr;
+	mPcPendingProtagonist    = nullptr;
+	mPcPendingProtagonistSet = false;
 #endif
 	mFlags.clear();
 	mCurrentConfig = nullptr;
@@ -287,9 +289,13 @@ int MoviePlayer::play(MoviePlayArg& arg)
 	MovieConfig* config = findConfig(arg.mMovieName, arg.mCourseName);
 	if (config) {
 		return play(config, arg, false);
-	} else {
-		return MOVIEPLAY_NOCONFIG;
 	}
+#ifdef PIKI_PC_PORT
+	// The caller may already have tagged a captain. Nothing is going to play,
+	// so that tag must not stick to the next demo.
+	pc_p2_coop_clear_movie_protagonist();
+#endif
+	return MOVIEPLAY_NOCONFIG;
 }
 
 /**
@@ -299,13 +305,19 @@ int MoviePlayer::play(MoviePlayArg& arg)
 int MoviePlayer::play(MovieConfig* config, MoviePlayArg& arg, bool flag)
 {
 #ifdef PIKI_PC_PORT
-	Game::Navi* pendingProtagonist = mPcPendingProtagonist;
-	if (!pendingProtagonist) {
-		if (pc_p2_coop_active()) {
-			pendingProtagonist = pcCoopConsumePlayProtagonist(this);
-		} else {
-			pc_p2_coop_clear_movie_protagonist();
-		}
+	// Explicit tag only. Resolving mTargetNavi here would bind a queued demo to
+	// the movie already on screen; that movie's targets are still current until
+	// playSuspended restores this demo's own.
+	Game::Navi* pendingProtagonist = nullptr;
+	if (mPcPendingProtagonistSet) {
+		pendingProtagonist       = mPcPendingProtagonist;
+		mPcPendingProtagonist    = nullptr;
+		mPcPendingProtagonistSet = false;
+	} else if (pc_p2_coop_active()) {
+		void* tagged = pc_p2_coop_take_movie_protagonist();
+		pendingProtagonist = tagged ? static_cast<Game::Navi*>(tagged) : nullptr;
+	} else {
+		pc_p2_coop_clear_movie_protagonist();
 	}
 #endif
 	if (isFlag(MVP_IsActive)) {
@@ -313,18 +325,11 @@ int MoviePlayer::play(MovieConfig* config, MoviePlayArg& arg, bool flag)
 		MovieContext* context = getNewContext();
 		if (!context) {
 			JUT_PANICLINE(560, "******* ★キューにはいりきらんよ～！！\n"); // "******* ★It won't fit in the queue!!"
-#ifdef PIKI_PC_PORT
-			mPcPendingProtagonist = nullptr;
-#endif
 			return MOVIEPLAY_QUEUEFAIL;
 		} else {
 			setContext(context, config, arg);
 #ifdef PIKI_PC_PORT
 			context->mPcCoopProtagonist = pendingProtagonist;
-			if (pendingProtagonist && pc_p2_coop_active()) {
-				context->mNavi = pendingProtagonist;
-			}
-			mPcPendingProtagonist = nullptr;
 #endif
 			return MOVIEPLAY_INQUEUE;
 		}
@@ -334,7 +339,8 @@ int MoviePlayer::play(MovieConfig* config, MoviePlayArg& arg, bool flag)
 		}
 #ifdef PIKI_PC_PORT
 		pcCoopMovieBegin(this, pendingProtagonist);
-		mPcPendingProtagonist = nullptr;
+		mPcPendingProtagonist    = nullptr;
+		mPcPendingProtagonistSet = false;
 #endif
 		mAltNavi   = mTargetNavi;
 		mAltCamera = mActingCamera;
@@ -476,7 +482,8 @@ void MoviePlayer::clearContexts()
 	}
 	mActiveContextNum = 0;
 #ifdef PIKI_PC_PORT
-	mPcPendingProtagonist = nullptr;
+	mPcPendingProtagonist    = nullptr;
+	mPcPendingProtagonistSet = false;
 	pc_p2_coop_clear_movie_protagonist();
 #endif
 }
@@ -493,7 +500,10 @@ bool MoviePlayer::playSuspended()
 		mActingCamera = context->mCamera;
 		mTargetObject = context->mTargetObject;
 #ifdef PIKI_PC_PORT
-		mPcPendingProtagonist = context->mPcCoopProtagonist;
+		// Including a null tag: this queued demo must not pick up a tag that
+		// belongs to some later play() call.
+		mPcPendingProtagonist       = context->mPcCoopProtagonist;
+		mPcPendingProtagonistSet    = true;
 		context->mPcCoopProtagonist = nullptr;
 #endif
 		int flag      = play(context->mConfig, context->mArg, true);

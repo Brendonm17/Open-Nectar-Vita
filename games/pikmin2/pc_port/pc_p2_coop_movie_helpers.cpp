@@ -67,7 +67,8 @@ Game::Navi* pc_p2_coop_movie_navi_from_pellet(Game::Pellet* pellet)
 			continue;
 		}
 		Game::Piki* piki = static_cast<Game::Piki*>(creature);
-		if (piki->mNavi && piki->mNavi->isAlive() && piki->mNavi->mNaviIndex <= NAVIID_Louie) {
+		if (piki->mNavi && piki->mNavi->isAlive() && piki->mNavi->mNaviIndex >= NAVIID_Olimar
+		    && piki->mNavi->mNaviIndex <= NAVIID_Louie) {
 			carryCount[piki->mNavi->mNaviIndex]++;
 		}
 	}

@@ -50,6 +50,14 @@ int main()
 	expect_ptr(slotB, &louie, "queue slot B keeps Louie tag");
 	expect_ptr(pc_p2_coop_take_movie_protagonist(), nullptr, "tags consumed at enqueue");
 
+	// A demo queued with no tag must stay unresolved. Filling it with the
+	// captain of the movie already playing would aim the later cutscene at
+	// the wrong captain once that movie's targets are gone.
+	expect_ptr(pc_p2_coop_movie_queue_slot_protagonist(nullptr, nullptr), nullptr,
+	           "queued demo with no tag stays unresolved");
+	expect_ptr(pc_p2_coop_movie_queue_slot_protagonist(nullptr, &louie), &louie,
+	           "playback resolves this demo's own target");
+
 	// Stale global tag must not leak after clear (e.g. section reset).
 	pc_p2_coop_set_movie_protagonist(&louie);
 	pc_p2_coop_clear_movie_protagonist();
