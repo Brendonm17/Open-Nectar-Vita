@@ -23,6 +23,7 @@
 #include "settings/pc_settings_p2d.h"
 #include "pc_menu_repeat.h"
 #include "pc_menu_click.h"
+#include "settings/pc_prompt_pointer.h"
 #ifdef __ANDROID__
 #include "android/pc_texpack_android.h"
 #include "android/pc_save_android.h"
@@ -1736,21 +1737,6 @@ static bool menuBindingWentDown(int bind) {
 
 bool menuAcceptClick() {
     return (sMenuMouseEdge & SDL_BUTTON(SDL_BUTTON_LEFT)) != 0;
-}
-
-// Window coordinates, 0-1. Menus that hit-test cards use this instead of a
-// second take of the click.
-bool menuMouseNorm(float* nx, float* ny) {
-    int mx = 0, my = 0;
-    SDL_GetMouseState(&mx, &my);
-    SDL_Window* win = SDL_GetMouseFocus();
-    int ww = 0, wh = 0;
-    if (!win) return false;
-    SDL_GetWindowSize(win, &ww, &wh);
-    if (ww <= 0 || wh <= 0) return false;
-    *nx = float(mx) / float(ww);
-    *ny = float(my) / float(wh);
-    return true;
 }
 
 // Accept: Enter, numpad Enter, Space, left click, and a non-mouse A binding.
@@ -5015,15 +5001,16 @@ namespace {
 // Geometría compartida por el dibujo y los toques: tres filas de dos
 // opciones (Difficulty / Game mode / Skip tutorial) y, debajo, el botón Start.
 // Las flechas mueven el cursor, A elige la opción bajo él y solo Start empieza.
-const int kNgPanelW = 620;
-const int kNgPanelH = 420;
-const int kNgBoxW   = 230;
-const int kNgBoxH   = 44;
-const int kNgRowCount = 3;
+// The numbers live in pc_prompt_pointer so the mouse hit test uses the same boxes.
+const int kNgPanelW = kPcNewGamePanelW;
+const int kNgPanelH = kPcNewGamePanelH;
+const int kNgBoxW   = kPcNewGameBoxW;
+const int kNgBoxH   = kPcNewGameBoxH;
+const int kNgRowCount = kPcNewGameRows;
 const int kNgStartRow = kNgRowCount; // fila del botón Start
-int ngRowY(int panelY, int row) { return panelY + 72 + row * 70; }
-int ngStartX(int panelX) { return panelX + kNgPanelW / 2 - kNgBoxW / 2; }
-int ngBoxX(int panelX, int i) { return panelX + 40 + i * (kNgBoxW + 40); }
+int ngRowY(int panelY, int row) { return pc_newgame_row_y(panelY, row); }
+int ngStartX(int panelX) { return pc_newgame_start_x(panelX); }
+int ngBoxX(int panelX, int i) { return pc_newgame_box_x(panelX, i); }
 
 // En una partida Randomizer la fila 2 (Skip tutorial) queda fija en Yes: el
 // tutorial depende de generadores y una pieza que el barajado cambia.
@@ -5043,6 +5030,47 @@ void ngSetRowValue(int row, int v) {
     else               sNewGamePromptSkipTutorial = v != 0;
 }
 
+// Mouse on the New Game panel. Motion over an option or Start moves the cursor there. A click
+// on an option chooses it and returns 1; a click on Start returns 2. Empty space and the
+// locked Randomizer row do nothing. The claim keeps the click from also being A.
+int ngPointer() {
+    pc_menu_click_claim_pointer_menu();
+    DGXGraphics* gfx = (gsys && gsys->mDGXGfx) ? static_cast<DGXGraphics*>(gsys->mDGXGfx) : nullptr;
+    if (!gfx) return 0;
+    const int screenW = pc_gfx_menu_wide() ? pc_gfx_menu_virt_width() : gfx->mScreenWidth;
+    const int screenH = gfx->mScreenHeight;
+    PcMenuClickRect rects[PC_NEWGAME_PTR_COUNT];
+    pc_newgame_pointer_rects(screenW, screenH, rects);
+    int active[PC_NEWGAME_PTR_COUNT];
+    for (int i = 0; i < PC_NEWGAME_PTR_COUNT; ++i) active[i] = (i < PC_NEWGAME_PTR_START && ngSeedRow(i / 2)) ? 0 : 1;
+    float x = 0.0f, y = 0.0f;
+    if (pc_gfx_menu_graph_point(false, &x, &y)) {
+        const PcMenuClickResult hover
+            = pc_menu_click_hover(PC_MENU_CLICK_MAIN, x, y, rects, active, PC_NEWGAME_PTR_COUNT, kPcMenuClickMargin);
+        if (hover.index == PC_NEWGAME_PTR_START) {
+            sNewGamePromptRow = kNgStartRow;
+        } else if (hover.index >= 0) {
+            sNewGamePromptRow = hover.index / 2;
+            sNewGamePromptCol = hover.index % 2;
+        }
+    }
+    if (pc_gfx_menu_graph_point(true, &x, &y)) {
+        const PcMenuClickResult hit
+            = pc_menu_click_resolve(PC_MENU_CLICK_MAIN, x, y, rects, active, PC_NEWGAME_PTR_COUNT, kPcMenuClickMargin);
+        if (hit.action == PC_MENU_CLICK_ACTIVATE) {
+            if (hit.index == PC_NEWGAME_PTR_START) {
+                sNewGamePromptRow = kNgStartRow;
+                return 2;
+            }
+            sNewGamePromptRow = hit.index / 2;
+            sNewGamePromptCol = hit.index % 2;
+            ngSetRowValue(sNewGamePromptRow, sNewGamePromptCol);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 void pcNewGamePromptInput() {
     if (!sNewGamePromptOpen) return;
 
@@ -5050,8 +5078,10 @@ void pcNewGamePromptInput() {
     bool right  = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D);
     bool up     = keyWentDown(SDL_SCANCODE_UP)    || keyWentDown(SDL_SCANCODE_W);
     bool down   = keyWentDown(SDL_SCANCODE_DOWN)  || keyWentDown(SDL_SCANCODE_S);
-    bool accept = menuOkKey();
+    // The boxes hit-test the left click (ngPointer), so a click is not also A on the cursor.
+    bool accept = menuOkKeyNoClick();
     bool cancel = menuCancelKey();
+    cancel |= pc_menu_click_take_back(); // right click: back
 
     left |= (sTouchFrameButtons & PAD_BUTTON_LEFT) != 0;
     right |= (sTouchFrameButtons & PAD_BUTTON_RIGHT) != 0;
@@ -5099,6 +5129,7 @@ void pcNewGamePromptInput() {
         if (promptPadA(ctl))  accept = true;
         if (promptPadB(ctl))  cancel = true;
     }
+    if (ngPointer() == 2) accept = true; // Start was clicked; an option click already chose it
 
     const int rows = kNgRowCount + 1; // opciones + Start
     if (up || down) {
@@ -5229,6 +5260,7 @@ void pc_newgame_prompt_draw(void) {
 
     const char* help = "Arrows: move    A / Enter: select    B / Esc: back";
     drawHelpLine(panelX + panelW / 2, panelY + 382, help, Colour(150, 165, 195, 255));
+    pc_gfx_note_menu_tap_space(screenW, screenH); // ngPointer maps the mouse through this projection
 }
 
 
@@ -5468,15 +5500,15 @@ const char* captainArt(int captain) {
 // Si falta el PNG de un Pikmin, sale de la textura del juego piki3 (116x64):
 // rojo, amarillo y azul tumbados con su hoja. Columnas de cada uno.
 const int kCaptainPikiCol[PC_CAPTAIN_COUNT][2] = { { 0, 0 }, { 0, 0 }, { 0, 38 }, { 34, 78 }, { 76, 116 } };
-constexpr int kCaptainBoxW = 104, kCaptainBoxGap = 9;
+constexpr int kCaptainBoxW = kPcCaptainBoxW, kCaptainBoxGap = kPcCaptainBoxGap;
 // Filas: 0 los de Pikmin 1; 1 los de Pikmin 2 instalados y el Puffmin, que
 // siempre está; 2 los personajes propios. Con las tres a la vista las
 // tarjetas son algo más bajas para caber en 480 de alto.
 constexpr int kCaptainBoxTall = 120, kCaptainBoxShort = 104;
 // Tarjetas a la vista por fila; los propios van por páginas de cinco.
-constexpr int kCaptainRowSlots = 5;
+constexpr int kCaptainRowSlots = kPcCaptainRowSlots;
 int sCaptainCustomPage = 0;
-constexpr int captainRowLeft(int count) { return (620 - (count * kCaptainBoxW + (count - 1) * kCaptainBoxGap)) / 2; }
+int captainRowLeft(int count) { return pc_captain_row_left(count); }
 int captainRowOf(int captain) {
     if (captain < PC_CAPTAIN_FIRST_PIKMIN2) return 0;
     return pc_captain_is_custom(captain) ? 2 : 1;
@@ -5574,8 +5606,9 @@ bool captainCardPos(int captain, int panelX, int panelY, int* x, int* y) {
     const int col = captainViewCol(captain);
     if (col < 0 || col >= kCaptainRowSlots) return false;
     const int shown = std::min(captainRowCount(row), kCaptainRowSlots);
-    *x = panelX + captainRowLeft(shown) + col * (kCaptainBoxW + kCaptainBoxGap);
-    *y = panelY + 84 + captainScreenRow(row) * (captainBoxH() + kCaptainBoxGap);
+    const PcMenuClickRect r = pc_captain_card_rect(panelX, panelY, captainScreenRow(row), col, shown, captainBoxH());
+    *x = r.minX;
+    *y = r.minY;
     return true;
 }
 const char* devAssignCaptainName(int captain) { return captainName(captain); }
@@ -5593,6 +5626,55 @@ const char* devAssignName(int player) {
     return "-";
 }
 
+// Mouse on the captain cards, in the graph the prompt draws (pc_captain_prompt_draw and the
+// co-op picker note it). Motion over a card highlights it. A click on a card picks it and
+// returns 1, so one click confirms; a click on a page arrow returns 2 (previous) or 3 (next).
+// Empty space does nothing. ignore drops the click and the hover during the opening window.
+int captainPickPointer(int* captain, bool ignore) {
+    pc_menu_click_claim_pointer_menu();
+    DGXGraphics* gfx = (gsys && gsys->mDGXGfx) ? static_cast<DGXGraphics*>(gsys->mDGXGfx) : nullptr;
+    if (!gfx) return 0;
+    const int screenW = pc_gfx_menu_wide() ? pc_gfx_menu_virt_width() : gfx->mScreenWidth;
+    const int screenH = gfx->mScreenHeight;
+    int panelX = 0, panelY = 0;
+    pc_captain_panel_origin(screenW, screenH, captainExtraH(), &panelX, &panelY);
+    constexpr int kPagePrev = -2, kPageNext = -3;
+    PcMenuClickRect rects[PC_CAPTAIN_COUNT + 2];
+    int ids[PC_CAPTAIN_COUNT + 2];
+    int count = 0;
+    for (int i = 0; i < PC_CAPTAIN_COUNT; ++i) {
+        int boxX = 0, boxY = 0;
+        if (!captainCardPos(i, panelX, panelY, &boxX, &boxY) || !pc_captain_available(i)) continue;
+        rects[count] = { boxX, boxY, boxX + kCaptainBoxW, boxY + captainBoxH() };
+        ids[count++] = i;
+    }
+    int arrowL = 0, arrowR = 0, arrowY = 0, arrowH = 0;
+    if (captainPageArrows(panelX, panelY, &arrowL, &arrowR, &arrowY, &arrowH)) {
+        rects[count] = { arrowL, arrowY, arrowL + kPcCaptainArrowW, arrowY + arrowH };
+        ids[count++] = kPagePrev;
+        rects[count] = { arrowR, arrowY, arrowR + kPcCaptainArrowW, arrowY + arrowH };
+        ids[count++] = kPageNext;
+    }
+    float x = 0.0f, y = 0.0f;
+    if (!ignore && pc_gfx_menu_graph_point(false, &x, &y)) {
+        const PcMenuClickResult hover
+            = pc_menu_click_hover(PC_MENU_CLICK_MAIN, x, y, rects, nullptr, count, kPcMenuClickMargin);
+        if (hover.index >= 0 && ids[hover.index] >= 0) *captain = ids[hover.index];
+    }
+    if (pc_gfx_menu_graph_point(true, &x, &y) && !ignore) {
+        const PcMenuClickResult hit
+            = pc_menu_click_resolve(PC_MENU_CLICK_MAIN, x, y, rects, nullptr, count, kPcMenuClickMargin);
+        if (hit.action == PC_MENU_CLICK_ACTIVATE && hit.index >= 0) {
+            const int id = ids[hit.index];
+            if (id == kPagePrev) return 2;
+            if (id == kPageNext) return 3;
+            *captain = id;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 // Selector de capitán (Olimar, Louie o un Pikmin) compartido por el prompt de mandos del
 // coop y el de 1 jugador. Devuelve 0 nada, 1 aceptado, 2 atrás.
 int captainPickInput(int player, bool keyboardOk, SDL_GameController* ctl, int* captain, bool ignoreWindow) {
@@ -5605,8 +5687,10 @@ int captainPickInput(int player, bool keyboardOk, SDL_GameController* ctl, int* 
         right  = keyWentDown(SDL_SCANCODE_RIGHT) || keyWentDown(SDL_SCANCODE_D);
         up     = keyWentDown(SDL_SCANCODE_UP)    || keyWentDown(SDL_SCANCODE_W);
         down   = keyWentDown(SDL_SCANCODE_DOWN)  || keyWentDown(SDL_SCANCODE_S);
-        accept = menuOkKey();
+        // The cards hit-test the left click (captainPickPointer), so a click is not also A.
+        accept = menuOkKeyNoClick();
         back   = menuCancelKey();
+        back |= pc_menu_click_take_back(); // right click: back
     }
     if (player == 0) {
         left |= (sTouchFrameButtons & PAD_BUTTON_LEFT) != 0;
@@ -5655,6 +5739,15 @@ int captainPickInput(int player, bool keyboardOk, SDL_GameController* ctl, int* 
         if (padEdge(SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_LEFTSHOULDER) != 0, 12)) pagePrev = true;
         if (padEdge(SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) != 0, 13)) pageNext = true;
     }
+    // The mouse belongs to whoever has the keyboard. A click inside the opening window is
+    // taken and dropped with the rest of the input.
+    bool pointerPick = false;
+    if (keyboardOk) {
+        const int pointer = captainPickPointer(captain, ignoreWindow);
+        if (pointer == 1) pointerPick = true;
+        if (pointer == 2) pagePrev = true;
+        if (pointer == 3) pageNext = true;
+    }
     if (ignoreWindow) return 0;
     // Izquierda/derecha dan la vuelta dentro de la fila; arriba/abajo cambian
     // de fila (la segunda solo con Pikmin 2), a la misma columna o la última.
@@ -5683,29 +5776,9 @@ int captainPickInput(int player, bool keyboardOk, SDL_GameController* ctl, int* 
             captainKeepVisible(*captain);
         }
     }
-    // A click on a card selects that card. A click anywhere else confirms the
-    // card already highlighted. The opening click is ignored with the rest of
-    // the input (ignoreWindow returns above).
-    if (menuAcceptClick()) {
-        float nx = 0.0f, ny = 0.0f;
-        if (menuMouseNorm(&nx, &ny)) {
-            int dw = 0, dh = 0;
-            pc_gfx_get_drawable_size(&dw, &dh);
-            const float aspect = dh > 0 ? float(dw) / float(dh) : 4.0f / 3.0f;
-            const float screenW = aspect * 480.0f;
-            const float x = nx * screenW, y = ny * 480.0f;
-            const int panelX = int(screenW * 0.5f) - 310, panelY = 240 - (260 + captainExtraH()) / 2;
-            for (int i = 0; i < PC_CAPTAIN_COUNT; ++i) {
-                int boxX = 0, boxY = 0;
-                if (!captainCardPos(i, panelX, panelY, &boxX, &boxY) || !pc_captain_available(i)) continue;
-                if (x >= boxX && x <= boxX + kCaptainBoxW && y >= boxY && y <= boxY + captainBoxH()) {
-                    *captain = i;
-                    break;
-                }
-            }
-        }
-        accept = true;
-    }
+    // One click on a card picks it and confirms. Navigation above ran with no key held, so it
+    // left the clicked card alone.
+    if (pointerPick) accept = true;
     if (accept && *captain == PC_CAPTAIN_LOUIE && !devAssignLouieInstalled()) {
         // Sin el modelo no se puede jugar con Louie: aviso y se queda.
         sDevAssignLouieNoticeUntil = SDL_GetTicks() + 3000;
@@ -5859,6 +5932,7 @@ void pc_captain_prompt_draw(void) {
         captainPickDraw(gfx, panelX, panelY, panelW, 0, sCaptainPromptChoice,
                         captainSecondRow() ? "Arrows: choose    A / Enter: confirm    B / Esc: back"
                                             : "Left/Right: choose    A / Enter: confirm    B / Esc: back");
+        pc_gfx_note_menu_tap_space(screenW, screenH); // captainPickPointer maps the mouse through this
     }
     if (sCaptainCards3D) {
         // Mismo hueco que el sprite: encima del nombre de la tarjeta.
@@ -6040,6 +6114,7 @@ void pc_devassign_prompt_draw(void) {
             captainPickDraw(gfx, panelX, panelY, panelW, player, sDevAssignCaptain[player],
                             captainSecondRow() ? "Arrows: choose    A / Enter: confirm    B: reassign    Esc: back"
                                                : "Left/Right: choose    A / Enter: confirm    B: reassign    Esc: back");
+            pc_gfx_note_menu_tap_space(screenW, screenH);
         }
         if (sCaptainCards3D) {
             // Mismo hueco que el sprite: encima del nombre de la tarjeta.
