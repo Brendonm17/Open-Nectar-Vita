@@ -24,7 +24,7 @@ inline bool pc_seed_landing_snaps_to_ground(int ticksPer30Hz)
  *        collision normal's Y is above 0.6, and an edge of a steep face can
  *        pass that while the face itself is a wall. The sprout then plants
  *        in mid-air (upstream issue #65, the cliff by the Blue Onion in the
- *        Forest Navel). A face this flat, or flatter, stays planted.
+ *        Forest Navel). A face whose normal Y is 0.5 or more stays planted.
  */
 inline bool pc_seed_landing_pushes_off_steep_face(float faceNormalY)
 {
