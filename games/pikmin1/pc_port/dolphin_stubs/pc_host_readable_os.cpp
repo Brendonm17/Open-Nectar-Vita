@@ -27,6 +27,7 @@
 #else
 #include <algorithm>
 #include <chrono>
+#include <cerrno>
 #include <cstdio>
 #include <utility>
 #include <vector>
@@ -192,12 +193,12 @@ PcHostReadable osReadableEnd(const u8* p, size_t want, const u8** out)
 			const u8* more = nullptr;
 			bool hard = false;
 			const u8* hiPtr = (const u8*)run.hi;
-			if (machReadableEnd(hiPtr, want - (run.hi - a), &lo, &more, &hard) == PcHostReadable::Yes
-			    && lo <= hiPtr) {
+			const PcHostReadable ext = machReadableEnd(hiPtr, want - (run.hi - a), &lo, &more, &hard);
+			if (ext == PcHostReadable::Yes && lo <= hiPtr) {
 				machRunsAdd(it->first, (uintptr_t)more, hard);
 				*out = more;
 			} else {
-				machRunsAdd(it->first, run.hi, true);
+				machRunsAdd(it->first, run.hi, ext != PcHostReadable::Unknown);
 				*out = hiPtr;
 			}
 			return PcHostReadable::Yes;
@@ -211,18 +212,32 @@ PcHostReadable osReadableEnd(const u8* p, size_t want, const u8** out)
 	return r;
 }
 #else
+constexpr auto kCacheLife = std::chrono::milliseconds(250);
+
 // Readable [lo, hi) ranges from /proc/self/maps, adjacent ones merged.
 std::vector<std::pair<uintptr_t, uintptr_t>> sHostMaps;
 bool sHostMapsAvailable = true;
+int sHostMapsReadsThisSecond = 0;
+std::chrono::steady_clock::time_point sHostMapsReadWindow;
 
-void hostMapsRefresh()
+void hostMapsRefresh(bool force = false)
 {
+	const auto now = std::chrono::steady_clock::now();
+	if (now - sHostMapsReadWindow > std::chrono::seconds(1)) {
+		sHostMapsReadWindow = now;
+		sHostMapsReadsThisSecond = 0;
+	}
+	if (!force && sHostMapsReadsThisSecond >= 20)
+		return;
+	++sHostMapsReadsThisSecond;
 	sHostMaps.clear();
 	FILE* f = fopen("/proc/self/maps", "r");
 	if (!f) {
 		// No procfs (a BSD without linprocfs, a locked-down sandbox): the OS
-		// cannot be asked, which is not the same as "unreadable".
-		sHostMapsAvailable = false;
+		// cannot be asked, which is not the same as "unreadable". A transient
+		// failure (EMFILE, etc.) is retried on the next refresh.
+		if (errno == ENOENT)
+			sHostMapsAvailable = false;
 		return;
 	}
 	char line[512];
@@ -254,17 +269,26 @@ PcHostReadable osReadableEnd(const u8* p, size_t, const u8** out)
 	*out = nullptr;
 	if (!sHostMapsAvailable)
 		return PcHostReadable::Unknown;
-	// Mappings change (malloc's mmap/munmap): re-read on a miss.
+	// Mappings change (malloc's mmap/munmap): re-read on a miss, and at least
+	// every 250 ms so a run that shrank is not trusted forever (as on macOS).
+	static auto sMapsBorn = std::chrono::steady_clock::time_point {};
+	static auto sLastRefresh = std::chrono::steady_clock::time_point {};
+	const auto now = std::chrono::steady_clock::now();
+	if (now - sMapsBorn > kCacheLife) {
+		sMapsBorn = now;
+		hostMapsRefresh(true);
+		if (!sHostMapsAvailable)
+			return PcHostReadable::Unknown;
+	}
 	if (const u8* end = hostMapsLookup((uintptr_t)p)) {
 		*out = end;
 		return PcHostReadable::Yes;
 	}
-	// A repeated garbage pointer must not re-read /proc on every call. Keyed on
-	// the page that missed: a block malloc mapped a moment ago is a different
-	// page and still gets a refresh.
-	static auto sLastRefresh = std::chrono::steady_clock::time_point {};
+	// A repeated garbage pointer must not re-read /proc on every call. At most
+	// twenty /proc reads per second (hostMapsRefresh), and the same missing
+	// page is also keyed so a block malloc mapped a moment ago on another page
+	// still gets a refresh once the per-page window has passed.
 	static uintptr_t sLastMissPage = 0;
-	const auto now = std::chrono::steady_clock::now();
 	const uintptr_t missPage = (uintptr_t)p >> 12;
 	if (!sHostMaps.empty() && missPage == sLastMissPage && now - sLastRefresh < std::chrono::milliseconds(50))
 		return PcHostReadable::No;

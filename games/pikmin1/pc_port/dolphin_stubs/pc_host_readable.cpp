@@ -51,6 +51,8 @@ extern "C" size_t pc_host_readable_bytes(const void* p, size_t want)
 	const u8* end = (const u8*)readableEnd(p, want);
 	if (!end)
 		return 0;
+	if (end == (const u8*)kNoBound)
+		return want;
 	const size_t left = (size_t)(end - (const u8*)p);
 	return want < left ? want : left;
 }
