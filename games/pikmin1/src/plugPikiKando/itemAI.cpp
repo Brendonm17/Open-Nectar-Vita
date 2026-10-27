@@ -1,6 +1,7 @@
 #include "ItemAI.h"
 #if defined(PIKI_PC_PORT)
 #include "pc_coop.h"
+#include "pc_seed_landing.h"
 #include "pc_speedrun.h"
 #include "netplay/pc_input_log.h"
 #include "netplay/pc_netplay_det.h"
@@ -270,7 +271,7 @@ void PikiHeadAI::BuryInit::act(AICreature* item)
 	// 30 Hz step that is the original landing. At 60/120 the smaller step
 	// changes the bounce enough that the seed is still in the air, so drop
 	// it to the ground before freezing it.
-	if (gsys->pcTicksPer30Hz() > 1) {
+	if (pc_seed_landing_snaps_to_ground(gsys->pcTicksPer30Hz())) {
 		f32 groundY = mapMgr->getMinY(obj->mSRT.t.x, obj->mSRT.t.z, true);
 		if (obj->mSRT.t.y > groundY) {
 			obj->mSRT.t.y = groundY;
@@ -290,6 +291,17 @@ void PikiHeadAI::BuryInit::act(AICreature* item)
  */
 void PikiHeadAI::BuryExec::act(AICreature* item)
 {
+#if defined(PIKI_PC_PORT)
+	// Upstream issue #65: an edge hit on a steep face is stored as the ground
+	// triangle (the collision normal points up) and the seed used to plant
+	// there, in mid-air. Push it off and let it fall to a floor.
+	CollTriInfo* tri = item->mGroundTriangle;
+	if (tri && pc_seed_landing_pushes_off_steep_face(tri->mTriangle.mNormal.y)) {
+		item->mVelocity.set(tri->mTriangle.mNormal.x * 80.0f, 0.0f, tri->mTriangle.mNormal.z * 80.0f);
+		item->mSAICtx.mStateMachine->transit(item, PIKIHEAD_Flying);
+		return;
+	}
+#endif
 	// stupid but fixes a regswap
 	f32& health = item->mSAICtx.mCurrentItemHealth;
 	health -= gsys->getFrameTime();
