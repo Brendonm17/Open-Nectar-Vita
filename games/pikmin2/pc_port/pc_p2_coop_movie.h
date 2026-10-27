@@ -31,9 +31,6 @@ void pc_p2_coop_tag_movie_from_piki(Game::Piki* piki);
 void pc_p2_coop_tag_movie_from_pellet(Game::Pellet* pellet);
 void pc_p2_coop_tag_movie_from_position(const Vector3f& pos);
 
-/** Clear any unconsumed global protagonist tag (section unload, queue reset). */
-void pc_p2_coop_clear_movie_protagonist(void);
-
 /**
  * Captain for one demo at the moment it starts.
  * `taggedProtagonist` is the explicit tag stored when that demo was requested
@@ -51,7 +48,6 @@ inline Game::Navi* pc_p2_coop_movie_navi_nearest(const Vector3f&) { return nullp
 inline void pc_p2_coop_tag_movie_from_piki(Game::Piki*) {}
 inline void pc_p2_coop_tag_movie_from_pellet(Game::Pellet*) {}
 inline void pc_p2_coop_tag_movie_from_position(const Vector3f&) {}
-inline void pc_p2_coop_clear_movie_protagonist(void) {}
 inline void* pc_p2_coop_movie_queue_slot_protagonist(void* tagged, void* fallback) { return tagged ? tagged : fallback; }
 
 #endif /* PIKI_PC_PORT */

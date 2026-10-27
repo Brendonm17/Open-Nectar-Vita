@@ -50,6 +50,11 @@ int main()
 	expect_ptr(slotB, &louie, "queue slot B keeps Louie tag");
 	expect_ptr(pc_p2_coop_take_movie_protagonist(), nullptr, "tags consumed at enqueue");
 
+	// Issue 188: the meet target is a Pikmin, so split-screen mTargetNavi stays
+	// Olimar. The whistle tag has to win over that fallback.
+	expect_ptr(pc_p2_coop_movie_queue_slot_protagonist(&louie, &olimar), &louie,
+	           "whistle tag beats split-screen Olimar");
+
 	// A demo queued with no tag must stay unresolved. Filling it with the
 	// captain of the movie already playing would aim the later cutscene at
 	// the wrong captain once that movie's targets are gone.

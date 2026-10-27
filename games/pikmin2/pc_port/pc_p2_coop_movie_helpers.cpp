@@ -22,17 +22,18 @@ Game::Navi* pc_p2_coop_movie_navi_nearest(const Vector3f& pos)
 	}
 
 	Game::Navi* best    = nullptr;
-	f32 bestDistSquared = FLOAT_DIST_MAX;
+	f32 bestDistSquared = 0.0f;
 	for (int i = NAVIID_Olimar; i <= NAVIID_Louie; i++) {
 		Game::Navi* navi = Game::naviMgr->getAt(i);
 		if (!navi || !navi->isAlive()) {
 			continue;
 		}
+		// Compare squared length. FLOAT_DIST_MAX is 128000, a distance, so using
+		// it as a ceiling drops any captain more than ~358 units from the spot.
 		Vector3f delta = pos;
 		delta -= navi->getPosition();
-		f32 distSquared = delta.length();
-		distSquared *= distSquared;
-		if (distSquared < bestDistSquared) {
+		const f32 distSquared = delta.x * delta.x + delta.y * delta.y + delta.z * delta.z;
+		if (!best || distSquared < bestDistSquared) {
 			bestDistSquared = distSquared;
 			best            = navi;
 		}
