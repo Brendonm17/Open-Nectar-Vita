@@ -17,6 +17,20 @@ static int sClaimTick    = -100;
 static bool sBackPending = false;
 static int sBackTick     = -100;
 static bool sEnabled     = true;
+// Hand cursor: what this tick's hover tests found, and the state begin_tick() latched.
+static bool sHandHit     = false;
+static bool sHandTested  = false;
+static bool sHandShown   = false;
+
+// Every hover test calls this with its result, so the pointer layer knows whether the
+// pointer is over a clickable target without a second copy of any screen's geometry.
+static void pc_menu_click_note_hand(bool hit)
+{
+	sHandTested = true;
+	if (hit) {
+		sHandHit = true;
+	}
+}
 
 void pc_menu_click_output_area(int drawableW, int drawableH, float renderedAspect, int* outX, int* outY, int* outW, int* outH)
 {
@@ -135,6 +149,7 @@ PcMenuClickResult pc_menu_click_hover(int screen, float x, float y, const PcMenu
 		return result;
 	}
 	const int hit = pc_menu_click_hit(x, y, rects, active, count, margin);
+	pc_menu_click_note_hand(hit >= 0);
 	if (hit < 0) {
 		return result;
 	}
@@ -183,6 +198,9 @@ void pc_menu_click_reset(void)
 	sClaimTick   = -100;
 	sBackPending = false;
 	sEnabled     = true;
+	sHandHit     = false;
+	sHandTested  = false;
+	sHandShown   = false;
 }
 
 void pc_menu_click_set_pointer(float nx, float ny)
@@ -283,6 +301,18 @@ bool pc_menu_click_read_pointer_graph(int virtW, int virtH, float* x, float* y)
 
 void pc_menu_click_begin_tick(void)
 {
+	// Latch the tick that just ended. An armed pointer shows what its hover tests found.
+	// A disarmed pointer (after a click, key or pad press), or a tick that ran no test,
+	// keeps the last state until the pointer moves, as a browser keeps its cursor. No
+	// pointer, no menu claim, or pointer menus off: no hand.
+	const bool claimed = sEnabled && sTick - sClaimTick <= 2;
+	if (!sEnabled || !sHasPointer || !claimed) {
+		sHandShown = false;
+	} else if (sMouseDrives && sHandTested) {
+		sHandShown = sHandHit;
+	}
+	sHandHit    = false;
+	sHandTested = false;
 	sTick++;
 	if (sPending && (sTick - sPostedTick) > 1) {
 		sPending = false;
@@ -366,7 +396,13 @@ void pc_menu_click_set_enabled(bool enabled)
 		sMouseDrives = false;
 		sClaimTick   = -100;
 		sBackPending = false;
+		sHandShown   = false;
 	}
+}
+
+bool pc_menu_click_hand_wanted(void)
+{
+	return sHandShown && sHasPointer && pc_menu_click_pointer_menu_active();
 }
 
 bool pc_menu_click_window_to_graph(int winW, int winH, int x, int y, int virtW, int virtH, float* gx, float* gy)
@@ -428,6 +464,7 @@ bool pc_menu_click_targets_hit(int kind, float px, float py, float margin, int* 
 {
 	if (kind < 0 || kind >= PC_MENU_CLICK_TARGET_KINDS || sCommittedCount[kind] <= 0) return false;
 	const int index = pc_menu_click_hit(px, py, sCommittedRect[kind], nullptr, sCommittedCount[kind], margin);
+	pc_menu_click_note_hand(index >= 0);
 	if (index < 0) return false;
 	if (tag) *tag = sCommittedTag[kind][index];
 	return true;
@@ -530,6 +567,7 @@ bool pc_menu_click_targets_hit_row(int kind, float px, float py, int currentTag,
 	    = pc_menu_click_row_cells(sCommittedRect[kind], sCommittedTag[kind], sCommittedCount[kind], cells, cellTags,
 	                              PC_MENU_CLICK_TARGET_MAX);
 	const int hit = pc_menu_click_row_pick(px, py, cells, cellTags, n, currentTag, hold);
+	pc_menu_click_note_hand(hit >= 0);
 	if (hit < 0) return false;
 	if (tag) *tag = hit;
 	return true;

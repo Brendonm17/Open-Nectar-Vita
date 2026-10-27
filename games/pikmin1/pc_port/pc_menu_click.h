@@ -125,6 +125,16 @@ bool pc_menu_click_take_graph(int virtW, int virtH, float* x, float* y);
 // Off during a deterministic netplay day: no pointer clicks, highlight, claim, or back.
 void pc_menu_click_set_enabled(bool enabled);
 
+// Hand cursor. Every hover test (pc_menu_click_hover, and targets_hit / targets_hit_row for
+// projected targets) records whether the pointer is over an active target. A locked row is a
+// miss, so it never asks for the hand. begin_tick() latches the tick that ended:
+// - pointer armed and some test ran: the hand follows that tick's result;
+// - pointer disarmed (a click, key or pad press), or no test ran: the last state holds until
+//   the pointer moves, as a browser keeps its cursor;
+// - no pointer over the window, no menu claim (gameplay, another screen), or disabled: off.
+// True while the system pointer should be a hand. pc_hand_cursor applies it.
+bool pc_menu_click_hand_wanted(void);
+
 // Window pixels to the menu graph. Returns false when a size is not positive.
 bool pc_menu_click_window_to_graph(int winW, int winH, int x, int y, int virtW, int virtH, float* gx, float* gy);
 

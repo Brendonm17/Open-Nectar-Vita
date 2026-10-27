@@ -11,6 +11,7 @@ static_assert(PAD_BUTTON_LEFT == PC_MENU_PAD_LEFT && PAD_BUTTON_RIGHT == PC_MENU
               "menu pad bits must match the GameCube pad");
 #include "timing/pc_frame_scheduler.h"
 #include "pc_menu_click.h"
+#include "pc_hand_cursor.h"
 #include "pc_speedrun.h"
 #include "pc_gyro.h"
 #include "pc_icon.h"
@@ -332,6 +333,32 @@ static void applyMouseCapture() {
     const bool capture = sMouseRelativeMode && captureAllowed();
     SDL_SetRelativeMouseMode(capture ? SDL_TRUE : SDL_FALSE);
     SDL_ShowCursor(capture ? SDL_DISABLE : SDL_ENABLE);
+}
+
+// Hand cursor over pointer menu targets (pc_hand_cursor). Both system cursors are created
+// once, on the first change; pc_hand_cursor calls this only when the shape changes.
+static SDL_Cursor* sArrowCursor = nullptr;
+static SDL_Cursor* sHandCursor  = nullptr;
+static bool sCursorsMade        = false;
+static void pcSetSystemCursor(int shape) {
+    if (!sCursorsMade) {
+        sCursorsMade = true;
+        sArrowCursor = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_ARROW);
+        sHandCursor  = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_HAND);
+    }
+    SDL_Cursor* cursor = shape == PC_HAND_CURSOR_HAND ? sHandCursor : sArrowCursor;
+    if (cursor) SDL_SetCursor(cursor);
+}
+
+// The hand needs a pointer the player can see and move: not captured, not in relative
+// mode, not hidden, and a focused window. Otherwise the arrow goes back once.
+static void pcUpdateHandCursor() {
+    bool pointerFree = false;
+    if (sWindow && !sSettingsMenuOpen) {
+        pointerFree = (SDL_GetWindowFlags(sWindow) & SDL_WINDOW_INPUT_FOCUS) != 0 && !SDL_GetRelativeMouseMode()
+                   && SDL_ShowCursor(SDL_QUERY) == SDL_ENABLE;
+    }
+    pc_hand_cursor_update(pointerFree, pc_menu_click_hand_wanted());
 }
 
 static void pc_apply_capture_on_change(void) {
@@ -995,6 +1022,7 @@ bool pc_window_init(const char* title, int width, int height) {
     // For now, start with relative mode OFF for menu navigation
     sMouseRelativeMode = false;
     SDL_SetRelativeMouseMode(SDL_FALSE);
+    pc_hand_cursor_init(pcSetSystemCursor);
     
     // Center mouse cursor initially
     sMouseCenterX = sWindowWidth / 2;
@@ -1284,8 +1312,10 @@ void pc_window_poll_events(PADStatus* pad) {
                     sMouseCursorDeltaY = 0.0f;
                 }
                 // The matching button-up can be dropped when the window loses focus.
-                if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST)
+                if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
                     sRealMouseButtons = 0;
+                    pc_hand_cursor_reset();
+                }
                 // Some platforms release the relative-mode grab while the
                 // window is unfocused; put it back on return (issue #52).
                 if (event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) {
@@ -1376,6 +1406,7 @@ void pc_window_poll_events(PADStatus* pad) {
             }
         }
         pc_apply_capture_on_change();
+        pcUpdateHandCursor();
     }
 
     if (!pad) return;
@@ -1826,6 +1857,12 @@ void pc_window_shutdown(void) {
         SDL_GameControllerClose(p.ctl);
     sOpenPads.clear();
     sControllers[0] = sControllers[1] = nullptr;
+    pc_hand_cursor_reset();
+    if (sHandCursor) SDL_FreeCursor(sHandCursor);
+    if (sArrowCursor) SDL_FreeCursor(sArrowCursor);
+    sHandCursor = sArrowCursor = nullptr;
+    sCursorsMade = false;
+    pc_hand_cursor_init(nullptr);
     if (sGLContext) {
         SDL_GL_DeleteContext(sGLContext);
         sGLContext = nullptr;
@@ -2148,6 +2185,7 @@ void pc_window_set_settings_menu_open(bool open) {
     sMouseCursorDeltaX = 0.0f;
     sMouseCursorDeltaY = 0.0f;
     
+    pc_hand_cursor_reset();
     if (open) {
         sMouseRelativeMode = false;
         SDL_SetRelativeMouseMode(SDL_FALSE);
@@ -2169,6 +2207,7 @@ void pc_window_set_settings_menu_open(bool open) {
 // day-end screens take it back to a free pointer too.
 void pc_window_set_gameplay_active(bool active) {
     sGameplayActive = active;
+    pc_hand_cursor_reset();
     sMouseWheelSteps = 0;
     sMouseCursorDeltaX = 0.0f;
     sMouseCursorDeltaY = 0.0f;
