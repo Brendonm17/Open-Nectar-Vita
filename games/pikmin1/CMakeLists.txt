@@ -917,6 +917,16 @@ if (NOT ANDROID AND NOT WIN32)
         COMMAND /bin/chmod 775 "$<TARGET_FILE:${NECTAR_GAME}>"
         COMMENT "Ensuring the native Pikmin executable is runnable")
 endif()
+# El launcher de escritorio busca la build europea como nectar-pal a su lado
+# (gameSource/gameBinaryFor). Una build PAL hecha a mano solo dejaba `nectar`
+# y el launcher pedía nectar-pal (issue #214). La copia va junto al original:
+# los scripts de release siguen cogiendo bin/nectar.
+if (NOT ANDROID AND PIKMIN_GAME_VERSION STREQUAL "VERSION_GPIP01_00")
+    add_custom_command(TARGET ${NECTAR_GAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:${NECTAR_GAME}>"
+                "$<TARGET_FILE_DIR:${NECTAR_GAME}>/nectar-pal$<TARGET_FILE_SUFFIX:${NECTAR_GAME}>"
+        COMMENT "Copying the PAL game as nectar-pal for the launcher")
+endif()
 
 # Standalone first-run launcher. It accepts an original, uncompressed
 # GameCube ISO/GCM supplied by the user, extracts its FST into the per-user
@@ -1537,7 +1547,10 @@ message(STATUS "")
 message(STATUS "╔══════════════════════════════════════════╗")
 message(STATUS "║   Pikmin PC Port - Build Configuration   ║")
 message(STATUS "╠══════════════════════════════════════════╣")
-message(STATUS "║   Version:  USA Rev 1 (GPIE01_01)       ║")
+# La versión real: antes estaba fija en "USA Rev 1" y una build PAL parecía
+# no haber cogido -DPIKMIN_GAME_VERSION (issue #214).
+string(REPLACE "VERSION_" "" _nectar_version_label "${PIKMIN_GAME_VERSION}")
+message(STATUS "║   Version:  ${_nectar_version_label}")
 if(PIKMIN_GLES)
     message(STATUS "║   Graphics: Native GX → OpenGL ES 3.0   ║")
 else()
