@@ -459,6 +459,10 @@ set(SYSDOLPHIN_SOURCES
     # pad_stubs.cpp still owns the hardware calls.
     src/pad/Padclamp.c
 )
+# Before the library target, so this translation unit is C++ in every target
+# that links it. pad.h declares PADClamp extern "C"; compiling the decomp as
+# C++ keeps that unmangled symbol.
+set_source_files_properties(src/pad/Padclamp.c PROPERTIES LANGUAGE CXX)
 
 # JAudio uses NextOS's host boundary, never the GameCube DSP boot/mailboxes.
 set(JAUDIO_TARGET_SOURCES "")
@@ -608,7 +612,6 @@ add_library(${NECTAR_LEGACY} STATIC
     # legacy flags, not the strict ones the port's own sources build with.
     ${JAUDIO_TARGET_SOURCES}
 )
-set_source_files_properties(src/pad/Padclamp.c PROPERTIES LANGUAGE CXX)
 target_compile_options(${NECTAR_LEGACY} PRIVATE ${LEGACY_COMPILE_OPTIONS})
 
 # Native executable with strict flags. En Android es una biblioteca
@@ -1248,6 +1251,7 @@ if(PIKMIN_BUILD_TESTS)
 
     # GameCube PADClamp (no window). Links the decomp translation unit.
     add_executable(pc_pad_clamp_test pc_port/pc_pad_clamp_test.cpp src/pad/Padclamp.c)
+    target_include_directories(pc_pad_clamp_test PRIVATE include pc_port)
     target_compile_options(pc_pad_clamp_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
     add_test(NAME pc_pad_clamp_test COMMAND pc_pad_clamp_test)
 

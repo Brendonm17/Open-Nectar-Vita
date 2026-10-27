@@ -5,10 +5,19 @@
  * No window and no controller. The vectors are the integer results of
  * src/pad/Padclamp.c (dead zone 15, stick octagon 72/40, C-stick 59/31,
  * triggers 30..180 then shifted by 30).
+ *
+ * The run and swarm checks then apply the game's own stick math to those
+ * bytes: Controller divides by 74, Navi::makeVelocity caps each main-stick
+ * axis at ±1, and Navi::reviseController bins the angle (p35 = 10 degrees),
+ * snaps to a full run at p48 = 0.85 and drops a neutral stick below p43 = 0.1.
+ * Those are the NaviMgr.h defaults. Issue #15 read p48 = 0.85 from the disc's
+ * naviMgr.bin as well. makeCStick uses the same revise step and does not cap
+ * the C-stick axes first; swarm strength is the formula in Navi::makeCStick.
  */
 
 #include "Dolphin/pad.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -20,6 +29,14 @@ void expect(int actual, int expected, const char* what)
 {
 	if (actual != expected) {
 		std::printf("FAIL: %s -> got %d, expected %d\n", what, actual, expected);
+		++sFailures;
+	}
+}
+
+void expectNear(float actual, float expected, float tol, const char* what)
+{
+	if (!(actual >= expected - tol && actual <= expected + tol)) {
+		std::printf("FAIL: %s -> got %.6f, expected %.6f\n", what, actual, expected);
 		++sFailures;
 	}
 }
@@ -86,6 +103,98 @@ void checkStick(const StickCase& c)
 	expect(pads[1].err, PAD_ERR_NO_CONTROLLER, "disconnected err");
 }
 
+// Mirror of Controller::get*Stick / Navi::reviseController. Kept here so the
+// host test does not link the game. The constants are the decomp defaults
+// cited in the file header.
+float roundAng(float x)
+{
+	if (x < 0.0f) {
+		x += TAU;
+	}
+	if (x >= TAU) {
+		x -= TAU;
+	}
+	return x;
+}
+
+float reviseMagnitude(float x, float z)
+{
+	constexpr float kFullRun  = 0.85f; // p48, mClampStickToMaxThreshold
+	constexpr float kNeutral  = 0.1f;  // p43, mNeutralStickThreshold
+	constexpr float kShakeDeg = 10.0f; // p35, mShakePreventionAngle
+
+	float newMag         = sqrtf(x * x + z * z);
+	float theta          = roundAng(atan2f(x, z));
+	const float binWidth = (PI / 180.0f) * kShakeDeg;
+	const float binned   = binWidth * static_cast<int>((theta + binWidth * 0.5f) / binWidth);
+	float boost          = binned - static_cast<int>(binned / QUARTER_PI) * QUARTER_PI;
+	theta                = sinf(QUARTER_PI - boost);
+	boost                = sinf(boost) + theta;
+	const float len      = sinf(QUARTER_PI) / boost;
+	newMag *= 1.0f / len;
+	if (newMag >= kFullRun) {
+		newMag = 1.0f;
+	}
+	if (newMag < kNeutral) {
+		newMag = 0.0f;
+	}
+	return newMag;
+}
+
+float capAxis(float v)
+{
+	if (v >= 1.0f) {
+		return 1.0f;
+	}
+	if (v <= -1.0f) {
+		return -1.0f;
+	}
+	return v;
+}
+
+void clampAxes(s8& sx, s8& sy, s8& cx, s8& cy)
+{
+	PADStatus pads[4];
+	fillDisconnected(pads);
+	pads[0].err       = PAD_ERR_NONE;
+	pads[0].stickX    = sx;
+	pads[0].stickY    = sy;
+	pads[0].substickX = cx;
+	pads[0].substickY = cy;
+	PADClamp(pads);
+	sx = pads[0].stickX;
+	sy = pads[0].stickY;
+	cx = pads[0].substickX;
+	cy = pads[0].substickY;
+}
+
+// Main stick, including makeVelocity's per-axis cap at ±1.
+float mainRun(s8 sx, s8 sy, bool clamp)
+{
+	s8 cx = 0;
+	s8 cy = 0;
+	if (clamp) {
+		clampAxes(sx, sy, cx, cy);
+	}
+	return reviseMagnitude(capAxis(sx / 74.0f), capAxis(-sy / 74.0f));
+}
+
+// C-stick swarm strength from Navi::makeCStick. No per-axis cap.
+float swarmStrength(s8 cx, s8 cy, bool clamp)
+{
+	s8 sx = 0;
+	s8 sy = 0;
+	if (clamp) {
+		clampAxes(sx, sy, cx, cy);
+	}
+	const float mag      = reviseMagnitude(cx / 74.0f, -cy / 74.0f);
+	const float strength = (mag - 0.05f) / (1.0f - 0.05f);
+	if (strength >= 0.9f) {
+		return 1.0f;
+	}
+	return 0.6f * (strength / 0.9f);
+}
+
 } // namespace
 
 int main()
@@ -99,6 +208,8 @@ int main()
 	    // 127 - 15 = 112, then the cardinal cap is maxStick 72.
 	    {"stick cardinal cap", 127, 0, 0, 0, 72, 0, 0, 0, 0, 0, 0, 0},
 	    {"stick cardinal cap negative", -127, 0, 0, 0, -72, 0, 0, 0, 0, 0, 0, 0},
+	    // s8's lowest value. Negating it in an int is 128, then the cap is 72.
+	    {"stick raw -128", -128, 0, 0, 0, -72, 0, 0, 0, 0, 0, 0, 0},
 	    // 87 - 15 = 72, so this raw tilt already sits on the cap.
 	    {"stick at cap edge", 87, 0, 0, 0, 72, 0, 0, 0, 0, 0, 0, 0},
 	    {"stick one below cap", 86, 0, 0, 0, 71, 0, 0, 0, 0, 0, 0, 0},
@@ -134,6 +245,40 @@ int main()
 		expect(pads[3].stickY, 40, "channel 3 diagonal Y");
 		expect(pads[0].err, PAD_ERR_NO_CONTROLLER, "channel 0 still disconnected");
 	}
+
+	// A channel that is not PAD_ERR_NONE is left untouched, not only the
+	// "no controller" code.
+	{
+		PADStatus pads[4];
+		fillDisconnected(pads);
+		pads[0].err          = PAD_ERR_NOT_READY;
+		pads[0].stickX       = 127;
+		pads[0].stickY       = -128;
+		pads[0].triggerLeft  = 255;
+		pads[0].triggerRight = 180;
+		PADClamp(pads);
+		expect(pads[0].stickX, 127, "not ready stick X");
+		expect(pads[0].stickY, -128, "not ready stick Y");
+		expect(pads[0].triggerLeft, 255, "not ready trigger L");
+		expect(pads[0].triggerRight, 180, "not ready trigger R");
+		expect(pads[0].err, PAD_ERR_NOT_READY, "not ready err");
+	}
+
+	// Run fraction and swarm strength, from the clamped bytes. The unclamped
+	// column is what the no-op stub used to feed the same math.
+	expectNear(mainRun(127, 0, true), 1.0f, 0.0f, "clamped full cardinal is a full run");
+	expectNear(mainRun(0, 127, true), 1.0f, 0.0f, "clamped full up is a full run");
+	expectNear(mainRun(-127, 0, true), 1.0f, 0.0f, "clamped full left is a full run");
+	expectNear(mainRun(127, 0, false), 1.0f, 0.0f, "unclamped full cardinal is a full run");
+	expectNear(mainRun(127, 127, false), 1.0f, 0.0f, "unclamped keyboard diagonal is a full run");
+	expectNear(mainRun(127, 127, true), 0.789128f, 0.001f, "clamped keyboard diagonal");
+	expectNear(mainRun(-127, 127, true), 0.789128f, 0.001f, "clamped keyboard diagonal, other quadrant");
+	// 64 is half of the positive byte range: SDL 16384 / 256.
+	expectNear(mainRun(64, 0, false), 1.0f, 0.0f, "unclamped half tilt is a full run");
+	expectNear(mainRun(64, 0, true), 0.662162f, 0.001f, "clamped half tilt");
+	expectNear(swarmStrength(127, 0, false), 1.0f, 0.0f, "unclamped full C-stick is full swarm");
+	expectNear(swarmStrength(127, 0, true), 0.524419f, 0.001f, "clamped full C-stick swarm");
+	expectNear(swarmStrength(-127, -127, true), 0.394087f, 0.001f, "clamped diagonal C-stick swarm");
 
 	if (sFailures == 0) {
 		std::printf("pc_pad_clamp_test: all checks passed\n");
