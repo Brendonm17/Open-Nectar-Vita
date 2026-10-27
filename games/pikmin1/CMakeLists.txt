@@ -1141,6 +1141,14 @@ if(PIKMIN_BUILD_TESTS AND PIKMIN_BUILD_LAUNCHER)
     target_compile_options(installer_ui_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
     add_test(NAME installer_ui_test COMMAND installer_ui_test)
 
+    add_executable(launcher_sidebar_layout_test pc_port/launcher/launcher_sidebar_layout_test.cpp)
+    target_compile_options(launcher_sidebar_layout_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+    add_test(NAME launcher_sidebar_layout_test COMMAND launcher_sidebar_layout_test)
+
+    add_executable(launcher_page_layout_test pc_port/launcher/launcher_page_layout_test.cpp)
+    target_compile_options(launcher_page_layout_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+    add_test(NAME launcher_page_layout_test COMMAND launcher_page_layout_test)
+
     add_executable(asset_finalize_test pc_port/launcher/asset_finalize_test.cpp)
     target_link_libraries(asset_finalize_test PRIVATE Threads::Threads)
     target_compile_options(asset_finalize_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
