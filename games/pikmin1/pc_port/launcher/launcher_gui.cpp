@@ -1873,9 +1873,13 @@ struct Hub {
             }
         }
         {
-            const float controlW = rowLabel("Settings folder", label);
-            const std::string shown = fitTail(ImGui::GetFont(), ImGui::GetFontSize(), info.folder, controlW);
-            ImGui::TextColored(dim, "%s", shown.c_str());
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextColored(label, "%s", "Settings folder");
+            // La ruta entera en su propia línea, partida si hace falta: en el
+            // ancho del control salía recortada por delante (issue #207).
+            ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x);
+            ImGui::TextColored(dim, "%s", info.folder.c_str());
+            ImGui::PopTextWrapPos();
         }
         wheelScroll(launcherRowsScroll);
         ImGui::EndChild();
@@ -2519,7 +2523,11 @@ struct Hub {
     void drawFooter(ImVec2 size)
     {
         ImDrawList* dl = ImGui::GetWindowDrawList();
-        const std::string where = state.games[0].directory.empty()
+        const std::string where = !state.dataFolder.empty()
+            ? "Data folder: " + fitTail(fonts.caption, 16.0f, state.dataFolder,
+                                        std::max(40.0f, size.x - 44.0f
+                                            - fonts.caption->CalcTextSizeA(16.0f, FLT_MAX, 0.0f, "Data folder: ").x))
+            : state.games[0].directory.empty()
             ? std::string("Not installed yet")
             : "Installed in: " + fitTail(fonts.caption, 16.0f, state.games[0].directory,
                                          std::max(40.0f, size.x - 44.0f
@@ -2588,6 +2596,14 @@ struct Hub {
         }
 
         drawReleaseNotice(size, t);
+        if (!state.dataFolder.empty()) {
+            // Abajo a la derecha, a la altura del rótulo de la carpeta.
+            const char* label = "Change folder";
+            const float h     = 40.0f;
+            const float w     = buttons::fitWidth(label, h, buttons::kLabelSize, measureLabel());
+            ImGui::SetCursorScreenPos(ImVec2(size.x - 18.0f - w, size.y - 10.0f - h));
+            if (glassButton(label, ImVec2(w, h))) choose(HubAction::DataFolder, HubGame::Pikmin1);
+        }
         ImGui::EndDisabled();
         // Fuera de las páginas con scroll: el cursor vuelve a la ventana del hub.
         drawFooter(size);
