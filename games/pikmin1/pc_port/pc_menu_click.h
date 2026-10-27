@@ -143,4 +143,20 @@ void pc_menu_click_targets_end(void);
 // Nearest committed target of this kind under the point (drawable pixels). False on a miss.
 bool pc_menu_click_targets_hit(int kind, float px, float py, float margin, int* tag);
 
+// One row of cards, such as the three save files. Each card's cell is a tall box around
+// the union of its target rectangles (rects with the same tag). Neighbouring cells touch
+// at the midpoint between the two card centres, so a pointer sweeping along the row is
+// always over exactly one card. The outer cells reach out as far as half the distance to
+// the neighbour, and each cell is that half-pitch above and below its card's centre, never
+// smaller than the card. Cells are half-open: [minX, maxX) x [minY, maxY).
+// Returns the number of cells, sorted left to right.
+int pc_menu_click_row_cells(const PcMenuClickRect* rects, const int* tags, int count, PcMenuClickRect* cells,
+                            int* cellTags, int maxCells);
+// The cell under the point. The current card's cell is widened by hold on every side, so
+// a card that grows when selected does not flicker at the boundary. -1 when outside every cell.
+int pc_menu_click_row_pick(float x, float y, const PcMenuClickRect* cells, const int* cellTags, int cellCount,
+                           int currentTag, float hold);
+// The committed targets of this kind as a row of cards (drawable pixels). False outside every cell.
+bool pc_menu_click_targets_hit_row(int kind, float px, float py, int currentTag, float hold, int* tag);
+
 #endif

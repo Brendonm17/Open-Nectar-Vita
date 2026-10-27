@@ -432,3 +432,105 @@ bool pc_menu_click_targets_hit(int kind, float px, float py, float margin, int* 
 	if (tag) *tag = sCommittedTag[kind][index];
 	return true;
 }
+
+int pc_menu_click_row_cells(const PcMenuClickRect* rects, const int* tags, int count, PcMenuClickRect* cells,
+                            int* cellTags, int maxCells)
+{
+	if (!rects || !tags || !cells || !cellTags || count <= 0 || maxCells <= 0) {
+		return 0;
+	}
+	// One card per tag: the union of its drawn rectangles.
+	int n = 0;
+	for (int i = 0; i < count; i++) {
+		int at = -1;
+		for (int c = 0; c < n; c++) {
+			if (cellTags[c] == tags[i]) {
+				at = c;
+				break;
+			}
+		}
+		if (at < 0) {
+			if (n >= maxCells) continue;
+			at           = n++;
+			cellTags[at] = tags[i];
+			cells[at]    = rects[i];
+			continue;
+		}
+		PcMenuClickRect& u = cells[at];
+		u.minX             = rects[i].minX < u.minX ? rects[i].minX : u.minX;
+		u.minY             = rects[i].minY < u.minY ? rects[i].minY : u.minY;
+		u.maxX             = rects[i].maxX > u.maxX ? rects[i].maxX : u.maxX;
+		u.maxY             = rects[i].maxY > u.maxY ? rects[i].maxY : u.maxY;
+	}
+	// Left to right by centre.
+	for (int i = 1; i < n; i++) {
+		for (int j = i; j > 0 && cells[j].minX + cells[j].maxX < cells[j - 1].minX + cells[j - 1].maxX; j--) {
+			const PcMenuClickRect r = cells[j];
+			cells[j]                = cells[j - 1];
+			cells[j - 1]            = r;
+			const int t             = cellTags[j];
+			cellTags[j]             = cellTags[j - 1];
+			cellTags[j - 1]         = t;
+		}
+	}
+	PcMenuClickRect card[PC_MENU_CLICK_TARGET_MAX];
+	if (n > PC_MENU_CLICK_TARGET_MAX) n = PC_MENU_CLICK_TARGET_MAX;
+	for (int i = 0; i < n; i++) card[i] = cells[i];
+	auto centreX = [&](int i) { return (card[i].minX + card[i].maxX) / 2; };
+	auto centreY = [&](int i) { return (card[i].minY + card[i].maxY) / 2; };
+	for (int i = 0; i < n; i++) {
+		const int cx = centreX(i);
+		const int cy = centreY(i);
+		// Half the distance to the nearer neighbour; a lone card keeps its own size.
+		int half = 0;
+		if (i > 0) half = (cx - centreX(i - 1)) / 2;
+		if (i + 1 < n) {
+			const int right = (centreX(i + 1) - cx) / 2;
+			half            = (half == 0 || right < half) ? right : half;
+		}
+		const int ownW = (card[i].maxX - card[i].minX + 1) / 2;
+		const int ownH = (card[i].maxY - card[i].minY + 1) / 2;
+		if (half < ownW) half = ownW;
+		const int halfV = half > ownH ? half : ownH;
+		PcMenuClickRect& cell = cells[i];
+		// Shared edges: the same midpoint on both sides, so there is no gap and no overlap.
+		cell.minX = i > 0 ? (centreX(i - 1) + cx) / 2 : cx - half;
+		cell.maxX = i + 1 < n ? (cx + centreX(i + 1)) / 2 : cx + half;
+		cell.minY = cy - halfV;
+		cell.maxY = cy + halfV;
+	}
+	return n;
+}
+
+static bool pc_menu_click_in_cell(float x, float y, const PcMenuClickRect& c, float grow)
+{
+	return x >= float(c.minX) - grow && x < float(c.maxX) + grow && y >= float(c.minY) - grow
+	       && y < float(c.maxY) + grow;
+}
+
+int pc_menu_click_row_pick(float x, float y, const PcMenuClickRect* cells, const int* cellTags, int cellCount,
+                           int currentTag, float hold)
+{
+	if (!cells || !cellTags || cellCount <= 0) return -1;
+	for (int i = 0; i < cellCount; i++) {
+		if (cellTags[i] == currentTag && pc_menu_click_in_cell(x, y, cells[i], hold)) return currentTag;
+	}
+	for (int i = 0; i < cellCount; i++) {
+		if (pc_menu_click_in_cell(x, y, cells[i], 0.0f)) return cellTags[i];
+	}
+	return -1;
+}
+
+bool pc_menu_click_targets_hit_row(int kind, float px, float py, int currentTag, float hold, int* tag)
+{
+	if (kind < 0 || kind >= PC_MENU_CLICK_TARGET_KINDS || sCommittedCount[kind] <= 0) return false;
+	PcMenuClickRect cells[PC_MENU_CLICK_TARGET_MAX];
+	int cellTags[PC_MENU_CLICK_TARGET_MAX];
+	const int n
+	    = pc_menu_click_row_cells(sCommittedRect[kind], sCommittedTag[kind], sCommittedCount[kind], cells, cellTags,
+	                              PC_MENU_CLICK_TARGET_MAX);
+	const int hit = pc_menu_click_row_pick(px, py, cells, cellTags, n, currentTag, hold);
+	if (hit < 0) return false;
+	if (tag) *tag = hit;
+	return true;
+}

@@ -36,7 +36,9 @@ static bool sPcPointerBack  = false;
 #if defined(PIKI_PC_PORT)
 // Click target kind of the save cards, and how far a click may miss a card's drawn edge.
 constexpr int kPcCardTargets = 0;
-constexpr float kPcCardMargin = 16.0f;
+// The selected card keeps the pointer this far past its cell edge (drawable px), so a card
+// that grows when selected does not flicker at the boundary with its neighbour.
+constexpr float kPcCardHold = 16.0f;
 #endif
 
 static f32 filesel_fx_x(int slot, P2DPane* pane)
@@ -1590,6 +1592,8 @@ zen::ogScrFileSelectMgr::returnStatusFlag zen::ogScrFileSelectMgr::update(Contro
 #if defined(PIKI_PC_PORT)
 			// Mouse, card select: hover selects the card under the pointer, a click enters it as A does,
 			// and a right click backs out as B does. Claimed in Normal only, so a left click is not also A.
+			// Each card owns a tall cell around its bubble and number. Cells touch at the midpoint
+			// between bubbles, so moving along the row switches cards with no dead gap.
 			sPcPointerEnter = false;
 			sPcPointerBack  = false;
 			if (mOperation == Normal) {
@@ -1599,14 +1603,14 @@ zen::ogScrFileSelectMgr::returnStatusFlag zen::ogScrFileSelectMgr::update(Contro
 				float px = 0.0f, py = 0.0f;
 				int tag = -1;
 				if (pc_menu_click_read_pointer_normalized(&px, &py)
-				    && pc_menu_click_targets_hit(kPcCardTargets, px * drawableW, py * drawableH, kPcCardMargin, &tag)
+				    && pc_menu_click_targets_hit_row(kPcCardTargets, px * drawableW, py * drawableH, mCurrSlotIdx, kPcCardHold, &tag)
 				    && tag != mCurrSlotIdx) {
 					SeSystem::playSysSe(ogEnumFix(SYSSE_MOVE1, JACSYS_Move1));
 					mCurrSlotIdx = tag;
 					setDataNumber(tag);
 				}
 				if (pc_menu_click_take(&px, &py)
-				    && pc_menu_click_targets_hit(kPcCardTargets, px * drawableW, py * drawableH, kPcCardMargin, &tag)) {
+				    && pc_menu_click_targets_hit_row(kPcCardTargets, px * drawableW, py * drawableH, mCurrSlotIdx, kPcCardHold, &tag)) {
 					mCurrSlotIdx   = tag;
 					setDataNumber(tag);
 					sPcPointerEnter = true;
