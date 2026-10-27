@@ -317,6 +317,7 @@ set(PC_PORT_SOURCES
     pc_port/pc_menu_mode.cpp
     pc_port/pc_menu_repeat.cpp
     pc_port/pc_menu_click.cpp
+    pc_port/pc_button_prompt.cpp
     pc_port/pc_hand_cursor.cpp
     pc_port/pc_photo_mode.cpp
     pc_port/pc_record.cpp
@@ -1340,6 +1341,13 @@ if(PIKMIN_BUILD_TESTS)
     target_include_directories(pc_prompt_pointer_test PRIVATE pc_port)
     target_compile_options(pc_prompt_pointer_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
     add_test(NAME pc_prompt_pointer_test COMMAND pc_prompt_pointer_test)
+
+    # Drawn button prompts (Y Ship's Log, A Read Diary) as click targets: rows, clicks, hover, log
+    add_executable(pc_button_prompt_test pc_port/pc_button_prompt_test.cpp pc_port/pc_button_prompt.cpp
+                   pc_port/pc_menu_click.cpp)
+    target_include_directories(pc_button_prompt_test PRIVATE pc_port)
+    target_compile_options(pc_button_prompt_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+    add_test(NAME pc_button_prompt_test COMMAND pc_button_prompt_test)
 
     # Host software DSP test (not linked into main game)
     add_executable(pc_dsp_host_test

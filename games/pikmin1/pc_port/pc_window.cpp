@@ -11,6 +11,7 @@ static_assert(PAD_BUTTON_LEFT == PC_MENU_PAD_LEFT && PAD_BUTTON_RIGHT == PC_MENU
               "menu pad bits must match the GameCube pad");
 #include "timing/pc_frame_scheduler.h"
 #include "pc_menu_click.h"
+#include "pc_button_prompt.h"
 #include "pc_hand_cursor.h"
 #include "pc_speedrun.h"
 #include "pc_gyro.h"
@@ -1181,6 +1182,8 @@ static bool pc_window_read_gamepad(SDL_GameController* ctl, u16& button, s8& sti
         || abs(rx) > noticeZone || abs(ry) > noticeZone;
 }
 
+void pc_gfx_get_drawable_size(int* width, int* height); // gl/pc_gfx.h
+
 void pc_window_poll_events(PADStatus* pad) {
     // Age a menu click only on the logical input sample. The present path
     // polls again with a null pad and must not drop a click the menu has not
@@ -1418,6 +1421,19 @@ void pc_window_poll_events(PADStatus* pad) {
     // Remaining pads set as no controller
     for (int i = 1; i < PAD_MAX_CONTROLLERS; i++) {
         pad[i].err = PAD_ERR_NO_CONTROLLER;
+    }
+
+    // A click on a drawn button prompt ("Y Ship's Log", "A Read Diary") is that button for
+    // this sample. Taken before mouse bindings so the prompt's claim keeps the click from
+    // also being A. A running level owns the pointer (its clicks are game input), so only
+    // menus, the pause overlay and screens holding a pointer claim take prompt clicks.
+    std::uint16_t promptButton = 0;
+    {
+        const bool promptLive = !sSettingsMenuOpen && !(sGameplayActive && pc_netplay_deterministic())
+                             && (!sGameplayActive || sMenuOverlayOpen || pc_menu_click_pointer_menu_active());
+        int dw = 0, dh = 0;
+        pc_gfx_get_drawable_size(&dw, &dh);
+        promptButton = pc_button_prompt_sample(promptLive, dw, dh, (sRealMouseButtons & SDL_BUTTON_LMASK) != 0);
     }
 
     const Uint8* state = SDL_GetKeyboardState(NULL);
@@ -1712,6 +1728,7 @@ void pc_window_poll_events(PADStatus* pad) {
         (void)mouseState;
     }
 
+    button |= promptButton; // after the P2 swap: the pointer is player 1's
     pad[0].button      = button;
     pad[0].stickX     = stickX;
     pad[0].stickY     = stickY;
@@ -1768,6 +1785,7 @@ void pc_window_swap_buffers(void) {
 #if defined(__APPLE__)
         pc_gfx_end_swap_framebuffer(renderTarget);
 #endif
+        pc_button_prompt_frame_end();
         // VSync Off must not retain the software presentation limiter. Game
         // simulation uses the fixed-step scheduler independently. Netplay's
         // unthrottled replay bypasses it too, and a netplay session owns the
