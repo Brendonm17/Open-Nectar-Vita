@@ -6743,10 +6743,13 @@ extern "C" const void* pc_host_readable_end(const void* p);
 
 // A short read is either harmless (the GC GPU read garbage past the end too)
 // or a host bounds bug, as with macOS lacking /proc. Say so, but only a few
-// times per kind: a bad bound can hit every frame. Wording follows Pikmin 1.
+// times per bucket (guest-byte copies share one counter; display lists another).
+// A bad bound can hit every frame. Wording follows Pikmin 1.
 static bool short_read_warning_allowed(std::atomic<int>& count) {
     constexpr int kMaxShortReadWarnings = 8;
-    const int n = count.fetch_add(1, std::memory_order_relaxed);
+    int n = count.load(std::memory_order_relaxed);
+    if (n >= kMaxShortReadWarnings) return false;
+    n = count.fetch_add(1, std::memory_order_relaxed);
     if (n >= kMaxShortReadWarnings) return false;
     if (n == kMaxShortReadWarnings - 1)
         fprintf(stderr, "[PC GX] (further warnings of this kind suppressed)\n");
