@@ -241,10 +241,9 @@ zen::ogNitakuMgr::NitakuStatus zen::ogNitakuMgr::update(Controller* input)
 				const PcMenuClickRect r  = { b.mMinX, b.mMinY, b.mMaxX, b.mMaxY };
 				rects[i]                 = r;
 			}
-			const int virtW = pc_gfx_menu_virt_width();
-			float x         = 0.0f;
-			float y         = 0.0f;
-			if (pc_menu_click_take_graph(virtW, 480, &x, &y)) {
+			float x = 0.0f;
+			float y = 0.0f;
+			if (pc_gfx_menu_graph_point(true, &x, &y)) {
 				const PcMenuClickResult hit = pc_menu_click_resolve(PC_MENU_CLICK_MAIN, x, y, rects, active, 2, kPcMenuClickMargin);
 				if (hit.action == PC_MENU_CLICK_ACTIVATE) {
 					if ((hit.index == 0) != mIsYes) {
@@ -252,7 +251,7 @@ zen::ogNitakuMgr::NitakuStatus zen::ogNitakuMgr::update(Controller* input)
 					}
 					touchDecide = true;
 				}
-			} else if (pc_menu_click_read_pointer_graph(virtW, 480, &x, &y)) {
+			} else if (pc_gfx_menu_graph_point(false, &x, &y)) {
 				const PcMenuClickResult hover = pc_menu_click_hover(PC_MENU_CLICK_MAIN, x, y, rects, active, 2, kPcMenuClickMargin);
 				if (hover.action == PC_MENU_CLICK_HIGHLIGHT && (hover.index == 0) != mIsYes) {
 					if (hover.index == 0) MoveCursorYes(0.25f); else MoveCursorNo(0.25f);

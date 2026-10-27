@@ -323,7 +323,7 @@ static bool sSettingsMenuOpen = false;
 static bool sGameplayActive  = false;
 static bool sMenuOverlayOpen = false;
 static bool captureAllowed() {
-    return sGameplayActive && !sMenuOverlayOpen && !sSettingsMenuOpen
+    return sGameplayActive && !sMenuOverlayOpen && !sSettingsMenuOpen && !pc_menu_click_pointer_menu_active()
         && effectiveControlMode() == PC_CONTROL_MOUSE_CURSOR;
 }
 // Every relative-mode change goes through here, so the gate always applies. The system
@@ -332,6 +332,19 @@ static void applyMouseCapture() {
     const bool capture = sMouseRelativeMode && captureAllowed();
     SDL_SetRelativeMouseMode(capture ? SDL_TRUE : SDL_FALSE);
     SDL_ShowCursor(capture ? SDL_DISABLE : SDL_ENABLE);
+}
+
+static void pc_apply_capture_on_change(void) {
+    static bool sLastAllowed = false;
+    const bool allowed = captureAllowed();
+    if (allowed == sLastAllowed) return;
+    sLastAllowed = allowed;
+    applyMouseCapture();
+    if (allowed && sMouseRelativeMode) {
+        int dummyX = 0;
+        int dummyY = 0;
+        SDL_GetRelativeMouseState(&dummyX, &dummyY);
+    }
 }
 
 // Virtual cursor (mouse-controlled cursor, separate from movement stick)
@@ -1145,6 +1158,7 @@ void pc_window_poll_events(PADStatus* pad) {
     // polls again with a null pad and must not drop a click the menu has not
     // seen yet.
     if (pad) {
+        pc_menu_click_set_enabled(!(sGameplayActive && pc_netplay_deterministic()));
         pc_menu_click_begin_tick();
     }
 #if PIKI_USE_JAUDIO
@@ -1361,6 +1375,7 @@ void pc_window_poll_events(PADStatus* pad) {
                 pc_menu_click_clear_pointer();
             }
         }
+        pc_apply_capture_on_change();
     }
 
     if (!pad) return;
@@ -1551,10 +1566,12 @@ void pc_window_poll_events(PADStatus* pad) {
     // Flanco del swarm de P1 una vez juntos teclado y mando (Charge).
     if (sSwarmHeld && !sSwarmWasDown[0]) sSwarmPending[0] = true;
     sSwarmWasDown[0] = sSwarmHeld;
-    if (usedGamepad)
+    if (usedGamepad) {
         sLastInputIsGamepad = true;
-    else if (usedKeyboard)
+    } else if (usedKeyboard) {
         sLastInputIsGamepad = false;
+        pc_menu_click_disarm_hover();
+    }
     pc_gyro_update(sController, sSettingsMenuOpen, pc_first_person_active() != 0);
     {
         const bool recenterDown = held(PC_KEY_ACT_GYRO_RECENTER)
@@ -1579,7 +1596,7 @@ void pc_window_poll_events(PADStatus* pad) {
     if (effectiveControlMode() != PC_CONTROL_CLASSIC) {
         int mouseX, mouseY;
         Uint32 mouseState = 0;
-        bool isRelative = sMouseRelativeMode;
+        bool isRelative = sMouseRelativeMode && captureAllowed();
 
         // Issue #52: if SDL let go of relative mode behind our back (long
         // idle in a menu, screen lock), the cursor stopped until the option

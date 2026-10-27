@@ -1,19 +1,77 @@
 #include "pc_menu_click.h"
 
-static bool sPending = false;
-static float sNx     = 0.0f;
-static float sNy     = 0.0f;
-static int sTick     = 0;
-static int sPostedTick = -100;
-static bool sHasPointer = false;
-static float sPointerNx = 0.0f;
-static float sPointerNy = 0.0f;
+#include <cmath>
+
+static bool sPending     = false;
+static float sNx         = 0.0f;
+static float sNy         = 0.0f;
+static int sTick         = 0;
+static int sPostedTick   = -100;
+static bool sHasPointer  = false;
+static float sPointerNx  = 0.0f;
+static float sPointerNy  = 0.0f;
 static bool sSeenPointer = false;
 static bool sMouseDrives = false;
 static bool sActivity    = false;
 static int sClaimTick    = -100;
 static bool sBackPending = false;
 static int sBackTick     = -100;
+static bool sEnabled     = true;
+
+void pc_menu_click_output_area(int drawableW, int drawableH, float renderedAspect, int* outX, int* outY, int* outW, int* outH)
+{
+	const float windowAspect = float(drawableW) / float(drawableH);
+	int x                    = 0;
+	int y                    = 0;
+	int w                    = 0;
+	int h                    = 0;
+	if (renderedAspect >= windowAspect) {
+		w = drawableW;
+		h = int(lroundf(float(drawableW) / renderedAspect));
+		x = 0;
+		y = (drawableH - h) / 2;
+	} else {
+		h = drawableH;
+		w = int(lroundf(float(drawableH) * renderedAspect));
+		x = (drawableW - w) / 2;
+		y = 0;
+	}
+	if (outX) {
+		*outX = x;
+	}
+	if (outY) {
+		*outY = y;
+	}
+	if (outW) {
+		*outW = w;
+	}
+	if (outH) {
+		*outH = h;
+	}
+}
+
+bool pc_menu_click_map_to_graph(const PcMenuClickFrame& frame, float nx, float ny, float* x, float* y)
+{
+	if (frame.drawableW <= 0 || frame.drawableH <= 0 || frame.outW <= 0 || frame.outH <= 0 || frame.graphW <= 0 || frame.graphH <= 0) {
+		return false;
+	}
+	if (!(frame.scaleX > 0.0f) || !(frame.scaleY > 0.0f) || !(frame.targetW > 0.0f) || !(frame.targetH > 0.0f)) {
+		return false;
+	}
+	const float winX       = nx * float(frame.drawableW);
+	const float winY       = ny * float(frame.drawableH);
+	const float rtX        = (winX - float(frame.outX)) / float(frame.outW) * frame.targetW;
+	const float rtYUp      = (1.0f - (winY - float(frame.outY)) / float(frame.outH)) * frame.targetH;
+	const float localX     = (rtX - frame.offsetX) / frame.scaleX;
+	const float fromBottom = (rtYUp - frame.offsetY) / frame.scaleY;
+	if (x) {
+		*x = localX;
+	}
+	if (y) {
+		*y = float(frame.graphH) - fromBottom;
+	}
+	return true;
+}
 
 bool pc_menu_click_is_button_rect(PcMenuClickRect pane, PcMenuClickRect root)
 {
@@ -111,23 +169,27 @@ PcMenuClickResult pc_menu_click_resolve(int screen, float x, float y, const PcMe
 
 void pc_menu_click_reset(void)
 {
-	sPending    = false;
-	sNx         = 0.0f;
-	sNy         = 0.0f;
-	sTick       = 0;
-	sPostedTick = -100;
-	sHasPointer = false;
-	sPointerNx  = 0.0f;
-	sPointerNy  = 0.0f;
+	sPending     = false;
+	sNx          = 0.0f;
+	sNy          = 0.0f;
+	sTick        = 0;
+	sPostedTick  = -100;
+	sHasPointer  = false;
+	sPointerNx   = 0.0f;
+	sPointerNy   = 0.0f;
 	sSeenPointer = false;
 	sMouseDrives = false;
 	sActivity    = false;
 	sClaimTick   = -100;
 	sBackPending = false;
+	sEnabled     = true;
 }
 
 void pc_menu_click_set_pointer(float nx, float ny)
 {
+	if (!sEnabled) {
+		return;
+	}
 	// A pointer that moved since the last sample arms the highlight. The first sample
 	// after a reset is not a move.
 	if (sSeenPointer && (nx != sPointerNx || ny != sPointerNy)) {
@@ -159,22 +221,31 @@ bool pc_menu_click_take_activity(void)
 
 void pc_menu_click_claim_pointer_menu(void)
 {
+	if (!sEnabled) {
+		return;
+	}
 	sClaimTick = sTick;
 }
 
 bool pc_menu_click_pointer_menu_active(void)
 {
-	return sTick - sClaimTick <= 2;
+	return sEnabled && sTick - sClaimTick <= 2;
 }
 
 void pc_menu_click_post_back(void)
 {
+	if (!sEnabled) {
+		return;
+	}
 	sBackPending = true;
 	sBackTick    = sTick;
 }
 
 bool pc_menu_click_take_back(void)
 {
+	if (!sEnabled) {
+		return false;
+	}
 	const bool was = sBackPending;
 	sBackPending   = false;
 	return was;
@@ -223,6 +294,9 @@ void pc_menu_click_begin_tick(void)
 
 void pc_menu_click_post(float nx, float ny)
 {
+	if (!sEnabled) {
+		return;
+	}
 	sActivity   = true;
 	sPending    = true;
 	sNx         = nx;
@@ -233,6 +307,20 @@ void pc_menu_click_post(float nx, float ny)
 void pc_menu_click_clear(void)
 {
 	sPending = false;
+}
+
+bool pc_menu_click_pending(float* nx, float* ny)
+{
+	if (!sPending) {
+		return false;
+	}
+	if (nx) {
+		*nx = sNx;
+	}
+	if (ny) {
+		*ny = sNy;
+	}
+	return true;
 }
 
 bool pc_menu_click_take(float* nx, float* ny)
@@ -267,6 +355,18 @@ bool pc_menu_click_take_graph(int virtW, int virtH, float* x, float* y)
 		*y = ny * float(virtH);
 	}
 	return true;
+}
+
+void pc_menu_click_set_enabled(bool enabled)
+{
+	sEnabled = enabled;
+	if (!enabled) {
+		sPending     = false;
+		sHasPointer  = false;
+		sMouseDrives = false;
+		sClaimTick   = -100;
+		sBackPending = false;
+	}
 }
 
 bool pc_menu_click_window_to_graph(int winW, int winH, int x, int y, int virtW, int virtH, float* gx, float* gy)

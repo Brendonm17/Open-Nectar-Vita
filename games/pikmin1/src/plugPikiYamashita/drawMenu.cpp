@@ -712,7 +712,7 @@ bool zen::DrawMenu::update(Controller* controller)
 				if (mPointerClicks && !touchDecide && mMenuItems && mSelectCount > 0) {
 					float menuX = 0.0f;
 					float menuY = 0.0f;
-					if (pc_menu_click_take_graph(pc_gfx_menu_virt_width(), 480, &menuX, &menuY)) {
+					if (pc_gfx_menu_graph_point(true, &menuX, &menuY)) {
 						constexpr int kMaxClickRows = 32;
 						PcMenuClickRect rects[kMaxClickRows];
 						int active[kMaxClickRows];
@@ -740,7 +740,7 @@ bool zen::DrawMenu::update(Controller* controller)
 				if (mPointerClicks && mMenuItems && mSelectCount > 0) {
 					float menuX = 0.0f;
 					float menuY = 0.0f;
-					if (pc_menu_click_read_pointer_graph(pc_gfx_menu_virt_width(), 480, &menuX, &menuY)) {
+					if (pc_gfx_menu_graph_point(false, &menuX, &menuY)) {
 						constexpr int kMaxClickRows = 32;
 						PcMenuClickRect rects[kMaxClickRows];
 						int active[kMaxClickRows];
@@ -834,6 +834,9 @@ void zen::DrawMenu::draw(Graphics&)
 {
 	if (mState) {
 		DrawScreen::draw();
+#if defined(PIKI_PC_PORT)
+		pc_gfx_note_menu_tap_space(pc_gfx_menu_virt_width(), 480);
+#endif
 	}
 }
 

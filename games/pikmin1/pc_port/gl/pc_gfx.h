@@ -262,6 +262,10 @@ void pc_gfx_invalidate_resident_meshes(void);
 /// normalizado sobre la ventana se convierte a ese espacio.
 void pc_gfx_note_menu_tap_space(int graphWidth, int graphHeight);
 bool pc_gfx_menu_tap_to_graph(float nx, float ny, float* x, float* y);
+// Title, main menu, and other pointer menus: last noted tap space plus present letterbox.
+bool pc_gfx_menu_pointer_to_graph(float nx, float ny, float* x, float* y);
+// Peek or take a pending click, or read the armed pointer, in graph pixels.
+bool pc_gfx_menu_graph_point(bool click, float* x, float* y);
 
 /// Live texture count, bytes held, peak bytes, and lifetime created/released.
 void pc_gfx_get_texture_stats(size_t* live, size_t* liveBytes, size_t* peakBytes,

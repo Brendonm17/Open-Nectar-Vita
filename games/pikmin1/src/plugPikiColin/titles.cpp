@@ -758,10 +758,12 @@ public:
 			// draw PRESS START, main title menu, or hiscore menus as required
 			startWindow->draw(gfx);
 #if defined(PIKI_PC_PORT)
+			pc_gfx_note_menu_tap_space(pc_gfx_menu_virt_width(), 480);
 			pc_gfx_title_debug_probe("after_start");
 #endif
 			titleWindow->draw(gfx);
 #if defined(PIKI_PC_PORT)
+			pc_gfx_note_menu_tap_space(pc_gfx_menu_virt_width(), 480);
 			pc_gfx_title_debug_probe("after_title");
 #endif
 			if (totalWindow) {

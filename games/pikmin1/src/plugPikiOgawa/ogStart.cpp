@@ -94,14 +94,18 @@ void pcBrightenTitleButton(P2DPane* pane)
 
 } // namespace
 
+bool pcTitleGraphPoint(bool click, float* x, float* y)
+{
+	return pc_gfx_menu_graph_point(click, x, y);
+}
+
 bool zen::ogScrStartMgr::pcPointerPressed()
 {
 	if (mState != START_Oscillate) {
 		return false;
 	}
-	float x = 0.0f;
-	float y = 0.0f;
-	return pc_menu_click_take_graph(pc_gfx_menu_virt_width(), 480, &x, &y);
+	// Any left click in the window presses Start, including letterbox bars.
+	return pc_menu_click_take(nullptr, nullptr);
 }
 #endif
 
@@ -183,7 +187,7 @@ zen::ogScrStartMgr::StartStatus zen::ogScrStartMgr::update(Controller* controlle
 			pcCollectTitleButtons(mRootPane, root, rects, active, panes, &count, kMaxButtons, true);
 			float x = 0.0f;
 			float y = 0.0f;
-			if (count > 0 && pc_menu_click_read_pointer_graph(pc_gfx_menu_virt_width(), 480, &x, &y)) {
+			if (count > 0 && pcTitleGraphPoint(false, &x, &y)) {
 				const PcMenuClickResult hover
 				    = pc_menu_click_hover(PC_MENU_CLICK_TITLE, x, y, rects, active, count, kPcMenuClickMargin);
 				if (hover.action == PC_MENU_CLICK_HIGHLIGHT) {

@@ -8,6 +8,7 @@
 
 #include "pc_menu_click.h"
 
+#include <cmath>
 #include <cstdio>
 
 namespace {
@@ -38,10 +39,140 @@ const PcMenuClickRect kMainButtons[] = {
 };
 const int kMainActive[] = { 1, 0, 1 };
 
+bool near(float got, float want) { return std::fabs(got - want) < 0.5f; }
+
+void menuScale(int targetW, int targetH, int graphW, int graphH, float* scaleX, float* scaleY, float* offsetX, float* offsetY)
+{
+	const float scale = std::fmin(float(targetW) / float(graphW), float(targetH) / float(graphH));
+	*scaleX           = scale;
+	*scaleY           = scale;
+	*offsetX          = (float(targetW) - float(graphW) * scale) * 0.5f;
+	*offsetY          = (float(targetH) - float(graphH) * scale) * 0.5f;
+}
+
+PcMenuClickFrame frameFor(int drawableW, int drawableH, float renderedAspect, int graphW, int graphH)
+{
+	PcMenuClickFrame frame {};
+	frame.drawableW = drawableW;
+	frame.drawableH = drawableH;
+	frame.graphW    = graphW;
+	frame.graphH    = graphH;
+	pc_menu_click_output_area(drawableW, drawableH, renderedAspect, &frame.outX, &frame.outY, &frame.outW, &frame.outH);
+	frame.targetW = float(frame.outW);
+	frame.targetH = float(frame.outH);
+	menuScale(frame.outW, frame.outH, graphW, graphH, &frame.scaleX, &frame.scaleY, &frame.offsetX, &frame.offsetY);
+	return frame;
+}
+
+void testOutputArea()
+{
+	int x = 0;
+	int y = 0;
+	int w = 0;
+	int h = 0;
+	const float wide = 16.0f / 9.0f;
+	pc_menu_click_output_area(1920, 1080, wide, &x, &y, &w, &h);
+	check(x == 0 && y == 0 && w == 1920 && h == 1080, "16:9 window matches a 16:9 picture");
+
+	pc_menu_click_output_area(1920, 1200, wide, &x, &y, &w, &h);
+	check(x == 0 && w == 1920 && h == 1080 && y == 60, "a taller window letterboxes a 16:9 picture");
+
+	pc_menu_click_output_area(1920, 1080, 4.0f / 3.0f, &x, &y, &w, &h);
+	check(y == 0 && h == 1080 && w == 1440 && x == 240, "a wide window pillarboxes a 4:3 picture");
+
+	pc_menu_click_output_area(1280, 720, wide, &x, &y, &w, &h);
+	check(x == 0 && y == 0 && w == 1280 && h == 720, "a smaller 16:9 window still fills");
+}
+
+void testMapCenters()
+{
+	const int graphW = int(lroundf(480.0f * (16.0f / 9.0f)));
+	check(graphW == 853, "wide menu graph width");
+	const PcMenuClickFrame hd  = frameFor(1920, 1080, 16.0f / 9.0f, graphW, 480);
+	const PcMenuClickFrame hd2 = frameFor(1280, 720, 16.0f / 9.0f, graphW, 480);
+	float x                     = 0.0f;
+	float y                     = 0.0f;
+	float x2                    = 0.0f;
+	float y2                    = 0.0f;
+	check(pc_menu_click_map_to_graph(hd, 0.5f, 0.5f, &x, &y), "1080p center converts");
+	check(pc_menu_click_map_to_graph(hd2, 0.5f, 0.5f, &x2, &y2), "720p center converts");
+	check(near(x, 426.5f) && near(y, 240.0f), "1080p center is the wide graph center");
+	check(near(x2, x) && near(y2, y), "720p and 1080p centers land on the same graph point");
+
+	const PcMenuClickFrame pillar = frameFor(1920, 1080, 16.0f / 9.0f, 640, 480);
+	check(pc_menu_click_map_to_graph(pillar, 0.5f, 0.5f, &x, &y), "4:3 menu center converts");
+	check(near(x, 320.0f) && near(y, 240.0f), "window center is the 4:3 menu center");
+	check(pc_menu_click_map_to_graph(pillar, 10.0f / 1920.0f, 0.5f, &x, &y), "left bar converts");
+	check(x < 0.0f, "a click in the side bar is outside the 4:3 menu");
+
+	const PcMenuClickFrame tall = frameFor(1080, 1920, 16.0f / 9.0f, graphW, 480);
+	check(tall.outY > 0 && tall.outH < 1920, "a portrait window bars a 16:9 picture");
+	const float bandCenter = (float(tall.outY) + float(tall.outH) * 0.5f) / 1920.0f;
+	check(pc_menu_click_map_to_graph(tall, 0.5f, bandCenter, &x, &y), "portrait band center converts");
+	check(near(x, 426.5f) && near(y, 240.0f), "the visible band center is the graph center");
+	check(pc_menu_click_map_to_graph(tall, 0.5f, 0.01f, &x, &y), "portrait bar converts");
+	check(y < 0.0f || y > 480.0f, "a click in the portrait bar is outside the graph");
+
+	PcMenuClickFrame bad = hd;
+	bad.drawableW        = 0;
+	check(!pc_menu_click_map_to_graph(bad, 0.5f, 0.5f, &x, &y), "a zero window does not convert");
+}
+
+void testDisabled()
+{
+	pc_menu_click_reset();
+	pc_menu_click_set_enabled(true);
+	pc_menu_click_set_pointer(0.2f, 0.2f);
+	pc_menu_click_set_pointer(0.3f, 0.3f);
+	pc_menu_click_post(0.3f, 0.3f);
+	pc_menu_click_claim_pointer_menu();
+
+	pc_menu_click_set_enabled(false);
+	float nx = 0.0f;
+	float ny = 0.0f;
+	check(!pc_menu_click_pending(&nx, &ny), "disabling drops a pending click");
+	check(!pc_menu_click_read_pointer_normalized(&nx, &ny), "disabling drops the highlight pointer");
+	check(!pc_menu_click_pointer_menu_active(), "disabled menus do not claim the pointer");
+	pc_menu_click_take_activity();
+	pc_menu_click_post(0.5f, 0.5f);
+	check(!pc_menu_click_take(&nx, &ny), "a click while disabled is ignored");
+	pc_menu_click_set_pointer(0.6f, 0.6f);
+	pc_menu_click_set_pointer(0.7f, 0.7f);
+	check(!pc_menu_click_read_pointer_normalized(&nx, &ny), "a move while disabled does not highlight");
+	check(!pc_menu_click_take_activity(), "pointer input while disabled is not activity");
+	pc_menu_click_claim_pointer_menu();
+	check(!pc_menu_click_pointer_menu_active(), "a claim while disabled does not hold");
+	pc_menu_click_post_back();
+	check(!pc_menu_click_take_back(), "right click back is suppressed while disabled");
+
+	pc_menu_click_set_enabled(true);
+	pc_menu_click_post(0.4f, 0.4f);
+	check(pc_menu_click_take(&nx, &ny) && near(nx, 0.4f), "clicks work again once enabled");
+	pc_menu_click_post_back();
+	check(pc_menu_click_take_back(), "right click back works again once enabled");
+}
+
+void testPendingPeek()
+{
+	pc_menu_click_reset();
+	pc_menu_click_begin_tick();
+	pc_menu_click_post(0.25f, 0.75f);
+	float nx = 0.0f;
+	float ny = 0.0f;
+	check(pc_menu_click_pending(&nx, &ny) && near(nx, 0.25f) && near(ny, 0.75f), "pending peeks without consuming");
+	check(pc_menu_click_pending(&nx, &ny), "pending still holds after peek");
+	check(pc_menu_click_take(&nx, &ny), "take consumes after pending");
+	check(!pc_menu_click_pending(nullptr, nullptr), "pending is empty after take");
+}
+
 } // namespace
 
 int main()
 {
+	testOutputArea();
+	testMapCenters();
+	testDisabled();
+	testPendingPeek();
 	// A full-screen backdrop is not a button. A short strip and a small pane are.
 	const PcMenuClickRect backdrop = { 0, 0, 640, 480 };
 	const PcMenuClickRect strip    = { 0, 360, 640, 400 };

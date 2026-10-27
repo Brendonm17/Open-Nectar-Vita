@@ -6332,12 +6332,12 @@ int pcVsRulesPointer()
         count              = kVsMenuRows + 1;
     }
     float x = 0.0f, y = 0.0f;
-    if (pc_menu_click_read_pointer_graph(screenW, screenH, &x, &y)) {
+    if (pc_gfx_menu_graph_point(false, &x, &y)) {
         const PcMenuClickResult hover
             = pc_menu_click_hover(PC_MENU_CLICK_MAIN, x, y, rects, nullptr, count, kPcMenuClickMargin);
         if (hover.index >= 0 && hover.index < kVsMenuRows) sVsRulesRow = hover.index;
     }
-    if (pc_menu_click_take_graph(screenW, screenH, &x, &y)) {
+    if (pc_gfx_menu_graph_point(true, &x, &y)) {
         const PcMenuClickResult hit
             = pc_menu_click_resolve(PC_MENU_CLICK_MAIN, x, y, rects, nullptr, count, kPcMenuClickMargin);
         if (hit.action == PC_MENU_CLICK_ACTIVATE) {
@@ -6681,6 +6681,7 @@ void pc_vsrules_prompt_draw(void) {
                           : "Up/Down: option   Left/Right: change   A: play   B: back";
     drawHelpLine(panelX + panelW / 2, panelY + panelH - 38, help, dim);
     sVsPlaySpanOk = helpLineIconSpan('A', &sVsPlayX0, &sVsPlayX1, &sVsPlayY0, &sVsPlayY1);
+    pc_gfx_note_menu_tap_space(screenW, screenH);
 }
 
 

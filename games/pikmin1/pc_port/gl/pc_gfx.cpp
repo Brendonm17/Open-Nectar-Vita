@@ -36,6 +36,7 @@
 #include "../timing/pc_tick_profiler.h"
 #include "../netplay/pc_netplay_present.h"
 #include "../netplay/pc_netplay_loadguard.h"
+#include "../pc_menu_click.h"
 
 // Netplay keep-alive (pc_netplay_loadguard.h): strong-defined by
 // pc_netplay_session.cpp in netplay builds only, null otherwise.
@@ -1579,6 +1580,41 @@ bool pc_gfx_menu_tap_to_graph(float nx, float ny, float* x, float* y) {
     return true;
 }
 
+bool pc_gfx_menu_pointer_to_graph(float nx, float ny, float* x, float* y) {
+    if (!sTapSpaceValid || sDrawableWidth <= 0 || sDrawableHeight <= 0) return false;
+    GLint outX, outY, outW, outH;
+    calculate_output_area(sDrawableWidth, sDrawableHeight, sCurrentAspectRatio, outX, outY, outW, outH);
+    PcMenuClickFrame frame;
+    frame.drawableW = sDrawableWidth;
+    frame.drawableH = sDrawableHeight;
+    frame.outX = int(outX);
+    frame.outY = int(outY);
+    frame.outW = int(outW);
+    frame.outH = int(outH);
+    frame.scaleX = sTapScaleX;
+    frame.scaleY = sTapScaleY;
+    frame.offsetX = sTapOffsetX;
+    frame.offsetY = sTapOffsetY;
+    frame.targetW = sTapTargetW;
+    frame.targetH = sTapTargetH;
+    frame.graphW = sTapGraphW;
+    frame.graphH = sTapGraphH;
+    return pc_menu_click_map_to_graph(frame, nx, ny, x, y);
+}
+
+bool pc_gfx_menu_graph_point(bool click, float* x, float* y) {
+    float nx = 0.0f;
+    float ny = 0.0f;
+    const bool have = click ? pc_menu_click_pending(&nx, &ny) : pc_menu_click_read_pointer_normalized(&nx, &ny);
+    if (!have || !pc_gfx_menu_pointer_to_graph(nx, ny, x, y)) {
+        return false;
+    }
+    if (click) {
+        pc_menu_click_take(nullptr, nullptr);
+    }
+    return true;
+}
+
 static void map_gx_rect(float x, float y, float width, float height,
                         GLint& glX, GLint& glY, GLsizei& glWidth, GLsizei& glHeight) {
     float scaleX, scaleY, offsetX, offsetY;
@@ -2551,18 +2587,15 @@ float pc_gfx_get_window_aspect_ratio(void) {
 static void calculate_output_area(int drawableWidth, int drawableHeight,
                                   float renderedAspect, GLint& outX, GLint& outY,
                                   GLint& outWidth, GLint& outHeight) {
-    const float windowAspect = float(drawableWidth) / float(drawableHeight);
-    if (renderedAspect >= windowAspect) {
-        outWidth = drawableWidth;
-        outHeight = GLint(lroundf(float(drawableWidth) / renderedAspect));
-        outX = 0;
-        outY = (drawableHeight - outHeight) / 2;
-    } else {
-        outHeight = drawableHeight;
-        outWidth = GLint(lroundf(float(drawableHeight) * renderedAspect));
-        outX = (drawableWidth - outWidth) / 2;
-        outY = 0;
-    }
+    int x = 0;
+    int y = 0;
+    int w = 0;
+    int h = 0;
+    pc_menu_click_output_area(drawableWidth, drawableHeight, renderedAspect, &x, &y, &w, &h);
+    outX = GLint(x);
+    outY = GLint(y);
+    outWidth = GLint(w);
+    outHeight = GLint(h);
 }
 
 // Attribute indices are forced to fixed slots for every program so the one

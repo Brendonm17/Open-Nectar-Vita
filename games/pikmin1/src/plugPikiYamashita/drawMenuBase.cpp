@@ -103,6 +103,9 @@ bool zen::DrawMenuBase::update(Controller* controller)
 void zen::DrawMenuBase::draw(Graphics&)
 {
 	DrawScreen::draw();
+#if defined(PIKI_PC_PORT)
+	pc_gfx_note_menu_tap_space(pc_gfx_menu_virt_width(), 480);
+#endif
 }
 
 /**
@@ -183,15 +186,15 @@ bool zen::DrawMenuBase::modeOperation(Controller* controller)
 			rects[i]         = { b.mMinX, b.mMinY, b.mMaxX, b.mMaxY };
 			active[i]        = mMenuItems[i].getActiveSw() ? 1 : 0;
 		}
-		float px = 0.0f, py = 0.0f, gx = 0.0f, gy = 0.0f;
-		if (pc_menu_click_read_pointer_normalized(&px, &py) && pc_gfx_menu_tap_to_graph(px, py, &gx, &gy)) {
+		float gx = 0.0f, gy = 0.0f;
+		if (pc_gfx_menu_graph_point(false, &gx, &gy)) {
 			const PcMenuClickResult hover = pc_menu_click_hover(PC_MENU_CLICK_MAIN, gx, gy, rects, active, rowCount, kPcMenuClickMargin);
 			if (hover.index >= 0) {
 				mCurrentHover = hover.index;
 				newItem       = &mMenuItems[mCurrentHover];
 			}
 		}
-		if (pc_menu_click_take(&px, &py) && pc_gfx_menu_tap_to_graph(px, py, &gx, &gy)) {
+		if (pc_gfx_menu_graph_point(true, &gx, &gy)) {
 			const PcMenuClickResult hit = pc_menu_click_resolve(PC_MENU_CLICK_MAIN, gx, gy, rects, active, rowCount, kPcMenuClickMargin);
 			if (hit.action == PC_MENU_CLICK_ACTIVATE) {
 				mCurrentHover = hit.index;

@@ -1246,14 +1246,14 @@ public:
 			const PUTRect& b = mMenuItems[i].getTouchBounds();
 			rects[i]         = { b.mMinX, b.mMinY, b.mMaxX, b.mMaxY };
 		}
-		float px = 0.0f, py = 0.0f, gx = 0.0f, gy = 0.0f;
-		if (pc_menu_click_read_pointer_normalized(&px, &py) && pc_gfx_menu_tap_to_graph(px, py, &gx, &gy)) {
+		float gx = 0.0f, gy = 0.0f;
+		if (pc_gfx_menu_graph_point(false, &gx, &gy)) {
 			const PcMenuClickResult hover = pc_menu_click_hover(PC_MENU_CLICK_MAIN, gx, gy, rects, nullptr, 2, kPcMenuClickMargin);
 			if (hover.index >= 0) {
 				mCurrentSelection = hover.index;
 			}
 		}
-		if (pc_menu_click_take(&px, &py) && pc_gfx_menu_tap_to_graph(px, py, &gx, &gy)) {
+		if (pc_gfx_menu_graph_point(true, &gx, &gy)) {
 			const PcMenuClickResult hit = pc_menu_click_resolve(PC_MENU_CLICK_MAIN, gx, gy, rects, nullptr, 2, kPcMenuClickMargin);
 			if (hit.action == PC_MENU_CLICK_ACTIVATE) {
 				mCurrentSelection = hit.index;
@@ -2082,8 +2082,8 @@ protected:
 			active[i]        = 1;
 		}
 
-		float px = 0.0f, py = 0.0f, gx = 0.0f, gy = 0.0f;
-		if (pc_menu_click_read_pointer_normalized(&px, &py) && pc_gfx_menu_tap_to_graph(px, py, &gx, &gy)) {
+		float gx = 0.0f, gy = 0.0f;
+		if (pc_gfx_menu_graph_point(false, &gx, &gy)) {
 			const PcMenuClickResult hover = pc_menu_click_hover(PC_MENU_CLICK_MAIN, gx, gy, rects, active, 5, kPcMenuClickMargin);
 			if (hover.index >= 0 && hover.index != selected) {
 				pcSelectPoint(hover.index);
@@ -2091,7 +2091,7 @@ protected:
 			}
 		}
 
-		if (pc_menu_click_take(&px, &py) && pc_gfx_menu_tap_to_graph(px, py, &gx, &gy)) {
+		if (pc_gfx_menu_graph_point(true, &gx, &gy)) {
 			const PcMenuClickResult hit = pc_menu_click_resolve(PC_MENU_CLICK_MAIN, gx, gy, rects, active, 5, kPcMenuClickMargin);
 			if (hit.action == PC_MENU_CLICK_ACTIVATE) {
 				if (hit.index == selected) {

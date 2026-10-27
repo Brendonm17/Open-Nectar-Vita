@@ -8,7 +8,7 @@
 //
 // Coordinates are the menu graph: the same space as P2DPane::getGlobalBounds()
 // after the menu is drawn. A window click is stored normalized (0..1) and
-// scaled by the virtual menu size when a menu reads it.
+// mapped through the present letterbox and menu scale when a menu reads it.
 
 enum PcMenuClickScreen {
 	PC_MENU_CLICK_NONE  = 0, // any other screen: a click does not activate a button
@@ -35,8 +35,32 @@ struct PcMenuClickResult {
 	int index;  // button that was hit, or -1
 };
 
+// Present blit rectangle, then the menu scale that maps graph pixels onto the
+// render target. scale/offset are in graph pixels for that menu's projection.
+struct PcMenuClickFrame {
+	int drawableW;
+	int drawableH;
+	int outX;
+	int outY;
+	int outW;
+	int outH;
+	float scaleX;
+	float scaleY;
+	float offsetX;
+	float offsetY;
+	float targetW;
+	float targetH;
+	int graphW;
+	int graphH;
+};
+
 // Same slack the settings and touch menus already use around a row.
 constexpr float kPcMenuClickMargin = 8.0f;
+
+void pc_menu_click_output_area(int drawableW, int drawableH, float renderedAspect, int* outX, int* outY, int* outW,
+                               int* outH);
+
+bool pc_menu_click_map_to_graph(const PcMenuClickFrame& frame, float nx, float ny, float* x, float* y);
 
 // A full-screen backdrop covers the root on both axes. A button does not.
 bool pc_menu_click_is_button_rect(PcMenuClickRect pane, PcMenuClickRect root);
@@ -63,10 +87,9 @@ void pc_menu_click_clear_pointer(void);
 // Reads the pointer only while the highlight is armed (see below). False when no
 // pointer is over the window, or after a key, controller input, or mouse button
 // until the pointer moves again.
-bool pc_menu_click_read_pointer_graph(int virtW, int virtH, float* x, float* y);
-// The same read, normalized to the window. Use it with pc_gfx_menu_tap_to_graph, which also
-// removes the letterbox that the scaled read above ignores.
 bool pc_menu_click_read_pointer_normalized(float* nx, float* ny);
+// Legacy scale without letterbox; prefer pc_gfx_menu_pointer_to_graph at menu sites.
+bool pc_menu_click_read_pointer_graph(int virtW, int virtH, float* x, float* y);
 
 // Pointer motion arms the highlight that follows the pointer. A key press, a controller
 // input, or a mouse button disarms it until the pointer moves again. A pointer resting
@@ -83,20 +106,24 @@ void pc_menu_click_claim_pointer_menu(void);
 bool pc_menu_click_pointer_menu_active(void);
 
 // A right click backs out of the VS lobby. One pending press, taken once. It lapses like a
-// click nobody takes.
+// click nobody takes. Suppressed while pointer menus are disabled (deterministic netplay day).
 void pc_menu_click_post_back(void);
 bool pc_menu_click_take_back(void);
 
 // One pending click. begin_tick() runs on the logical input sample (PADRead),
 // not on the extra poll at the end of the frame, so a click seen between those
 // two polls is still available to the next menu update. A click nobody takes
-// is dropped on the sample after that.
+// is dropped on the sample after that. pending() does not consume; take() does.
 void pc_menu_click_reset(void);
 void pc_menu_click_begin_tick(void);
 void pc_menu_click_post(float nx, float ny);
 void pc_menu_click_clear(void);
+bool pc_menu_click_pending(float* nx, float* ny);
 bool pc_menu_click_take(float* nx, float* ny);
 bool pc_menu_click_take_graph(int virtW, int virtH, float* x, float* y);
+
+// Off during a deterministic netplay day: no pointer clicks, highlight, claim, or back.
+void pc_menu_click_set_enabled(bool enabled);
 
 // Window pixels to the menu graph. Returns false when a size is not positive.
 bool pc_menu_click_window_to_graph(int winW, int winH, int x, int y, int virtW, int virtH, float* gx, float* gy);
