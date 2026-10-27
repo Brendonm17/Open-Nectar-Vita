@@ -1189,10 +1189,14 @@ if(PIKMIN_BUILD_TESTS AND PIKMIN_BUILD_LAUNCHER)
         add_test(NAME pc_file_dialog_test COMMAND pc_file_dialog_test)
     endif()
 
-    add_executable(nectar_paths_test "${NECTAR_LIBS_DIR}/nectar_paths/tests/paths_test.cpp")
-    target_link_libraries(nectar_paths_test PRIVATE nectar_paths)
-    target_compile_options(nectar_paths_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
-    add_test(NAME nectar_paths_test COMMAND nectar_paths_test)
+    # POSIX-only: it drives the XDG folders, setenv and chmod'ed read-only
+    # installs, while Windows keeps settings under %LOCALAPPDATA%.
+    if(NOT WIN32)
+        add_executable(nectar_paths_test "${NECTAR_LIBS_DIR}/nectar_paths/tests/paths_test.cpp")
+        target_link_libraries(nectar_paths_test PRIVATE nectar_paths)
+        target_compile_options(nectar_paths_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
+        add_test(NAME nectar_paths_test COMMAND nectar_paths_test)
+    endif()
 
     add_executable(button_style_test
         pc_port/launcher/button_style_test.cpp
