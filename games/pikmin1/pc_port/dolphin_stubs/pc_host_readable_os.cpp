@@ -304,6 +304,17 @@ PcHostReadable osReadableEnd(const u8* p, size_t, const u8** out)
 
 std::mutex sHostReadableMutex;
 
+// Android 11+ en arm64 etiqueta los punteros de malloc en el byte alto
+// (Tagged Pointers, Top-Byte Ignore) y /proc/self/maps da las direcciones sin
+// etiqueta. Sin quitarla, nada fuera de la arena parecía legible y las
+// lecturas GX se descartaban (enemigos invisibles en Pikmin 1, issue #215).
+// El final se devuelve con la etiqueta del puntero para que end - p cuadre.
+#if defined(__aarch64__) && !defined(__APPLE__) && !defined(_WIN32)
+constexpr uintptr_t kPtrTagMask = uintptr_t(0xFF) << 56;
+#else
+constexpr uintptr_t kPtrTagMask = 0;
+#endif
+
 } // namespace
 
 PcHostReadable pc_host_os_readable_end(const void* p, size_t want, const void** end)
@@ -314,8 +325,9 @@ PcHostReadable pc_host_os_readable_end(const void* p, size_t want, const void** 
 	if (!want)
 		want = kUnsizedWant;
 	std::lock_guard<std::mutex> lock(sHostReadableMutex);
+	const uintptr_t tag = (uintptr_t)p & kPtrTagMask;
 	const u8* e = nullptr;
-	const PcHostReadable r = osReadableEnd((const u8*)p, want, &e);
-	*end = e;
+	const PcHostReadable r = osReadableEnd((const u8*)((uintptr_t)p & ~kPtrTagMask), want, &e);
+	*end = e ? (const void*)((uintptr_t)e | tag) : nullptr;
 	return r;
 }
