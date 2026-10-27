@@ -12,6 +12,7 @@ enum class PcHostReadable {
 };
 
 // Walks the readable mappings that start at p. Stops once `want` bytes are
-// covered (0 = walk to the end of the readable run), so *end may stop short
-// of the true end of the run but never past it. Thread-safe.
+// covered (0 = as far as any vertex array can index, 16 MiB), so *end may stop
+// short of the true end of the run but never past it. On macOS the answers
+// are cached for a short time (see pc_host_readable_os.cpp). Thread-safe.
 PcHostReadable pc_host_os_readable_end(const void* p, size_t want, const void** end);

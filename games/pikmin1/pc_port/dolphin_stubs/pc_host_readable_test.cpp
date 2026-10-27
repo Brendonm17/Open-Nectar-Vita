@@ -133,6 +133,11 @@ int main()
 #endif
 	// A mapped but inaccessible page.
 	{
+#if defined(__APPLE__)
+		// The macOS answers are cached for 250 ms, and this page may reuse the
+		// address of the two readable pages just unmapped above.
+		std::this_thread::sleep_for(std::chrono::milliseconds(300));
+#endif
 		void* none = mapPages(page, false);
 		check(none != nullptr, "map a no-access page");
 		check(osReadable(none, page) == 0, "no-access page has 0 readable bytes");
@@ -157,6 +162,35 @@ int main()
 	{
 		const void* end = nullptr;
 		check(pc_host_os_readable_end(nullptr, 16, &end) == PcHostReadable::No && !end, "null reports No");
+	}
+
+	// The macOS answers are cached: memory mapped after a query is still found,
+	// and repeated queries agree with the first.
+	{
+		check(osReadable(heap, small) == small, "heap block is readable again (cached)");
+		auto* fresh = (unsigned char*)mapPages(page * 4, true);
+		check(fresh != nullptr, "map four fresh pages");
+		check(osReadable(fresh, page * 4) == page * 4, "memory mapped after earlier queries is readable");
+		check(osReadable(fresh + page, page) == page, "a later page of the fresh mapping is readable");
+		unmapPages(fresh, page * 4);
+	}
+#if !defined(_WIN32)
+	// A run that shrinks after it was cached is seen within the cache life.
+	{
+		auto* shrink = (unsigned char*)mapPages(page * 2, true);
+		check(shrink != nullptr, "map two pages to shrink");
+		check(osReadable(shrink, page * 2) == page * 2, "two pages readable before the shrink");
+		munmap(shrink + page, page);
+		std::this_thread::sleep_for(std::chrono::milliseconds(300));
+		check(osReadable(shrink, page * 2) == page, "the cut is seen once the cache expires");
+		munmap(shrink, page);
+	}
+#endif
+	// Unsized queries (GXSetArray) still cover a large block.
+	{
+		const void* end = nullptr;
+		check(pc_host_os_readable_end(big, 0, &end) == PcHostReadable::Yes && (const unsigned char*)end >= big + large,
+		      "unsized query covers the 4 MiB block");
 	}
 
 #if defined(PC_HOST_READABLE_TEST_P1)

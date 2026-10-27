@@ -1,7 +1,9 @@
 // End of the host memory the OS reports readable from a pointer.
 // Windows: VirtualQuery. macOS: mach_vm_region_recurse (issue #45: there is no
 // /proc there, so every host pointer used to read as unreadable and Pikmin 1
-// drew nothing). Linux, Android and anything else: /proc/self/maps, cached.
+// drew nothing), cached because one Mach call costs microseconds and the
+// renderer asks thousands of times a frame. Linux, Android and anything else:
+// /proc/self/maps, cached.
 #include "pc_host_readable_os.h"
 
 #include <cstdint>
@@ -18,6 +20,10 @@
 #elif defined(__APPLE__)
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+
+#include <chrono>
+#include <iterator>
+#include <map>
 #else
 #include <algorithm>
 #include <chrono>
@@ -33,6 +39,11 @@ using u8 = unsigned char;
 // Enough to cover any GX resource; bounds the walk over a long run of
 // adjacent regions when the caller did not say how much it wants.
 constexpr int kMaxRegions = 256;
+
+// What a caller that did not say how much it wants (want = 0, GXSetArray) can
+// ever index: 65536 vertices of the largest stride. Walking further only costs
+// time; the end may stop short of the run but never goes past it.
+constexpr size_t kUnsizedWant = size_t(65536) * 256;
 
 [[maybe_unused]] bool covered(const u8* p, const u8* end, size_t want)
 {
@@ -59,12 +70,21 @@ PcHostReadable osReadableEnd(const u8* p, size_t want, const u8** out)
 	return end ? PcHostReadable::Yes : PcHostReadable::No;
 }
 #elif defined(__APPLE__)
-PcHostReadable osReadableEnd(const u8* p, size_t want, const u8** out)
+// One walk over the Mach regions from p. *lo is where the first readable
+// region starts (at or before p); *hard says the walk ended at memory that is
+// not readable, so *out is the true end of the run rather than a stopping point.
+PcHostReadable machReadableEnd(const u8* p, size_t want, const u8** lo, const u8** out, bool* hard)
 {
 	const u8* end = nullptr;
+	*lo = p;
+	*hard = true;
 	mach_vm_address_t q = (mach_vm_address_t)(uintptr_t)p;
 	natural_t depth = 0;
-	for (int regions = 0; regions < kMaxRegions;) {
+	for (int regions = 0;;) {
+		if (regions >= kMaxRegions) {
+			*hard = false;
+			break;
+		}
 		mach_vm_address_t addr = q;
 		mach_vm_size_t size = 0;
 		vm_region_submap_info_data_64_t info;
@@ -74,6 +94,7 @@ PcHostReadable osReadableEnd(const u8* p, size_t want, const u8** out)
 		if (kr == KERN_INVALID_ADDRESS)
 			break; // nothing mapped at or after q
 		if (kr != KERN_SUCCESS) {
+			*hard = false;
 			if (end)
 				break;
 			*out = nullptr;
@@ -89,15 +110,105 @@ PcHostReadable osReadableEnd(const u8* p, size_t want, const u8** out)
 		}
 		if (!(info.protection & VM_PROT_READ))
 			break;
+		if (!end)
+			*lo = (const u8*)(uintptr_t)addr;
 		end = (const u8*)(uintptr_t)(addr + size);
-		if (covered(p, end, want))
+		if (covered(p, end, want)) {
+			*hard = false;
 			break;
+		}
 		q = addr + size;
 		depth = 0;
 		++regions;
 	}
 	*out = end;
 	return end ? PcHostReadable::Yes : PcHostReadable::No;
+}
+
+// Readable runs already walked, keyed by start: [lo, hi), and whether hi is
+// where readable memory ended (rather than where the walk stopped). A hit
+// costs a map lookup instead of Mach calls. A pointer outside every run
+// always asks Mach, so a block mapped a moment ago is found at once.
+//
+// Addresses get reused (free() then malloc() of a large block hands back the
+// same range, maybe bigger), so a sized read that wants past a cached end
+// asks Mach about the memory at that end again (one call) instead of trusting
+// it. Only unsized queries (GXSetArray, want = 0) take a cached end as final.
+// A run that shrank (part of it unmapped) is not noticed that way, so the
+// whole cache is dropped every kCacheLife; the Linux /proc cache likewise
+// only re-reads on a miss.
+struct MachRun {
+	uintptr_t hi;
+	bool hard;
+};
+std::map<uintptr_t, MachRun> sMachRuns;
+std::chrono::steady_clock::time_point sMachRunsBorn;
+constexpr auto kCacheLife = std::chrono::milliseconds(250);
+constexpr size_t kMaxRuns = 4096;
+
+void machRunsAdd(uintptr_t lo, uintptr_t hi, bool hard)
+{
+	// Fold in every cached run that overlaps or touches [lo, hi). The walk just
+	// made is the newest word on [lo, hi): when it ended at unreadable memory,
+	// an older run that claimed more is stale and is cut back.
+	auto it = sMachRuns.upper_bound(lo);
+	if (it != sMachRuns.begin() && std::prev(it)->second.hi >= lo)
+		--it;
+	uintptr_t newLo = lo, newHi = hi;
+	bool newHard = hard;
+	while (it != sMachRuns.end() && it->first <= hi) {
+		if (it->first < newLo)
+			newLo = it->first;
+		if (!hard && it->second.hi > newHi) {
+			newHi = it->second.hi;
+			newHard = it->second.hard;
+		}
+		it = sMachRuns.erase(it);
+	}
+	if (sMachRuns.size() >= kMaxRuns)
+		sMachRuns.clear();
+	sMachRuns[newLo] = { newHi, newHard };
+}
+
+PcHostReadable osReadableEnd(const u8* p, size_t want, const u8** out)
+{
+	const auto now = std::chrono::steady_clock::now();
+	if (now - sMachRunsBorn > kCacheLife) {
+		sMachRuns.clear();
+		sMachRunsBorn = now;
+	}
+	const uintptr_t a = (uintptr_t)p;
+	auto it = sMachRuns.upper_bound(a);
+	if (it != sMachRuns.begin()) {
+		--it;
+		const MachRun run = it->second;
+		if (a < run.hi) {
+			if (run.hi - a >= want || (run.hard && want == kUnsizedWant)) {
+				*out = (const u8*)run.hi;
+				return PcHostReadable::Yes;
+			}
+			// Wants more than the run is known to hold: ask about what follows.
+			const u8* lo = nullptr;
+			const u8* more = nullptr;
+			bool hard = false;
+			const u8* hiPtr = (const u8*)run.hi;
+			if (machReadableEnd(hiPtr, want - (run.hi - a), &lo, &more, &hard) == PcHostReadable::Yes
+			    && lo <= hiPtr) {
+				machRunsAdd(it->first, (uintptr_t)more, hard);
+				*out = more;
+			} else {
+				machRunsAdd(it->first, run.hi, true);
+				*out = hiPtr;
+			}
+			return PcHostReadable::Yes;
+		}
+	}
+	const u8* lo = nullptr;
+	bool hard = false;
+	const PcHostReadable r = machReadableEnd(p, want, &lo, out, &hard);
+	if (r == PcHostReadable::Yes)
+		machRunsAdd((uintptr_t)lo, (uintptr_t)*out, hard);
+	return r;
 }
 #else
 // Readable [lo, hi) ranges from /proc/self/maps, adjacent ones merged.
@@ -176,6 +287,8 @@ PcHostReadable pc_host_os_readable_end(const void* p, size_t want, const void** 
 	*end = nullptr;
 	if (!p)
 		return PcHostReadable::No;
+	if (!want)
+		want = kUnsizedWant;
 	std::lock_guard<std::mutex> lock(sHostReadableMutex);
 	const u8* e = nullptr;
 	const PcHostReadable r = osReadableEnd((const u8*)p, want, &e);
