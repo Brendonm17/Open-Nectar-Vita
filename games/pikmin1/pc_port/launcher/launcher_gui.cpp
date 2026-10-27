@@ -23,6 +23,7 @@
 #include "launcher_coop.h"
 #endif
 #include "gci_save_import.h"
+#include "launcher_cursor.h"
 #include "launcher_platform.h"
 #include "launcher_page_layout.h"
 #include "launcher_sidebar_layout.h"
@@ -1404,7 +1405,7 @@ struct Hub {
         ImGui::BeginDisabled(busy);
         const auto option = [&](const char* label, const std::string& name) {
             const bool active = snap.activePack == name;
-            if (ImGui::RadioButton(label, active) && !active) {
+            if (handRadioButton(label, active) && !active) {
                 queue({ "--texpack-activate", name });
             }
         };
@@ -1492,10 +1493,10 @@ struct Hub {
             for (const auto& [id, name] : choice.options)
                 if (id == choice.selected) current = name;
             ImGui::BeginDisabled(busy || choice.options.size() < 2);
-            if (ImGui::BeginCombo("##model", current.c_str())) {
+            if (handCombo("##model", current.c_str())) {
                 for (const auto& [id, name] : choice.options) {
                     ImGui::PushID(id.c_str());
-                    if (ImGui::Selectable(name.c_str(), id == choice.selected) && id != choice.selected)
+                    if (handSelectable(name.c_str(), id == choice.selected) && id != choice.selected)
                         queue({ "--pikmin-model", choice.color, id });
                     ImGui::PopID();
                 }
@@ -1830,9 +1831,9 @@ struct Hub {
             ImGui::SetNextItemWidth(controlW);
             ImGui::BeginDisabled(!info.canChange);
             const int current = info.keepInGameFolder ? 1 : 0;
-            if (ImGui::BeginCombo("##keepInGameFolder", options[current])) {
+            if (handCombo("##keepInGameFolder", options[current])) {
                 for (int i = 1; i >= 0; --i) {
-                    if (ImGui::Selectable(options[i], i == current) && i != current) choice = i;
+                    if (handSelectable(options[i], i == current) && i != current) choice = i;
                     if (i == current) ImGui::SetItemDefaultFocus();
                 }
                 ImGui::EndCombo();
@@ -2020,10 +2021,10 @@ struct Hub {
             ImGui::SetNextItemWidth(controlW);
             if (row.editable()) {
                 ImGui::BeginDisabled(busy);
-                if (ImGui::BeginCombo("##value", row.value.c_str())) {
+                if (handCombo("##value", row.value.c_str())) {
                     for (const std::string& option : stableOptions(group.id, row)) {
                         const bool selected = option == row.value;
-                        if (ImGui::Selectable(option.c_str(), selected) && !selected) {
+                        if (handSelectable(option.c_str(), selected) && !selected) {
                             const auto it = std::find(row.options.begin(), row.options.end(), option);
                             if (it != row.options.end()) { pick[0] = row.row; pick[1] = int(it - row.options.begin()); }
                         }
