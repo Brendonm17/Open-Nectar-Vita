@@ -768,7 +768,18 @@ void ViewPiki::refresh(Graphics& gfx)
 #endif
 		if (updateHeadPose)
 		{
+#if defined(PIKI_PC_PORT)
+			// Split screen draws the world once per view. updateLook turns the
+			// head, counts mLookTimer down and can end the look, which the sim
+			// reads (startMotion and startHimaLook draw from the sim RNG when
+			// the Pikmin is not looking). Advance it in the first view only, so
+			// it runs once per tick; the second view applies the same pose.
+			if (pc_coop_first_view_pass()) {
+				updateLook();
+			}
+#else
 			updateLook();
+#endif
 
 			Matrix4f animMtx1 = mPikiShape->mShape->getAnimMatrix(2);
 #if defined(VERSION_PIKIDEMO)
