@@ -36,6 +36,7 @@
 #include "../timing/pc_tick_profiler.h"
 #include "../netplay/pc_netplay_present.h"
 #include "../netplay/pc_netplay_loadguard.h"
+#include "../pc_menu_click.h"
 
 // Netplay keep-alive (pc_netplay_loadguard.h): strong-defined by
 // pc_netplay_session.cpp in netplay builds only, null otherwise.
@@ -1579,6 +1580,41 @@ bool pc_gfx_menu_tap_to_graph(float nx, float ny, float* x, float* y) {
     return true;
 }
 
+bool pc_gfx_menu_pointer_to_graph(float nx, float ny, float* x, float* y) {
+    if (!sTapSpaceValid || sDrawableWidth <= 0 || sDrawableHeight <= 0) return false;
+    GLint outX, outY, outW, outH;
+    calculate_output_area(sDrawableWidth, sDrawableHeight, sCurrentAspectRatio, outX, outY, outW, outH);
+    PcMenuClickFrame frame;
+    frame.drawableW = sDrawableWidth;
+    frame.drawableH = sDrawableHeight;
+    frame.outX = int(outX);
+    frame.outY = int(outY);
+    frame.outW = int(outW);
+    frame.outH = int(outH);
+    frame.scaleX = sTapScaleX;
+    frame.scaleY = sTapScaleY;
+    frame.offsetX = sTapOffsetX;
+    frame.offsetY = sTapOffsetY;
+    frame.targetW = sTapTargetW;
+    frame.targetH = sTapTargetH;
+    frame.graphW = sTapGraphW;
+    frame.graphH = sTapGraphH;
+    return pc_menu_click_map_to_graph(frame, nx, ny, x, y);
+}
+
+bool pc_gfx_menu_graph_point(bool click, float* x, float* y) {
+    float nx = 0.0f;
+    float ny = 0.0f;
+    const bool have = click ? pc_menu_click_pending(&nx, &ny) : pc_menu_click_read_pointer_normalized(&nx, &ny);
+    if (!have || !pc_gfx_menu_pointer_to_graph(nx, ny, x, y)) {
+        return false;
+    }
+    if (click) {
+        pc_menu_click_take(nullptr, nullptr);
+    }
+    return true;
+}
+
 static void map_gx_rect(float x, float y, float width, float height,
                         GLint& glX, GLint& glY, GLsizei& glWidth, GLsizei& glHeight) {
     float scaleX, scaleY, offsetX, offsetY;
@@ -2551,18 +2587,15 @@ float pc_gfx_get_window_aspect_ratio(void) {
 static void calculate_output_area(int drawableWidth, int drawableHeight,
                                   float renderedAspect, GLint& outX, GLint& outY,
                                   GLint& outWidth, GLint& outHeight) {
-    const float windowAspect = float(drawableWidth) / float(drawableHeight);
-    if (renderedAspect >= windowAspect) {
-        outWidth = drawableWidth;
-        outHeight = GLint(lroundf(float(drawableWidth) / renderedAspect));
-        outX = 0;
-        outY = (drawableHeight - outHeight) / 2;
-    } else {
-        outHeight = drawableHeight;
-        outWidth = GLint(lroundf(float(drawableHeight) * renderedAspect));
-        outX = (drawableWidth - outWidth) / 2;
-        outY = 0;
-    }
+    int x = 0;
+    int y = 0;
+    int w = 0;
+    int h = 0;
+    pc_menu_click_output_area(drawableWidth, drawableHeight, renderedAspect, &x, &y, &w, &h);
+    outX = GLint(x);
+    outY = GLint(y);
+    outWidth = GLint(w);
+    outHeight = GLint(h);
 }
 
 // Attribute indices are forced to fixed slots for every program so the one
@@ -4779,12 +4812,11 @@ void pc_gfx_set_current_mtx(u32 id) {
 static GLint sLastViewportX = 0, sLastViewportY = 0;
 static GLsizei sLastViewportW = 0, sLastViewportH = 0;
 
-bool pc_gfx_project_current(float x, float y, float z, float* winX, float* winY)
+static bool project_with_model(const float* model, float x, float y, float z, float* winX, float* winY)
 {
-    // Igual que un vértice del juego: matriz de posición actual, proyección,
+    // Igual que un vértice del juego: matriz de posición dada, proyección,
     // viewport GX sobre el render target, y de ahí al área de salida de la
     // ventana (blit del present).
-    const float* model = sPosMatrix[sCurrentPosMtxId];
     const float mx = model[0] * x + model[4] * y + model[8] * z + model[12];
     const float my = model[1] * x + model[5] * y + model[9] * z + model[13];
     const float mz = model[2] * x + model[6] * y + model[10] * z + model[14];
@@ -4803,6 +4835,22 @@ bool pc_gfx_project_current(float x, float y, float z, float* winX, float* winY)
     if (winX) *winX = wx;
     if (winY) *winY = float(sDrawableHeight) - wyUp; // ventana: origen arriba
     return true;
+}
+
+bool pc_gfx_project_current(float x, float y, float z, float* winX, float* winY)
+{
+    return project_with_model(sPosMatrix[sCurrentPosMtxId], x, y, z, winX, winY);
+}
+
+bool pc_gfx_project_with_mtx(const float (*mtx)[4], float x, float y, float z, float* winX, float* winY)
+{
+    // Same layout as pc_gfx_load_pos_mtx.
+    float model[16];
+    model[0] = mtx[0][0]; model[1] = mtx[1][0]; model[2] = mtx[2][0]; model[3] = 0.0f;
+    model[4] = mtx[0][1]; model[5] = mtx[1][1]; model[6] = mtx[2][1]; model[7] = 0.0f;
+    model[8] = mtx[0][2]; model[9] = mtx[1][2]; model[10] = mtx[2][2]; model[11] = 0.0f;
+    model[12] = mtx[0][3]; model[13] = mtx[1][3]; model[14] = mtx[2][3]; model[15] = 1.0f;
+    return project_with_model(model, x, y, z, winX, winY);
 }
 
 void pc_gfx_set_viewport(f32 xOrig, f32 yOrig, f32 wd, f32 ht, f32 nearZ, f32 farZ) {
