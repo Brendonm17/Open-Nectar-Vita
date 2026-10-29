@@ -124,7 +124,7 @@ struct PcConfig {
     int displayMode = PC_WINDOW_FULLSCREEN_WINDOWED; // 0 windowed, 1 fullscreen, 2 borderless
     double refreshRate = 0.0;                        // 0 = auto (detect)
     bool vsync = true;                               // presentation pacing on/off
-    float renderScale = 2.0f / 3.0f;                 // internal 3D resolution multiplier
+    float renderScale = 0.0f; // 0 = original de GameCube (480 líneas)                 // internal 3D resolution multiplier
     int aspectRatioMode = 0;                         // 0=auto, 1=4:3, 2=16:10, 3=16:9, 4=21:9
 
     // FPS mode (0=30fps, 1=60fps, 2=120fps experimental)
@@ -295,7 +295,7 @@ struct PcConfig {
         displayMode = PC_WINDOW_FULLSCREEN_WINDOWED;
         refreshRate = 0.0;
         vsync = true;
-        renderScale = 2.0f / 3.0f;
+        renderScale = 0.0f;
         aspectRatioMode = 0;
         fpsMode = 0;
         controlMode = PC_CONTROL_CLASSIC;
@@ -1345,7 +1345,7 @@ void loadConfig() {
         else if (key == "vsync") sConfig.vsync = atoi(val.c_str()) != 0;
         else if (key == "renderScale") {
             sConfig.renderScale = (float)atof(val.c_str());
-            if (sConfig.renderScale < 0.25f || sConfig.renderScale > 4.0f) sConfig.renderScale = 2.0f / 3.0f;
+            if (sConfig.renderScale != 0.0f && (sConfig.renderScale < 0.25f || sConfig.renderScale > 4.0f)) sConfig.renderScale = 0.0f;
         }
         else if (key == "rsAimMode") {
             sConfig.rsAimMode = atoi(val.c_str());
@@ -3117,7 +3117,8 @@ void mainRowValue(int row, char* out, size_t n) {
     snprintf(valueBuf[2], sizeof(valueBuf[2]), "%s", aspectBuf);
     {
         float rs = sPending.renderScale;
-        if (fabsf(rs - 2.0f / 3.0f) < 0.01f) snprintf(valueBuf[3], sizeof(valueBuf[3]), "Auto (native)");
+        if (rs <= 0.0f) snprintf(valueBuf[3], sizeof(valueBuf[3]), "Original (GameCube, 480p)");
+        else if (fabsf(rs - 2.0f / 3.0f) < 0.01f) snprintf(valueBuf[3], sizeof(valueBuf[3]), "Auto (native)");
         else snprintf(valueBuf[3], sizeof(valueBuf[3]), "%.2fx", rs);
     }
     if (sPending.refreshRate <= 0.0) snprintf(valueBuf[4], sizeof(valueBuf[4]), "Auto");
@@ -3181,8 +3182,8 @@ void mainRowChange(int row, bool left, bool right, bool ok) {
         }
         break;
     case ROW_RENDER_SCALE: {
-        static const float kScales[] = { 2.0f / 3.0f, 0.5f, 1.0f, 1.5f, 2.0f };
-        constexpr int kScaleCount = 5;
+        static const float kScales[] = { 0.0f, 0.5f, 2.0f / 3.0f, 1.0f, 1.5f, 2.0f };
+        constexpr int kScaleCount = 6;
         int idx = 0;
         float cur = sPending.renderScale;
         for (int i = 0; i < kScaleCount; i++) {
@@ -8452,7 +8453,7 @@ const GroupRow kDisplayRows[] = {
     { SRC_MAIN, ROW_DISPLAY_MODE, "Display Mode", "Windowed, fullscreen, or a borderless window that fills the screen." },
     { SRC_MAIN, ROW_RESOLUTION, "Resolution", "Size of the window or the fullscreen picture. A: full list. Left/Right: next size." },
     { SRC_MAIN, ROW_ASPECT_RATIO, "Aspect Ratio", "Auto fills the window. The others keep that shape and add black bars." },
-    { SRC_MAIN, ROW_RENDER_SCALE, "3D Resolution", "Detail of the 3D world. Higher looks sharper, lower runs faster." },
+    { SRC_MAIN, ROW_RENDER_SCALE, "3D Resolution", "Detail of the 3D world. Original renders at the GameCube's 480 lines, the lightest and the default. Higher looks sharper, lower runs faster." },
     { SRC_MAIN, ROW_REFRESH_RATE, "Refresh Rate", "How often the screen updates in fullscreen. Auto keeps your monitor's setting." },
     { SRC_MAIN, ROW_VSYNC, "Frame Sync (VSync)", "Waits for the screen before showing each frame. Stops tearing (a picture split in two), adds a little input delay." },
     { SRC_MAIN, ROW_FPS_MODE, "FPS Mode", "Frames per second. 30 is the original and the most stable. 60, 120 and Monitor (your screen's refresh rate) are smoother but experimental." },
