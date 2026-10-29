@@ -9822,6 +9822,7 @@ void buildPadGuide() {
     H(sw ? "Layout: Switch" : "Layout: GameCube (original)");
     H("Moving");
     L("Move the captain and the cursor", "Left Stick");
+    if (padBound(PC_KEY_ACT_AIM_STICK)) L("Aim the cursor", "Hold " + padBtn(PC_KEY_ACT_AIM_STICK) + " + Right Stick");
     H("Pikmin");
     L("Throw a Pikmin (hold, then release)", A);
     L("Pluck a sprout", sPending.holdToPluck ? A + " (hold to keep going)" : A);

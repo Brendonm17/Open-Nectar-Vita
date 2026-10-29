@@ -70,6 +70,8 @@ enum {
     PC_KEY_ACT_SWARM_STICK    = 26,
     // Tumbarse en un botón propio (en GameCube es la cruceta abajo).
     PC_KEY_ACT_LIEDOWN        = 27,
+    // Mantener: el stick derecho mueve el cursor (como el ratón) en vez de la cámara o el swarm.
+    PC_KEY_ACT_AIM_STICK      = 28,
     PC_KEY_ACT_COUNT
 };
 
