@@ -161,6 +161,8 @@ struct PcConfig {
     // Mod: free camera. Shift + mouse orbits on keyboard, the right stick
     // orbits on a pad, and the squad moves to the Swarm button.
     int freeCamera = 0;
+    // Free Camera: L mira hacia el cursor (1) o al frente del capitán (0).
+    int faceCursor = 0;
     int whistleRadiusPct = 100; // radio máximo del silbato, % del original
     int throwSpeedPct = 100;    // velocidad de las animaciones de coger y lanzar
     int throwCancelB = 0;       // B con un Pikmin en la mano lo devuelve al grupo
@@ -296,6 +298,7 @@ struct PcConfig {
         tekiHealthPct = 100;
         infiniteDay = 0;
         freeCamera = 0;
+        faceCursor = 0;
         whistleRadiusPct = 100;
         throwSpeedPct = 100;
         throwCancelB = 0;
@@ -1225,6 +1228,7 @@ void saveConfig() {
     out << "tekiHealthPct = " << sConfig.tekiHealthPct << "\n";
     out << "infiniteDay = " << sConfig.infiniteDay << "\n";
     out << "freeCamera = " << sConfig.freeCamera << "\n";
+    out << "faceCursor = " << sConfig.faceCursor << "\n";
     out << "whistleRadiusPct = " << sConfig.whistleRadiusPct << "\n";
     out << "throwSpeedPct = " << sConfig.throwSpeedPct << "\n";
     out << "throwCancelB = " << sConfig.throwCancelB << "\n";
@@ -1436,6 +1440,7 @@ void loadConfig() {
         else if (key == "infiniteDay") {
             sConfig.infiniteDay = atoi(val.c_str()) ? 1 : 0;
         }
+        else if (key == "faceCursor") sConfig.faceCursor = atoi(val.c_str()) ? 1 : 0;
         else if (key == "freeCamera") {
             sConfig.freeCamera = atoi(val.c_str()) ? 1 : 0;
         }
@@ -3037,6 +3042,10 @@ void modsRowChange(int row, bool left, bool right) {
     }
     else if (row == 40) {
         if (left || right) sPending.eternalNight = sPending.eternalNight ? 0 : 1;
+    }
+    // Free Camera: hacia dónde mira la cámara al pulsar L.
+    else if (row == 43) {
+        if (left || right) sPending.faceCursor = sPending.faceCursor ? 0 : 1;
     }
     else if (row == 42) {
         static const int kSteps[] = { 0, 30, 60, 120 };
@@ -8944,6 +8953,7 @@ int pc_settings_get_infinite_day(void) { if (pc_speedrun_active()) return 0;
     return pc_hardmode_active() ? 0 : sConfig.infiniteDay;
 }
 
+int pc_settings_get_face_cursor(void) { return sConfig.faceCursor; }
 int pc_settings_get_free_camera(void) { if (pc_speedrun_active()) return 0;
     return sConfig.freeCamera;
 }
@@ -9364,6 +9374,7 @@ void modsRowValue(int i, char* value, size_t n) {
     case 39: snprintf(value, n, "%s", sPending.p2Selection ? "On" : "Off"); break;
     case 40: snprintf(value, n, "%s", sPending.eternalNight ? "On" : "Off (original)"); break;
     case 41: snprintf(value, n, "%s", sPending.fireflies ? "On" : "Off (original)"); break;
+    case 43: snprintf(value, n, "%s", sPending.faceCursor ? "Cursor" : "Captain (default)"); break;
     case 42:
         if (sPending.bombRespawnSec <= 0) snprintf(value, n, "Off (original)");
         else if (sPending.bombRespawnSec < 60) snprintf(value, n, "Every %d s", sPending.bombRespawnSec);
@@ -9515,6 +9526,7 @@ const GroupRow kControlsRows[] = {
 const GroupRow kCameraRows[] = {
     { SRC_MODS, 14, "Free Camera", "Turn the camera freely, as in Pikmin 3. Mouse: push the cursor against the edge of its circle. Controller: right stick. L puts the camera back behind Olimar. Swarming moves to the Swarm button (assign it in Controls)." },
     { SRC_MODS, 38, "Free Camera Speed", "How fast the right stick turns the free camera. 100% is the default." },
+    { SRC_MODS, 43, "Face Forward Aims At", "With Free Camera, what L (face forward) points the camera at. Captain: behind the captain, and the cursor comes back in front of him. Cursor: towards the cursor, wherever you left it, as in the original game." },
     { SRC_MODS, 18, "First Person", "Look at the world from inside Olimar's helmet. Switch in game with the First Person button (V on keyboard, L3 on a controller)." },
     { SRC_MODS, 6, "Co-op Split Screen", "How the screen divides in two-player co-op." },
     { SRC_MODS, 7, "Co-op Merged Camera", "Joins both halves into one view while the captains are close." },
@@ -9631,7 +9643,7 @@ bool rowHidden(const GroupRow& r) {
     case SRC_RECENTER: return !sPending.gyroEnabled;
     case SRC_AIMBTN: return sPending.rsAimMode != PC_RS_AIM_HOLD;
     case SRC_GFX: return r.idx >= 7 && r.idx <= 9 && !sPending.colourGrading;
-    case SRC_MODS: return r.idx == 16 && !sPending.lockOn;
+    case SRC_MODS: return (r.idx == 16 && !sPending.lockOn) || (r.idx == 43 && !sPending.freeCamera);
     default: return false;
     }
 }
@@ -9782,6 +9794,7 @@ const char* disabledReason(const GroupRow& r) {
         if (r.idx == 0 && pc_window_get_controller())
             return "A controller is connected, so the cursor is aimed with its stick (Classic). Unplug it to use Mouse Cursor.";
         if (r.idx == 16 && !sPending.lockOn) return "Turn on Lock-On first.";
+        if (r.idx == 43 && !sPending.freeCamera) return "Turn on Free Camera first.";
         break;
     case SRC_DATA:
         if (r.idx == 3 && !online_guest()) return "Only while you are the guest of an online co-op session.";
