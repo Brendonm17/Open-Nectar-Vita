@@ -497,6 +497,12 @@ static const int kSwitchGamepadBindings[PC_KEY_ACT_COUNT] = {
     /* PC_KEY_ACT_AIM_STICK  */ -1, // se asigna en Controls
 };
 static int sPadScheme = PC_PAD_SCHEME_GAMECUBE;
+static int sRsAimMode = PC_RS_AIM_OFF;
+static float sRsAimSens = 1.0f;
+void pc_window_set_rs_aim(int mode, float sens) {
+    sRsAimMode = (mode >= PC_RS_AIM_OFF && mode <= PC_RS_AIM_ALWAYS) ? mode : PC_RS_AIM_OFF;
+    sRsAimSens = std::clamp(sens, 0.25f, 3.0f);
+}
 
 void pc_window_set_pad_scheme(int scheme) {
     sPadScheme = (scheme >= 0 && scheme < PC_PAD_SCHEME_COUNT) ? scheme : PC_PAD_SCHEME_GAMECUBE;
@@ -1200,16 +1206,17 @@ static bool pc_window_read_gamepad(SDL_GameController* ctl, u16& button, s8& sti
     const bool switchScheme = sPadScheme == PC_PAD_SCHEME_SWITCH;
     const bool swarmStick = boundButtonPressed(PC_KEY_ACT_SWARM_STICK);
     // Mantener "Aim cursor with right stick": el stick derecho apunta el cursor.
-    const bool aimStick = boundButtonPressed(PC_KEY_ACT_AIM_STICK) && !swarmStick;
+    const bool aimStick = !swarmStick && (sRsAimMode == PC_RS_AIM_ALWAYS
+        || (sRsAimMode == PC_RS_AIM_HOLD && boundButtonPressed(PC_KEY_ACT_AIM_STICK)));
     static bool sSwarmStickWasDown[2] = { false, false };
     static bool sSwarmStickMoved[2]   = { false, false };
     static bool sCamHeightArmed[2]    = { true, true };
     if (swarmStick && !sSwarmStickWasDown[pl]) sSwarmStickMoved[pl] = false;
     sFreeCamSubY[pl] = 0.0f;
     if (aimStick) {
-        // Unos 12 px por muestra a fondo, escalados por la sensibilidad del
-        // ratón, como si fuera el ratón: el juego lo suma al cursor.
-        const float k = 12.0f * sMouseSensitivity / 2.0f;
+        // Unos 12 px por muestra a fondo por la sensibilidad propia (Right
+        // Stick Aim Sensitivity), como si fuera el ratón: el juego lo suma al cursor.
+        const float k = 12.0f * sRsAimSens;
         const float ax = abs(rx) > axisDeadZone ? (float)rx / 32767.0f : 0.0f;
         const float ay = abs(ry) > axisDeadZone ? (float)ry / 32767.0f : 0.0f;
         if (ax != 0.0f || ay != 0.0f) pc_window_add_cursor_delta(ax * k, ay * k);

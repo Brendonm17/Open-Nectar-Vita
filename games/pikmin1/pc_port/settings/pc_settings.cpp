@@ -108,6 +108,9 @@ struct PcConfig {
     int controlMode = PC_CONTROL_CLASSIC;
     // Botones del mando por defecto: GameCube o Switch (PC_PAD_SCHEME_*).
     int padScheme = PC_PAD_SCHEME_GAMECUBE;
+    // Apuntar con el stick derecho (PC_RS_AIM_*) y su sensibilidad.
+    int rsAimMode = PC_RS_AIM_OFF;
+    float rsAimSens = 1.0f;
 
     // Keyboard bindings (scancodes for each action)
     int keyboardBindings[PC_KEY_ACT_COUNT];
@@ -274,6 +277,8 @@ struct PcConfig {
         fpsMode = 0;
         controlMode = PC_CONTROL_CLASSIC;
         padScheme = PC_PAD_SCHEME_GAMECUBE;
+        rsAimMode = PC_RS_AIM_OFF;
+        rsAimSens = 1.0f;
         mouseSensitivity = 1.0f;
         gyroEnabled = 0;
         gyroSensitivity = 1.0f;
@@ -906,6 +911,7 @@ void applyGraphics(const PcConfig& config) {
 void applyControls(const PcConfig& config) {
     pc_window_set_control_mode(config.controlMode);
     pc_window_set_pad_scheme(config.padScheme);
+    pc_window_set_rs_aim(config.rsAimMode, config.rsAimSens);
     pc_window_set_mouse_sensitivity(config.mouseSensitivity);
     pc_window_set_stick_dead_zone(config.stickDeadZone);
     pc_window_set_stick_invert(config.stickInvert);
@@ -1289,6 +1295,8 @@ void saveConfig() {
     out << "pikminModelYellow = " << sConfig.pikminModel[Yellow] << "\n";
     out << "controlMode = " << sConfig.controlMode << "\n";
     out << "padScheme = " << sConfig.padScheme << "\n";
+    out << "rsAimMode = " << sConfig.rsAimMode << "\n";
+    out << "rsAimSens = " << sConfig.rsAimSens << "\n";
     out << "mouseSensitivity = " << sConfig.mouseSensitivity << "\n";
     out << "gyroEnabled = " << sConfig.gyroEnabled << "\n";
     out << "gyroSensitivity = " << sConfig.gyroSensitivity << "\n";
@@ -1350,6 +1358,14 @@ void loadConfig() {
         else if (key == "renderScale") {
             sConfig.renderScale = (float)atof(val.c_str());
             if (sConfig.renderScale < 0.25f || sConfig.renderScale > 4.0f) sConfig.renderScale = 2.0f / 3.0f;
+        }
+        else if (key == "rsAimMode") {
+            sConfig.rsAimMode = atoi(val.c_str());
+            if (sConfig.rsAimMode < PC_RS_AIM_OFF || sConfig.rsAimMode > PC_RS_AIM_ALWAYS) sConfig.rsAimMode = PC_RS_AIM_OFF;
+        }
+        else if (key == "rsAimSens") {
+            sConfig.rsAimSens = (float)atof(val.c_str());
+            if (!(sConfig.rsAimSens >= 0.25f && sConfig.rsAimSens <= 3.0f)) sConfig.rsAimSens = 1.0f;
         }
         else if (key == "padScheme") {
             sConfig.padScheme = atoi(val.c_str());
@@ -2761,6 +2777,16 @@ void advancedRowChange(int row, bool left, bool right) {
     // Controller layout: GameCube or Switch button defaults.
     else if (row == 8) {
         if (left || right) sPending.padScheme = sPending.padScheme == PC_PAD_SCHEME_SWITCH ? PC_PAD_SCHEME_GAMECUBE : PC_PAD_SCHEME_SWITCH;
+    }
+    // Right stick aim: Off / Hold button / Always.
+    else if (row == 9) {
+        if (left) sPending.rsAimMode = (sPending.rsAimMode + 2) % 3;
+        else if (right) sPending.rsAimMode = (sPending.rsAimMode + 1) % 3;
+    }
+    // Right stick aim sensitivity (0.25 - 3.00, step 0.25).
+    else if (row == 10) {
+        if (left) sPending.rsAimSens = std::max(0.25f, sPending.rsAimSens - 0.25f);
+        if (right) sPending.rsAimSens = std::min(3.0f, sPending.rsAimSens + 0.25f);
     }
 }
 
@@ -9374,6 +9400,12 @@ void advancedRowValue(int i, char* value, size_t n) {
         break;
     }
     case 8: snprintf(value, n, "%s", sPending.padScheme == PC_PAD_SCHEME_SWITCH ? "Switch" : "GameCube (original)"); break;
+    case 9: {
+        const char* names[3] = { "Off", "Hold button", "Always" };
+        snprintf(value, n, "%s", names[(sPending.rsAimMode >= 0 && sPending.rsAimMode <= 2) ? sPending.rsAimMode : 0]);
+        break;
+    }
+    case 10: snprintf(value, n, "%.2f", sPending.rsAimSens); break;
     default: value[0] = '\0';
     }
 }
@@ -9410,7 +9442,7 @@ namespace {
 // página de vídeo, de Advanced, de Graphics, de Mods...), así que reordenar
 // aquí no toca qué hace cada ajuste ni cómo se guarda: el .conf va por nombre.
 // ---------------------------------------------------------------------------
-enum RowSrc { SRC_MAIN, SRC_ADV, SRC_GFX, SRC_MODS, SRC_DATA, SRC_KEYS, SRC_PADS, SRC_RECENTER, SRC_ACH, SRC_PADGUIDE };
+enum RowSrc { SRC_MAIN, SRC_ADV, SRC_GFX, SRC_MODS, SRC_DATA, SRC_KEYS, SRC_PADS, SRC_RECENTER, SRC_ACH, SRC_PADGUIDE, SRC_AIMBTN };
 struct GroupRow {
     RowSrc src;
     int idx;
@@ -9450,6 +9482,9 @@ const GroupRow kGraphicsRows[] = {
 
 const GroupRow kControlsRows[] = {
     { SRC_ADV, 8, "Controller Layout", "What each controller button does. GameCube: the original layout. Switch: as in Pikmin 1 + 2 on Switch (right stick turns the camera, L + right stick swarms, ZL faces forward, ZR zooms). Buttons you reassigned keep your choice." },
+    { SRC_ADV, 9, "Right Stick Aim", "Controller only. Move the cursor with the right stick, like a mouse. Hold button: only while you hold the button below (the right stick goes back to the camera when you let go). Always: the right stick always aims; the swarm button still swarms." },
+    { SRC_AIMBTN, 0, "Right Stick Aim Button", "Button to hold so the right stick aims the cursor (Hold button mode). A: choose the button." },
+    { SRC_ADV, 10, "Right Stick Aim Sensitivity", "How fast the cursor moves with the right stick. 1.00 is the default." },
     { SRC_PADGUIDE, 0, "Controller Guide", "Every controller button and what it does right now, sorted by topic. It follows the layout, your reassigned buttons and the mods you have on." },
     { SRC_KEYS, 0, "Keyboard Bindings", "Two keys or mouse buttons per action. A: main key. Right: second key. Left: back to default. While waiting, Delete clears it. Shift, Ctrl and Alt can be used." },
     { SRC_PADS, 0, "Controller Bindings", "Choose the controller button for each action." },
@@ -9591,8 +9626,10 @@ bool rowHidden(const GroupRow& r) {
     case SRC_ADV:
         if (r.idx == 0) return sPending.controlMode == PC_CONTROL_CLASSIC;
         if (r.idx >= 5 && r.idx <= 7) return !sPending.gyroEnabled;
+        if (r.idx == 10) return sPending.rsAimMode == PC_RS_AIM_OFF;
         return false;
     case SRC_RECENTER: return !sPending.gyroEnabled;
+    case SRC_AIMBTN: return sPending.rsAimMode != PC_RS_AIM_HOLD;
     case SRC_GFX: return r.idx >= 7 && r.idx <= 9 && !sPending.colourGrading;
     case SRC_MODS: return r.idx == 16 && !sPending.lockOn;
     default: return false;
@@ -9724,6 +9761,8 @@ const char* disabledReason(const GroupRow& r) {
             return "Borderless always uses the desktop resolution.";
         break;
     case SRC_ADV:
+        if ((r.idx == 9 || r.idx == 10) && !pc_window_get_controller()) return "Connect a controller first.";
+        if (r.idx == 10 && sPending.rsAimMode == PC_RS_AIM_OFF) return "Turn on Right Stick Aim first.";
         if (r.idx == 0 && sPending.controlMode == PC_CONTROL_CLASSIC)
             return "Only used with the Mouse Cursor control scheme.";
         if ((r.idx == 5 || r.idx == 6) && !sPending.gyroEnabled) return "Turn on Gyro Aiming first.";
@@ -9731,6 +9770,10 @@ const char* disabledReason(const GroupRow& r) {
         break;
     case SRC_RECENTER:
         if (!sPending.gyroEnabled) return "Turn on Gyro Aiming first.";
+        break;
+    case SRC_AIMBTN:
+        if (!pc_window_get_controller()) return "Connect a controller first.";
+        if (sPending.rsAimMode != PC_RS_AIM_HOLD) return "Set Right Stick Aim to Hold button first.";
         break;
     case SRC_GFX:
         if (r.idx >= 7 && r.idx <= 9 && !sPending.colourGrading) return "Turn on Colour Adjustments first.";
@@ -9811,18 +9854,23 @@ void buildPadGuide() {
     auto H = [](const char* t) { sPadGuide.push_back({ t, "", true }); };
     auto L = [](const std::string& a, const std::string& b) { sPadGuide.push_back({ a, b, false }); };
     const bool sw = sPending.padScheme == PC_PAD_SCHEME_SWITCH;
-    const bool rsCamera = sw || sPending.freeCamera;
+    // "Right Stick Aim: Always" se queda el stick derecho: ni cámara ni swarm sin el botón.
+    const bool aimAlways = sPending.rsAimMode == PC_RS_AIM_ALWAYS;
+    const bool rsCamera = (sw || sPending.freeCamera) && !aimAlways;
     const std::string A = padBtn(PC_KEY_ACT_A), B = padBtn(PC_KEY_ACT_B), X = padBtn(PC_KEY_ACT_X);
     const std::string Lt = padBtn(PC_KEY_ACT_L);
     std::string swarm;
-    if (!rsCamera) swarm = "Right Stick";
+    if (!rsCamera && !aimAlways && !sw && !sPending.freeCamera) swarm = "Right Stick";
     else if (padBound(PC_KEY_ACT_SWARM_STICK)) swarm = "Hold " + padBtn(PC_KEY_ACT_SWARM_STICK) + " + Right Stick";
     else swarm = "Assign \"Swarm with right stick\"";
 
     H(sw ? "Layout: Switch" : "Layout: GameCube (original)");
     H("Moving");
     L("Move the captain and the cursor", "Left Stick");
-    if (padBound(PC_KEY_ACT_AIM_STICK)) L("Aim the cursor", "Hold " + padBtn(PC_KEY_ACT_AIM_STICK) + " + Right Stick");
+    if (sPending.rsAimMode == PC_RS_AIM_ALWAYS) L("Aim the cursor", "Right Stick");
+    else if (sPending.rsAimMode == PC_RS_AIM_HOLD)
+        L("Aim the cursor", padBound(PC_KEY_ACT_AIM_STICK) ? "Hold " + padBtn(PC_KEY_ACT_AIM_STICK) + " + Right Stick"
+                                                            : "Assign \"Right Stick Aim Button\"");
     H("Pikmin");
     L("Throw a Pikmin (hold, then release)", A);
     L("Pluck a sprout", sPending.holdToPluck ? A + " (hold to keep going)" : A);
@@ -9950,6 +9998,7 @@ int pc_settings_row_opens_picker(int group, int row) {
     case SRC_KEYS: sPickerFocusRow = 0; return PC_SET_PICKER_KEYBOARD;
     case SRC_PADS: sPickerFocusRow = 0; return PC_SET_PICKER_GAMEPAD;
     case SRC_RECENTER: sPickerFocusRow = PC_KEY_ACT_GYRO_RECENTER; return PC_SET_PICKER_GAMEPAD;
+    case SRC_AIMBTN: sPickerFocusRow = PC_KEY_ACT_AIM_STICK; return PC_SET_PICKER_GAMEPAD;
     case SRC_PADGUIDE: return PC_SET_PICKER_PADGUIDE;
     default: return 0;
     }
@@ -10014,6 +10063,12 @@ void pc_settings_row_value(int group, int row, char* out, unsigned long n) {
         case SRC_RECENTER: {
             char name[64];
             gamepadBindingName(PC_KEY_ACT_GYRO_RECENTER, name, sizeof(name));
+            snprintf(out, n, "%s  >", name);
+            break;
+        }
+        case SRC_AIMBTN: {
+            char name[64];
+            gamepadBindingName(PC_KEY_ACT_AIM_STICK, name, sizeof(name));
             snprintf(out, n, "%s  >", name);
             break;
         }

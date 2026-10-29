@@ -82,6 +82,10 @@ enum {
     PC_PAD_SCHEME_SWITCH   = 1,
     PC_PAD_SCHEME_COUNT
 };
+// Apuntar con el stick derecho (solo mando): 0 = no, 1 = mientras se mantiene
+// "Aim cursor with right stick", 2 = siempre. sens multiplica la velocidad.
+enum { PC_RS_AIM_OFF = 0, PC_RS_AIM_HOLD = 1, PC_RS_AIM_ALWAYS = 2 };
+void pc_window_set_rs_aim(int mode, float sens);
 void pc_window_set_pad_scheme(int scheme);
 int pc_window_get_pad_scheme(void);
 // Botón por defecto de una acción en un esquema (-1 = ninguno).
