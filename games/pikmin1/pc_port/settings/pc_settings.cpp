@@ -9736,6 +9736,8 @@ const char* disabledReason(const GroupRow& r) {
         if (r.idx >= 7 && r.idx <= 9 && !sPending.colourGrading) return "Turn on Colour Adjustments first.";
         break;
     case SRC_MODS:
+        if (r.idx == 0 && pc_window_get_controller())
+            return "A controller is connected, so the cursor is aimed with its stick (Classic). Unplug it to use Mouse Cursor.";
         if (r.idx == 16 && !sPending.lockOn) return "Turn on Lock-On first.";
         break;
     case SRC_DATA:

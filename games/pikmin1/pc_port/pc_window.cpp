@@ -315,7 +315,10 @@ static bool sMouseWarped = false;
 // Control mode
 static int sControlMode = PC_CONTROL_CLASSIC;
 // Speedrun: siempre el esquema clásico (cursor con el stick, como en GameCube).
-static int effectiveControlMode() { return pc_speedrun_active() ? PC_CONTROL_CLASSIC : sControlMode; }
+// Con un mando conectado el cursor va con su stick: Mouse Cursor no aplica.
+static int effectiveControlMode() {
+    return (pc_speedrun_active() || !sOpenPads.empty()) ? PC_CONTROL_CLASSIC : sControlMode;
+}
 static float sMouseSensitivity = 2.0f;
 static bool sSettingsMenuOpen = false;
 

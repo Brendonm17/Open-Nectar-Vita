@@ -262,7 +262,10 @@ static bool sMouseWarped = false;
 
 // Control mode
 static int sControlMode = PC_CONTROL_CLASSIC;
-static int effectiveControlMode() { return pc_speedrun_active() ? PC_CONTROL_CLASSIC : sControlMode; }
+// Con un mando conectado el cursor va con su stick: Mouse Cursor no aplica.
+static int effectiveControlMode() {
+    return (pc_speedrun_active() || !sOpenPads.empty()) ? PC_CONTROL_CLASSIC : sControlMode;
+}
 static float sMouseSensitivity = 2.0f;
 static bool sSettingsMenuOpen = false;
 
@@ -2034,7 +2037,7 @@ void pc_window_set_control_mode(int mode) {
 }
 
 int pc_window_get_control_mode(void) {
-    return sControlMode;
+    return effectiveControlMode();
 }
 
 void pc_window_set_mouse_sensitivity(float sensitivity) {
