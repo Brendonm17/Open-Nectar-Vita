@@ -301,6 +301,8 @@ const SDL_Scancode kDefaultKeyBindings[PC_KEY_ACT_COUNT] = {
     /* PC_KEY_ACT_FIRSTPERSON */ SDL_SCANCODE_V,
     /* PC_KEY_ACT_GYRO_RECENTER */ SDL_SCANCODE_UNKNOWN, // el giroscopio va en el mando
     /* PC_KEY_ACT_SPEEDRUN_RESET */ SDL_SCANCODE_F5,
+    /* PC_KEY_ACT_SWARM_STICK */ SDL_SCANCODE_UNKNOWN, // el teclado ya tiene Swarm y TFGH
+    /* PC_KEY_ACT_LIEDOWN     */ SDL_SCANCODE_UNKNOWN,
 };
 
 SDL_Scancode pc_window_default_key_binding2(int action) {
@@ -339,7 +341,53 @@ const int kDefaultGamepadBindings[PC_KEY_ACT_COUNT] = {
     /* PC_KEY_ACT_FIRSTPERSON */ SDL_CONTROLLER_BUTTON_LEFTSTICK,
     /* PC_KEY_ACT_GYRO_RECENTER */ -1, // sin botón libre por defecto; se asigna en Controls
     /* PC_KEY_ACT_SPEEDRUN_RESET */ -1, // sin botón libre por defecto; se asigna en Controls
+    /* PC_KEY_ACT_SWARM_STICK */ -1, // con Free Camera se asigna en Controls
+    /* PC_KEY_ACT_LIEDOWN     */ -1, // mantener X, como en GameCube
 };
+
+// Esquema Switch (Pikmin 2 de Switch): B silba, X retira, Y cambia de capitán,
+// ZL mira al frente (y fija con Lock-On), ZR zoom, L + stick derecho swarm,
+// stick derecho cámara, R cambia el tipo, clic del stick derecho se tumba.
+#define PC_GP_AXIS(axis) (PC_GP_AXIS_BIND + (axis) * 2 + 1)
+static const int kSwitchGamepadBindings[PC_KEY_ACT_COUNT] = {
+    /* PC_KEY_ACT_A       */ SDL_CONTROLLER_BUTTON_A,
+    /* PC_KEY_ACT_B       */ SDL_CONTROLLER_BUTTON_B,
+    /* PC_KEY_ACT_X       */ SDL_CONTROLLER_BUTTON_X,
+    /* PC_KEY_ACT_Y       */ SDL_CONTROLLER_BUTTON_Y,
+    /* PC_KEY_ACT_Z       */ -1, // altura de cámara: stick derecho arriba/abajo
+    /* PC_KEY_ACT_START   */ SDL_CONTROLLER_BUTTON_START,
+    /* PC_KEY_ACT_L       */ PC_GP_AXIS(SDL_CONTROLLER_AXIS_TRIGGERLEFT),
+    /* PC_KEY_ACT_R       */ PC_GP_AXIS(SDL_CONTROLLER_AXIS_TRIGGERRIGHT),
+    /* PC_KEY_ACT_DPAD_UP    */ SDL_CONTROLLER_BUTTON_DPAD_UP,
+    /* PC_KEY_ACT_DPAD_DOWN  */ SDL_CONTROLLER_BUTTON_DPAD_DOWN,
+    /* PC_KEY_ACT_DPAD_LEFT  */ SDL_CONTROLLER_BUTTON_DPAD_LEFT,
+    /* PC_KEY_ACT_DPAD_RIGHT */ SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, // R: cambiar tipo
+    /* PC_KEY_ACT_STICK_UP   */ -1,
+    /* PC_KEY_ACT_STICK_DOWN */ -1,
+    /* PC_KEY_ACT_STICK_LEFT */ -1,
+    /* PC_KEY_ACT_STICK_RIGHT*/ -1,
+    /* PC_KEY_ACT_CSTICK_UP   */ -1,
+    /* PC_KEY_ACT_CSTICK_DOWN */ -1,
+    /* PC_KEY_ACT_CSTICK_LEFT */ -1,
+    /* PC_KEY_ACT_CSTICK_RIGHT*/ -1,
+    /* PC_KEY_ACT_SWARM       */ -1,
+    /* PC_KEY_ACT_LOCKON      */ -1, // ZL, si el mod Lock-On está activo
+    /* PC_KEY_ACT_FIRSTPERSON */ SDL_CONTROLLER_BUTTON_LEFTSTICK,
+    /* PC_KEY_ACT_GYRO_RECENTER */ -1,
+    /* PC_KEY_ACT_SPEEDRUN_RESET */ -1,
+    /* PC_KEY_ACT_SWARM_STICK */ SDL_CONTROLLER_BUTTON_LEFTSHOULDER,
+    /* PC_KEY_ACT_LIEDOWN     */ SDL_CONTROLLER_BUTTON_RIGHTSTICK,
+};
+static int sPadScheme = PC_PAD_SCHEME_GAMECUBE;
+
+void pc_window_set_pad_scheme(int scheme) {
+    sPadScheme = (scheme >= 0 && scheme < PC_PAD_SCHEME_COUNT) ? scheme : PC_PAD_SCHEME_GAMECUBE;
+}
+int pc_window_get_pad_scheme(void) { return sPadScheme; }
+int pc_window_scheme_default_gamepad_binding(int scheme, int action) {
+    if (action < 0 || action >= PC_KEY_ACT_COUNT) return -1;
+    return scheme == PC_PAD_SCHEME_SWITCH ? kSwitchGamepadBindings[action] : kDefaultGamepadBindings[action];
+}
 
 // Action names for UI display.
 static const char* kKeyActionNames[PC_KEY_ACT_COUNT] = {
@@ -349,6 +397,7 @@ static const char* kKeyActionNames[PC_KEY_ACT_COUNT] = {
     "C-Stick Up", "C-Stick Down", "C-Stick Left", "C-Stick Right",
     "Swarm to cursor",
     "Lock-On", "First Person", "Gyro Recenter", "Speedrun Reset",
+    "Swarm with right stick (hold)", "Lie down",
 };
 
 static void initKeyBindings() {
@@ -430,8 +479,9 @@ int pc_window_get_cstick_invert(void) {
 int pc_window_get_gamepad_binding(int action) {
     if (action < 0 || action >= PC_KEY_ACT_COUNT) return -1;
     initGamepadBindings();
+    if (sGamepadBindings[action] == PC_GP_BIND_NONE) return -1;
     if (sGamepadBindings[action] >= 0) return sGamepadBindings[action];
-    return kDefaultGamepadBindings[action];
+    return pc_window_scheme_default_gamepad_binding(sPadScheme, action);
 }
 
 bool pc_window_last_input_is_gamepad(void)
@@ -1029,15 +1079,50 @@ static bool pc_window_read_gamepad(SDL_GameController* ctl, u16& button, s8& sti
     // which has no default on the pad: every D-pad direction is already a
     // Pikmin 2 action (sprays, maturity and colour of the held Pikmin), so it
     // is left for the player to bind.
+    //
+    // Esquema Switch: el stick derecho es siempre la cámara (como Free Camera,
+    // pero solo para el mando) y arriba/abajo cambia la altura (un toque de Z
+    // por empujón). Mantener "Swarm with right stick" (L) lo devuelve al swarm
+    // en cualquier esquema; con el mod Charge, un toque de ese botón sin mover
+    // el stick lanza la carga.
+    const int pl = sInputPlayer == 1 ? 1 : 0;
+    const bool switchScheme = sPadScheme == PC_PAD_SCHEME_SWITCH;
+    const bool swarmStick = boundButtonPressed(PC_KEY_ACT_SWARM_STICK);
+    static bool sSwarmStickWasDown[2] = { false, false };
+    static bool sSwarmStickMoved[2]   = { false, false };
+    static bool sCamHeightArmed[2]    = { true, true };
+    if (swarmStick && !sSwarmStickWasDown[pl]) sSwarmStickMoved[pl] = false;
     sFreeCamSubY[sInputPlayer] = 0.0f;
-    if (pc_settings_get_free_camera()) {
+    if ((switchScheme || pc_settings_get_free_camera()) && !swarmStick) {
         if (abs(ry) > axisDeadZone) sFreeCamSubY[sInputPlayer] = pc_pad_axis_from_sdl(-ry) / 72.0f;
         if (abs(rx) > axisDeadZone) {
             pc_window_add_camera_drag(-(float)rx / 32767.0f * 0.02f * pc_settings_get_free_camera_pad_scale());
         }
+        if (switchScheme) {
+            if (abs(ry) > 24000 && abs(ry) > abs(rx) && sCamHeightArmed[pl]) {
+                button |= PAD_TRIGGER_Z;
+                sCamHeightArmed[pl] = false;
+            } else if (abs(ry) < 12000) {
+                sCamHeightArmed[pl] = true;
+            }
+        }
     } else {
         if (abs(rx) > axisDeadZone) substickX = pc_pad_axis_from_sdl(rx);
         if (abs(ry) > axisDeadZone) substickY = pc_pad_axis_from_sdl(-ry);
+        if (swarmStick && (abs(rx) > 12000 || abs(ry) > 12000)) sSwarmStickMoved[pl] = true;
+    }
+    if (!swarmStick && sSwarmStickWasDown[pl] && !sSwarmStickMoved[pl] && pc_settings_get_charge())
+        sSwarmPending[pl] = true;
+    sSwarmStickWasDown[pl] = swarmStick;
+
+    // Tumbarse: en Pikmin 2 es mantener X (un toque de X retira a los Pikmin).
+    if (boundButtonPressed(PC_KEY_ACT_LIEDOWN)) button |= PAD_BUTTON_X;
+    // Esquema Switch: X con un Pikmin en la mano (A sujeto) cambia su madurez,
+    // que en GameCube es la cruceta arriba con el Pikmin en la mano.
+    if (switchScheme && (button & PAD_BUTTON_A) && boundButtonPressed(PC_KEY_ACT_X)
+        && !boundButtonPressed(PC_KEY_ACT_LIEDOWN)) {
+        button &= ~PAD_BUTTON_X;
+        button |= PAD_BUTTON_UP;
     }
 
     // Optional digital bindings for stick directions are merged after the
@@ -1324,6 +1409,7 @@ void pc_window_poll_events(PADStatus* pad) {
                        || (!pc_bind_is_mouse(bindB2) && pc_window_binding_held(bindB2, state, boundMouse));
 
     if (held(PC_KEY_ACT_A))        button |= PAD_BUTTON_A;
+    if (held(PC_KEY_ACT_LIEDOWN))  button |= PAD_BUTTON_X; // tumbarse = mantener X
     const bool bMouseHeld = (pc_bind_is_mouse(bindB1) && pc_window_binding_held(bindB1, state, boundMouse))
                          || (pc_bind_is_mouse(bindB2) && mouseSecondOk && pc_window_binding_held(bindB2, state, boundMouse));
     if (bMouseHeld || bKeyHeld) button |= PAD_BUTTON_B;
@@ -1416,6 +1502,9 @@ void pc_window_poll_events(PADStatus* pad) {
     const bool usedKeyboard = button != 0 || dirX != 0 || dirY != 0 || cdirX != 0 || cdirY != 0;
     bool usedGamepad = false;
     sSwarmHeld = held(PC_KEY_ACT_SWARM);
+#if PIKI_PC_TOUCH
+    sSwarmHeld = sSwarmHeld || pc_touch_swarm_active();
+#endif
 
     {
         // Por jugador: el teclado de quien lo tenga y el mando de cada uno.
@@ -1429,6 +1518,11 @@ void pc_window_poll_events(PADStatus* pad) {
                 lockDown[p] |= pc_window_gamepad_bind_held(ctl, pc_window_get_gamepad_binding(PC_KEY_ACT_LOCKON));
                 swarmDown[p] |= pc_window_gamepad_bind_held(ctl, pc_window_get_gamepad_binding(PC_KEY_ACT_SWARM));
                 fpDown[p] |= pc_window_gamepad_bind_held(ctl, pc_window_get_gamepad_binding(PC_KEY_ACT_FIRSTPERSON));
+                // Esquema Switch con el mod Lock-On: ZL (el L de GameCube) también
+                // fija objetivo, si Lock-On no tiene un botón propio.
+                if (sPadScheme == PC_PAD_SCHEME_SWITCH && pc_settings_get_lock_on()
+                    && pc_window_get_gamepad_binding(PC_KEY_ACT_LOCKON) < 0)
+                    lockDown[p] |= pc_window_gamepad_bind_held(ctl, pc_window_get_gamepad_binding(PC_KEY_ACT_L));
             }
             if (lockDown[p] && !sLockOnWasDown[p]) sLockOnPending[p] = true;
             sLockOnWasDown[p] = lockDown[p];

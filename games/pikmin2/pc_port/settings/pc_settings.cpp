@@ -132,6 +132,8 @@ struct PcConfig {
 
     // Control mode (0=Classic, 1=Mouse Cursor)
     int controlMode = PC_CONTROL_CLASSIC;
+    // Botones del mando por defecto: GameCube o Switch (PC_PAD_SCHEME_*).
+    int padScheme = PC_PAD_SCHEME_GAMECUBE;
 
     // Keyboard bindings (scancodes for each action)
     int keyboardBindings[PC_KEY_ACT_COUNT];
@@ -292,6 +294,7 @@ struct PcConfig {
         aspectRatioMode = 0;
         fpsMode = 0;
         controlMode = PC_CONTROL_CLASSIC;
+        padScheme = PC_PAD_SCHEME_GAMECUBE;
         mouseSensitivity = 1.0f;
         gyroEnabled = 0;
         gyroSensitivity = 1.0f;
@@ -580,6 +583,14 @@ Uint32 sCapturePrevMouse = 0; // mouse buttons seen on the previous capture tick
 
 // Gamepad controls submenu state.
 bool sInGamepadSubmenu = false;
+// Controller Guide: qué hace cada botón con el esquema, los botones y los
+// mods de ahora mismo (se rehace cada vez que se pinta).
+bool sInPadGuide = false;
+int sPadGuideSel = 0;
+int padGuideCount();
+const char* padGuideLabel(int i);
+const char* padGuideValue(int i);
+bool padGuideIsHeader(int i);
 int sGamepadSelection = 0;
 bool sWaitingForButton = false;
 
@@ -953,6 +964,7 @@ void applyGraphics(const PcConfig& config) {
 
 void applyControls(const PcConfig& config) {
     pc_window_set_control_mode(config.controlMode);
+    pc_window_set_pad_scheme(config.padScheme);
     pc_window_set_mouse_sensitivity(config.mouseSensitivity);
     pc_window_set_stick_dead_zone(config.stickDeadZone);
     pc_window_set_stick_invert(config.stickInvert);
@@ -1044,6 +1056,7 @@ void closeMenu() {
     sHdModelRestartPrompt = false;
     sInControlsSubmenu = false;
     sInGamepadSubmenu = false;
+    sInPadGuide = false;
     sWaitingForKey = false;
     sWaitingForButton = false;
     sCaptureWaitRelease = false;
@@ -1250,6 +1263,7 @@ void saveConfig() {
     out << "texturePackEnabled = " << sConfig.texturePackEnabled << "\n";
     out << "hdModelsDisabled = " << sConfig.hdModelsDisabled << "\n";
     out << "controlMode = " << sConfig.controlMode << "\n";
+    out << "padScheme = " << sConfig.padScheme << "\n";
     out << "mouseSensitivity = " << sConfig.mouseSensitivity << "\n";
     out << "gyroEnabled = " << sConfig.gyroEnabled << "\n";
     out << "gyroSensitivity = " << sConfig.gyroSensitivity << "\n";
@@ -1320,6 +1334,10 @@ void loadConfig() {
         else if (key == "renderScale") {
             sConfig.renderScale = (float)atof(val.c_str());
             if (sConfig.renderScale < 0.25f || sConfig.renderScale > 4.0f) sConfig.renderScale = 2.0f / 3.0f;
+        }
+        else if (key == "padScheme") {
+            sConfig.padScheme = atoi(val.c_str());
+            if (sConfig.padScheme < 0 || sConfig.padScheme >= PC_PAD_SCHEME_COUNT) sConfig.padScheme = PC_PAD_SCHEME_GAMECUBE;
         }
         else if (key == "controlMode") {
             sConfig.controlMode = atoi(val.c_str());
@@ -1587,7 +1605,7 @@ void loadConfig() {
             int idx = atoi(key.substr(p2 ? 4 : 3).c_str());
             if (idx >= 0 && idx < PC_KEY_ACT_COUNT) {
                 const int button = atoi(val.c_str());
-                const bool isButton = button >= -1 && button < SDL_CONTROLLER_BUTTON_MAX;
+                const bool isButton = button >= PC_GP_BIND_NONE && button < SDL_CONTROLLER_BUTTON_MAX;
                 const int axis = (button - PC_GP_AXIS_BIND) / 2;
                 const bool isAxis = button >= PC_GP_AXIS_BIND && axis >= 0 && axis < SDL_CONTROLLER_AXIS_MAX;
                 if (isButton || isAxis) {
@@ -1645,14 +1663,24 @@ bool padNavRight(SDL_GameController* c)
 	return padEdge((c && (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_DPAD_RIGHT)
 	                   || menuStickHorizontal(c, 1))) || (sTouchFrameButtons & PAD_BUTTON_RIGHT), 3);
 }
-bool padNavA(SDL_GameController* c) { return padEdge((c && SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_A)) || (sTouchFrameButtons & PAD_BUTTON_A), 4); }
-bool padNavB(SDL_GameController* c) { return padEdge((c && SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_B)) || (sTouchFrameButtons & PAD_BUTTON_B), 5); }
+// A y B del menú siguen los bindings del mando, como el juego: con A y B
+// intercambiados el menú aceptaba con uno y el juego con el otro. Una acción
+// sin botón asignado vuelve al físico para que el menú nunca quede inservible.
+bool menuPadHeld(SDL_GameController* c, int action, SDL_GameControllerButton physical)
+{
+	if (!c)
+		return false;
+	const int bind = pc_window_get_gamepad_binding(action);
+	if (bind < 0)
+		return SDL_GameControllerGetButton(c, physical) != 0;
+	return pc_window_gamepad_bind_held(c, bind);
+}
+bool padNavA(SDL_GameController* c) { return padEdge(menuPadHeld(c, PC_KEY_ACT_A, SDL_CONTROLLER_BUTTON_A) || (sTouchFrameButtons & PAD_BUTTON_A), 4); }
+bool padNavB(SDL_GameController* c) { return padEdge(menuPadHeld(c, PC_KEY_ACT_B, SDL_CONTROLLER_BUTTON_B) || (sTouchFrameButtons & PAD_BUTTON_B), 5); }
 
 // The new-game prompt is a game-facing dialog rather than the F1 settings
 // menu. Its accept/cancel actions follow the configured A/B bindings, which
 // may be either SDL buttons or the axis encodings used by the remapping page.
-// Keep these separate from padNavA/B: F1 navigation deliberately retains its
-// physical A/B convention.
 bool promptPadBinding(SDL_GameController* c, int action, int edgeSlot)
 {
 	return c && padEdge(pc_window_gamepad_bind_held(c, pc_window_get_gamepad_binding(action)), edgeSlot);
@@ -1676,7 +1704,7 @@ bool captureConfirmHeld(SDL_GameController* ctl)
 		return true;
 	if (SDL_SCANCODE_SPACE < numKeys && keys[SDL_SCANCODE_SPACE])
 		return true;
-	return ctl && SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_A);
+	return menuPadHeld(ctl, PC_KEY_ACT_A, SDL_CONTROLLER_BUTTON_A);
 }
 
 } // namespace
@@ -2165,6 +2193,22 @@ void pollMenuInput() {
         return;
     }
 
+    // Controller Guide: solo lectura; arriba/abajo recorre, B/Esc vuelve.
+    if (sInPadGuide) {
+        bool up = keyWentDown(SDL_SCANCODE_UP) || keyWentDown(SDL_SCANCODE_W);
+        bool down = keyWentDown(SDL_SCANCODE_DOWN) || keyWentDown(SDL_SCANCODE_S);
+        if (ctl || sTouchFrameButtons) {
+            if (padNavUp(ctl)) up = true;
+            if (padNavDown(ctl)) down = true;
+        }
+        const int count = padGuideCount();
+        if (up && sPadGuideSel > 0) sPadGuideSel--;
+        if (down && sPadGuideSel < count - 1) sPadGuideSel++;
+        if (menuCancelKey() || keyWentDown(SDL_SCANCODE_B) || padNavB(ctl) || padNavA(ctl) || menuOkKey())
+            sInPadGuide = false;
+        return;
+    }
+
     // Gamepad submenu (button capture mode).
     if (sInGamepadSubmenu) {
         if (pollButtonCapture(ctl)) return;
@@ -2202,8 +2246,14 @@ void pollMenuInput() {
             sCaptureWaitRelease = true;
             return;
         }
+        // Izquierda/derecha: por defecto <-> ninguno; Supr/Retroceso lo vacía.
+        if (keyWentDown(SDL_SCANCODE_DELETE) || keyWentDown(SDL_SCANCODE_BACKSPACE)) {
+            pendingPadBinds()[sGamepadSelection] = PC_GP_BIND_NONE;
+            return;
+        }
         if (left || right) {
-            pendingPadBinds()[sGamepadSelection] = -1;
+            int& b = pendingPadBinds()[sGamepadSelection];
+            b = b == -1 ? PC_GP_BIND_NONE : -1;
             return;
         }
         if (menuCancelKey() || keyWentDown(SDL_SCANCODE_K) ||
@@ -2492,6 +2542,10 @@ void pollMenuInput() {
             sWaitingForKey = false;
             sCaptureWaitRelease = false;
             break;
+        case PC_SET_PICKER_PADGUIDE:
+            sInPadGuide = true;
+            sPadGuideSel = 0;
+            break;
         case PC_SET_PICKER_GAMEPAD:
             sInGamepadSubmenu = true;
             sGamepadSelection = pc_settings_picker_current(picker);
@@ -2557,6 +2611,13 @@ bool pollButtonCapture(SDL_GameController* ctl) {
     if (sWaitingForButton) {
         // B/Circle is a bindable face button. Only Esc cancels capture.
         if (keyWentDown(SDL_SCANCODE_ESCAPE)) {
+            sWaitingForButton = false;
+            sCaptureWaitRelease = false;
+            return true;
+        }
+        // Supr o Retroceso dejan la acción sin botón, como en el teclado.
+        if (keyWentDown(SDL_SCANCODE_DELETE) || keyWentDown(SDL_SCANCODE_BACKSPACE)) {
+            pendingPadBinds()[sGamepadSelection] = PC_GP_BIND_NONE;
             sWaitingForButton = false;
             sCaptureWaitRelease = false;
             return true;
@@ -2629,6 +2690,10 @@ void advancedRowChange(int row, bool left, bool right) {
     // Gyro calibrate: measures the resting drift of the active sensor.
     else if (row == 7) {
         if (left || right) pc_gyro_calibrate_start();
+    }
+    // Controller layout: GameCube or Switch button defaults.
+    else if (row == 8) {
+        if (left || right) sPending.padScheme = sPending.padScheme == PC_PAD_SCHEME_SWITCH ? PC_PAD_SCHEME_GAMECUBE : PC_PAD_SCHEME_SWITCH;
     }
 }
 
@@ -5241,8 +5306,8 @@ void pcNewGamePromptInput()
     if (!sNewGamePromptOpen) return;
     if (!sNewGamePromptArmed) {
         SDL_GameController* pad = pc_window_get_controller();
-        const bool padHeld = pad && (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A)
-                                     || SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B));
+        const bool padHeld = (menuPadHeld(pad, PC_KEY_ACT_A, SDL_CONTROLLER_BUTTON_A)
+                                     || menuPadHeld(pad, PC_KEY_ACT_B, SDL_CONTROLLER_BUTTON_B));
         const Uint8* keys = SDL_GetKeyboardState(nullptr);
         const bool keyHeld = keys && (keys[SDL_SCANCODE_RETURN] || keys[SDL_SCANCODE_SPACE] || keys[SDL_SCANCODE_ESCAPE]);
         sTouchTapPending = false;
@@ -6011,8 +6076,8 @@ void pcCaptainSelectInput()
     }
     if (!sCapSelArmed) {
         SDL_GameController* pad = pc_window_get_controller();
-        const bool padHeld = pad && (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A)
-                                     || SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B));
+        const bool padHeld = (menuPadHeld(pad, PC_KEY_ACT_A, SDL_CONTROLLER_BUTTON_A)
+                                     || menuPadHeld(pad, PC_KEY_ACT_B, SDL_CONTROLLER_BUTTON_B));
         const Uint8* keys = SDL_GetKeyboardState(nullptr);
         const bool keyHeld = keys && (keys[SDL_SCANCODE_RETURN] || keys[SDL_SCANCODE_SPACE] || keys[SDL_SCANCODE_ESCAPE]);
         sTouchTapPending = false;
@@ -6401,8 +6466,8 @@ void pcSpeedrunMenuInput()
     if (!sSrMenuOpen) return;
     if (!sSrMenuArmed) {
         SDL_GameController* pad = pc_window_get_controller();
-        const bool padHeld = pad && (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A)
-                                     || SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B));
+        const bool padHeld = (menuPadHeld(pad, PC_KEY_ACT_A, SDL_CONTROLLER_BUTTON_A)
+                                     || menuPadHeld(pad, PC_KEY_ACT_B, SDL_CONTROLLER_BUTTON_B));
         const Uint8* keys = SDL_GetKeyboardState(nullptr);
         const bool keyHeld = keys && (keys[SDL_SCANCODE_RETURN] || keys[SDL_SCANCODE_SPACE] || keys[SDL_SCANCODE_ESCAPE]);
         sTouchTapPending = false;
@@ -7515,13 +7580,44 @@ void pc_settings_draw(void) {
         return; // Don't draw footer when submenu is open.
     }
 
+    // Controller Guide overlay.
+    if (sInPadGuide) {
+        const int subX = px1 + 18, subY = py1 + 44;
+        const int subW = panelW - 36, subH = panelH - 58;
+        drawSubmenuSurface(gfx, subX, subY, subW, subH, "Controller Guide",
+                           "What each button does now", "Up/Down: scroll   Esc/B: back");
+        const int listStartY = subY + 48;
+        const int itemH = 24;
+        const int visibleItems = std::max(1, (subH - 70) / itemH);
+        const int count = padGuideCount();
+        int startIdx = 0;
+        if (sPadGuideSel >= visibleItems) startIdx = sPadGuideSel - visibleItems + 1;
+        const int endIdx = std::min(count, startIdx + visibleItems);
+        for (int i = startIdx; i < endIdx; i++) {
+            const int itemY = listStartY + (i - startIdx) * itemH;
+            if (padGuideIsHeader(i)) {
+                drawTextOutline(subX + 24, itemY + 4, "%s", Colour(255, 214, 120, 255), Colour(10, 16, 36, 255),
+                                padGuideLabel(i));
+            } else {
+                drawSubmenuRow(gfx, subX + 20, itemY, subW - 40, padGuideLabel(i), padGuideValue(i), i == sPadGuideSel);
+            }
+        }
+        if (count > visibleItems) {
+            char hint[64];
+            snprintf(hint, sizeof(hint), "%d / %d", sPadGuideSel + 1, count);
+            drawTextOutline(subX + subW - 12 - menuTextWidth(hint), subY + 12, "%s",
+                            Colour(180, 180, 200, 255), Colour(10, 16, 36, 255), hint);
+        }
+        return;
+    }
+
     // Gamepad submenu overlay.
     if (sInGamepadSubmenu) {
         const int subX = px1 + 18, subY = py1 + 44;
         const int subW = panelW - 36, subH = panelH - 58;
         drawSubmenuSurface(gfx, subX, subY, subW, subH, "Gamepad Controls",
                            sWaitingForButton ? "Press a button, trigger or stick   Esc: cancel"
-                                            : "Enter: capture   Left/Right: default",
+                                            : "Enter: capture   Left/Right: default/none   Del: none",
                            sWaitingForButton ? "" : "Up/Down: select   Esc/B: back");
 
         const int listStartY = subY + 48;
@@ -7543,7 +7639,8 @@ void pc_settings_draw(void) {
 
             const char* actionName = pc_window_get_key_action_name(act);
             int boundBtn = pendingPadBinds()[act];
-            if (boundBtn < 0) boundBtn = kDefaultGamepadBindings[act];
+            if (boundBtn == PC_GP_BIND_NONE) boundBtn = -1;
+            else if (boundBtn < 0) boundBtn = pc_window_scheme_default_gamepad_binding(sPending.padScheme, act);
             const char* btnName = pc_window_get_gamepad_button_name(boundBtn);
 
             char value[96];
@@ -8103,6 +8200,7 @@ const char* pc_settings_group_name(int group) {
     case PC_SET_PICKER_HDMODELS: return "HD Models";
     case PC_SET_PICKER_KEYBOARD: return "Keyboard";
     case PC_SET_PICKER_GAMEPAD: return "Gamepad";
+    case PC_SET_PICKER_PADGUIDE: return "Controller Guide";
     default: return "";
     }
 }
@@ -8262,6 +8360,7 @@ void advancedRowValue(int i, char* value, size_t n) {
         else snprintf(value, n, "Press A (keep still)");
         break;
     }
+    case 8: snprintf(value, n, "%s", sPending.padScheme == PC_PAD_SCHEME_SWITCH ? "Switch" : "GameCube (original)"); break;
     default: value[0] = '\0';
     }
 }
@@ -8298,7 +8397,7 @@ namespace {
 // página de vídeo, de Advanced, de Graphics, de Mods...), así que reordenar
 // aquí no toca qué hace cada ajuste ni cómo se guarda: el .conf va por nombre.
 // ---------------------------------------------------------------------------
-enum RowSrc { SRC_MAIN, SRC_ADV, SRC_GFX, SRC_MODS, SRC_DATA, SRC_KEYS, SRC_PADS, SRC_RECENTER, SRC_ACH };
+enum RowSrc { SRC_MAIN, SRC_ADV, SRC_GFX, SRC_MODS, SRC_DATA, SRC_KEYS, SRC_PADS, SRC_RECENTER, SRC_ACH, SRC_PADGUIDE };
 struct GroupRow {
     RowSrc src;
     int idx;
@@ -8357,6 +8456,8 @@ const GroupRow kControlsRows[] = {
     { SRC_ADV, 6, "Gyro Invert", "Flips gyro aiming: none, horizontal, vertical or both." },
     { SRC_ADV, 7, "Gyro Calibrate", "Put the controller or phone down, keep it still and press A. Fixes a cursor that drifts on its own." },
     { SRC_RECENTER, 0, "Gyro Recenter Button", "Button that brings the cursor back in front of the captain. A: choose the button." },
+    { SRC_ADV, 8, "Controller Layout", "What each controller button does. GameCube: the original layout. Switch: as in Pikmin 1 + 2 on Switch (right stick turns the camera, L + right stick swarms, ZL faces forward, ZR zooms). Buttons you reassigned keep your choice." },
+    { SRC_PADGUIDE, 0, "Controller Guide", "Every controller button and what it does right now, sorted by topic. It follows the layout, your reassigned buttons and the mods you have on." },
     { SRC_KEYS, 0, "Keyboard Bindings", "Two keys or mouse buttons per action. A: main key. Right: second key. Left: back to default. While waiting, Delete clears it. Shift, Ctrl and Alt can be used." },
     { SRC_PADS, 0, "Controller Bindings", "Choose the controller button for each action." },
 #else
@@ -8381,6 +8482,8 @@ const GroupRow kControlsRows[] = {
     { SRC_ADV, 6, "Gyro Invert", "Flips gyro aiming: none, horizontal, vertical or both." },
     { SRC_ADV, 7, "Gyro Calibrate", "Put the controller or phone down, keep it still and press A. Fixes a cursor that drifts on its own." },
     { SRC_RECENTER, 0, "Gyro Recenter Button", "Button that brings the cursor back in front of the captain. A: choose the button." },
+    { SRC_ADV, 8, "Controller Layout", "What each controller button does. GameCube: the original layout. Switch: as in Pikmin 1 + 2 on Switch (right stick turns the camera, L + right stick swarms, ZL faces forward, ZR zooms). Buttons you reassigned keep your choice." },
+    { SRC_PADGUIDE, 0, "Controller Guide", "Every controller button and what it does right now, sorted by topic. It follows the layout, your reassigned buttons and the mods you have on." },
     { SRC_KEYS, 0, "Keyboard Bindings", "Two keys or mouse buttons per action. A: main key. Right: second key. Left: back to default. While waiting, Delete clears it. Shift, Ctrl and Alt can be used." },
     { SRC_PADS, 0, "Controller Bindings", "Choose the controller button for each action." },
 #endif
@@ -8692,10 +8795,96 @@ void startButtonCapture(int action) {
 
 void gamepadBindingName(int action, char* out, size_t n) {
     int bound = pendingPadBinds()[action];
-    if (bound < 0) bound = kDefaultGamepadBindings[action];
+    if (bound == PC_GP_BIND_NONE) bound = -1;
+    else if (bound < 0) bound = pc_window_scheme_default_gamepad_binding(sPending.padScheme, action);
     const char* name = bound >= 0 ? pc_window_get_gamepad_button_name(bound) : nullptr;
     snprintf(out, n, "%s", name ? name : "None");
 }
+
+// ── Controller Guide ──
+// Una línea por acción, agrupadas por tema. Los botones salen de los bindings
+// pendientes (o del esquema si no se tocaron), así que la guía siempre dice lo
+// que hará el mando al cerrar el menú.
+struct PadGuideLine { std::string label, value; bool header; };
+std::vector<PadGuideLine> sPadGuide;
+
+std::string padBtn(int action) {
+    int b = pendingPadBinds()[action];
+    if (b == PC_GP_BIND_NONE) return "(not assigned)";
+    if (b < 0) b = pc_window_scheme_default_gamepad_binding(sPending.padScheme, action);
+    const char* name = b >= 0 ? pc_window_get_gamepad_button_name(b) : nullptr;
+    return name && b >= 0 ? name : "(not assigned)";
+}
+bool padBound(int action) {
+    int b = pendingPadBinds()[action];
+    if (b == PC_GP_BIND_NONE) return false;
+    if (b < 0) b = pc_window_scheme_default_gamepad_binding(sPending.padScheme, action);
+    return b >= 0;
+}
+
+void buildPadGuide() {
+    sPadGuide.clear();
+    auto H = [](const char* t) { sPadGuide.push_back({ t, "", true }); };
+    auto L = [](const std::string& a, const std::string& b) { sPadGuide.push_back({ a, b, false }); };
+    const bool sw = sPending.padScheme == PC_PAD_SCHEME_SWITCH;
+    const bool rsCamera = sw || sPending.freeCamera;
+    const std::string A = padBtn(PC_KEY_ACT_A), B = padBtn(PC_KEY_ACT_B), X = padBtn(PC_KEY_ACT_X);
+    const std::string Lt = padBtn(PC_KEY_ACT_L);
+    std::string swarm;
+    if (!rsCamera) swarm = "Right Stick";
+    else if (padBound(PC_KEY_ACT_SWARM_STICK)) swarm = "Hold " + padBtn(PC_KEY_ACT_SWARM_STICK) + " + Right Stick";
+    else swarm = "Assign \"Swarm with right stick\"";
+
+    H(sw ? "Layout: Switch" : "Layout: GameCube (original)");
+    H("Moving");
+    L("Move the captain and the cursor", "Left Stick");
+    H("Pikmin");
+    L("Throw a Pikmin (hold, then release)", A);
+    L("Pluck a sprout", sPending.holdToPluck ? A + " (hold to keep going)" : A);
+    L("Whistle (hold for a bigger circle)", B);
+    if (sPending.throwCancelB) L("Put the Pikmin in hand back", "Hold " + A + ", press " + B);
+    L("Swarm the squad", swarm);
+    if (padBound(PC_KEY_ACT_SWARM)) L("Swarm toward the cursor", padBtn(PC_KEY_ACT_SWARM));
+    L("Dismiss the squad", "Tap " + X);
+    L("Lie down", padBound(PC_KEY_ACT_LIEDOWN) ? "Hold " + padBtn(PC_KEY_ACT_LIEDOWN) : "Hold " + X);
+    L("Switch captain", padBtn(PC_KEY_ACT_Y));
+    L("Change the Pikmin type in hand", sw ? padBtn(PC_KEY_ACT_DPAD_RIGHT)
+                                         : padBtn(PC_KEY_ACT_DPAD_LEFT) + " / " + padBtn(PC_KEY_ACT_DPAD_RIGHT));
+    L("Change its maturity (Pikmin in hand)", sw ? "Hold " + A + ", press " + X
+                                               : "Hold " + A + ", " + padBtn(PC_KEY_ACT_DPAD_UP) + " / " + padBtn(PC_KEY_ACT_DPAD_DOWN));
+    H("Sprays");
+    L("Ultra-Bitter spray", padBtn(PC_KEY_ACT_DPAD_UP));
+    L("Ultra-Spicy spray", padBtn(PC_KEY_ACT_DPAD_DOWN));
+    H("Camera");
+    L("Turn the camera", rsCamera ? "Right Stick left / right" : "Hold " + Lt + " + Left Stick");
+    L("Face forward", "Tap " + Lt);
+    L("Camera height", sw ? "Right Stick up / down" : padBtn(PC_KEY_ACT_Z));
+    L("Zoom", padBtn(PC_KEY_ACT_R));
+    const bool anyMod = sPending.lockOn || sPending.firstPerson || sPending.gyroEnabled;
+    if (anyMod) H("Mods you have on");
+    if (sPending.lockOn) {
+        const bool zlLock = sw && !padBound(PC_KEY_ACT_LOCKON);
+        L("Lock-On", zlLock ? Lt + " (also faces forward)" : padBtn(PC_KEY_ACT_LOCKON));
+        if (sPending.charge) {
+            std::string charge = padBound(PC_KEY_ACT_SWARM) ? padBtn(PC_KEY_ACT_SWARM) : std::string();
+            if (padBound(PC_KEY_ACT_SWARM_STICK)) {
+                const std::string tap = "Tap " + padBtn(PC_KEY_ACT_SWARM_STICK);
+                charge = charge.empty() ? tap : charge + " or " + tap;
+            }
+            L("Charge at the locked target", charge.empty() ? "Assign \"Swarm to cursor\"" : charge);
+        }
+    }
+    if (sPending.firstPerson) L("First-person view", padBtn(PC_KEY_ACT_FIRSTPERSON));
+    if (sPending.gyroEnabled) L("Bring the gyro cursor back", padBtn(PC_KEY_ACT_GYRO_RECENTER));
+    H("Menus");
+    L("Pause", padBtn(PC_KEY_ACT_START));
+    L("Accept / Back", A + " / " + B);
+}
+
+int padGuideCount() { buildPadGuide(); return (int)sPadGuide.size(); }
+const char* padGuideLabel(int i) { return (i >= 0 && i < (int)sPadGuide.size()) ? sPadGuide[i].label.c_str() : ""; }
+const char* padGuideValue(int i) { return (i >= 0 && i < (int)sPadGuide.size()) ? sPadGuide[i].value.c_str() : ""; }
+bool padGuideIsHeader(int i) { return i >= 0 && i < (int)sPadGuide.size() && sPadGuide[i].header; }
 } // namespace
 
 const char* pc_settings_row_section(int group, int row) { return rowSection(group, row); }
@@ -8725,6 +8914,7 @@ int pc_settings_rows_count(int group) {
     case PC_SET_PICKER_HDMODELS: return 6;
     case PC_SET_PICKER_KEYBOARD:
     case PC_SET_PICKER_GAMEPAD: return PC_KEY_ACT_COUNT;
+    case PC_SET_PICKER_PADGUIDE: return padGuideCount();
     default: return 0;
     }
 }
@@ -8760,7 +8950,8 @@ const char* pc_settings_row_help(int group, int row) {
     case PC_SET_PICKER_TEXPACKS: return "A: install, activate or deactivate. Changes need a restart.";
     case PC_SET_PICKER_HDMODELS: return "A: pick the model's zip to install it. Needs a restart.";
     case PC_SET_PICKER_KEYBOARD: return "A: press the new key or mouse button. Left/Right: back to default.";
-    case PC_SET_PICKER_GAMEPAD: return "A: press the new button. Left/Right: back to default.";
+    case PC_SET_PICKER_GAMEPAD: return "A: press the new button. Left/Right: default or none. Delete: none.";
+    case PC_SET_PICKER_PADGUIDE: return "What each controller button does now. Change it in Controller Layout and Controller Bindings.";
     default: return "";
     }
 }
@@ -8779,6 +8970,7 @@ int pc_settings_row_opens_picker(int group, int row) {
     case SRC_KEYS: sPickerFocusRow = 0; return PC_SET_PICKER_KEYBOARD;
     case SRC_PADS: sPickerFocusRow = 0; return PC_SET_PICKER_GAMEPAD;
     case SRC_RECENTER: sPickerFocusRow = PC_KEY_ACT_GYRO_RECENTER; return PC_SET_PICKER_GAMEPAD;
+    case SRC_PADGUIDE: return PC_SET_PICKER_PADGUIDE;
     default: return 0;
     }
 }
@@ -8806,6 +8998,7 @@ const char* pc_settings_row_label(int group, int row) {
         return label;
     }
     if (group == PC_SET_PICKER_HDMODELS) return (row >= 0 && row < 6) ? kHdModelLabels[row] : "";
+    if (group == PC_SET_PICKER_PADGUIDE) return padGuideLabel(row);
     if (group == PC_SET_PICKER_RESOLUTION) {
         std::vector<int> c = pickerResolutionChoices();
         if (row < 0 || row >= (int)c.size()) return "";
@@ -8834,7 +9027,8 @@ void pc_settings_row_value(int group, int row, char* out, unsigned long n) {
             break;
         case SRC_ACH: break;
         case SRC_KEYS:
-        case SRC_PADS: snprintf(out, n, "Open  >"); break;
+        case SRC_PADS:
+        case SRC_PADGUIDE: snprintf(out, n, "Open  >"); break;
         case SRC_RECENTER: {
             char name[64];
             gamepadBindingName(PC_KEY_ACT_GYRO_RECENTER, name, sizeof(name));
@@ -8867,6 +9061,7 @@ void pc_settings_row_value(int group, int row, char* out, unsigned long n) {
             }
         }
     }
+    if (group == PC_SET_PICKER_PADGUIDE) snprintf(out, n, "%s", padGuideValue(row));
     if (group == PC_SET_PICKER_HDMODELS) {
         if (sTexturePackPickerActive && sHdModelsSelection == row) snprintf(out, n, "Installing...");
         else snprintf(out, n, "%s", hdModelInstalled(row) ? "Installed" : "Not installed");
@@ -8926,7 +9121,7 @@ void pc_settings_row_change(int group, int row, int dir, bool ok) {
         }
     } else if (group == PC_SET_PICKER_GAMEPAD && row >= 0 && row < PC_KEY_ACT_COUNT) {
         if (ok) startButtonCapture(row);
-        else if (dir) pendingPadBinds()[row] = -1;
+        else if (dir) pendingPadBinds()[row] = pendingPadBinds()[row] == -1 ? PC_GP_BIND_NONE : -1;
     } else if (group == PC_SET_PICKER_TEXPACKS && ok) {
         texturePacksRowAction(row, pc_texpack_list_packs());
     } else if (group == PC_SET_PICKER_HDMODELS && ok) {
