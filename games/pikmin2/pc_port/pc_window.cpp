@@ -141,8 +141,16 @@ struct PcHostAllocScope {
 static bool pc_controller_open_slot(int index)
 {
 	PcHostAllocScope pcHostAlloc;
-	if (!SDL_IsGameController(index) || pc_joystick_is_secondary(index))
+	if (!SDL_IsGameController(index) || pc_joystick_is_secondary(index)) {
+		// Diagnóstico (issue #213): un mando que no se abre no dejaba rastro.
+		char guid[33] = {};
+		SDL_JoystickGetGUIDString(SDL_JoystickGetDeviceGUID(index), guid, sizeof(guid));
+		const char* name = SDL_JoystickNameForIndex(index);
+		printf("[PC Port] Joystick #%d not opened (%s): %s guid=%s\n", index,
+		       SDL_IsGameController(index) ? "auxiliary device" : "no controller mapping", name ? name : "?", guid);
+		fflush(stdout);
 		return false;
+	}
 	SDL_GameController* ctl = SDL_GameControllerOpen(index);
 	if (!ctl)
 		return false;
@@ -190,6 +198,7 @@ static int sLogicalRetraceInterval = 1;
 // like the pad's edge-shaped buttons.
 static Uint32 sMousePressedMask = 0; // real presses since the last take
 static Uint32 sRealMouseButtons = 0; // real buttons still held
+static Uint32 sPadMousePressed = 0;  // real presses since the last pad sample (issue #165)
 static int sMouseWheelSteps = 0;
 static float sTouchZoomDelta = 0.0f;
 // Co-op: giro y cabeceo de la cámara de cada jugador (docs/PLAN_COOP.md §6.7).
@@ -1139,6 +1148,8 @@ void pc_window_poll_events(PADStatus* pad) {
                                               event.type == SDL_MOUSEBUTTONDOWN);
                 if (event.type != SDL_MOUSEBUTTONDOWN)
                     break;
+                if (event.button.which != SDL_TOUCH_MOUSEID && event.button.button >= 1 && event.button.button <= 8)
+                    sPadMousePressed |= SDL_BUTTON(event.button.button);
                 // Issue #52: Escape (or the OS) can drop the mouse out of
                 // relative mode, which froze the cursor until the option was
                 // toggled. A click in the window takes it back.
@@ -1186,6 +1197,9 @@ void pc_window_poll_events(PADStatus* pad) {
                 break;
             case SDL_CONTROLLERDEVICEADDED:
                 pc_controller_open_slot(event.cdevice.which);
+                break;
+            case SDL_JOYDEVICEADDED: // sin mapeo no llega CONTROLLERDEVICEADDED; queda en el log (#213)
+                pc_controller_open_slot(event.jdevice.which);
                 break;
             case SDL_CONTROLLERDEVICEREMOVED:
                 pc_controller_close_instance(event.cdevice.which);
@@ -1278,7 +1292,10 @@ void pc_window_poll_events(PADStatus* pad) {
     const Uint8* state = SDL_GetKeyboardState(NULL);
     // Bindings may name a mouse button (issue #42). SDL_GetMouseState also
     // reports a finger, so mouse-button bindings use the real-mouse mask.
-    const Uint32 boundMouse = sRealMouseButtons;
+    // Un clic que sube antes de esta muestra (clics rápidos para lanzar,
+    // issue #165) cuenta como pulsado en ella; la siguiente lo ve soltado.
+    const Uint32 boundMouse = sRealMouseButtons | sPadMousePressed;
+    sPadMousePressed = 0;
     // La segunda tecla con un clic solo cuenta fuera de Classic, como los clics
     // fijos que sustituye (en Classic el ratón no juega).
     const bool mouseSecondOk = effectiveControlMode() != PC_CONTROL_CLASSIC;

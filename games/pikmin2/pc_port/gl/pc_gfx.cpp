@@ -1449,7 +1449,6 @@ extern "C" void pc_gfx_note_heap_freed(const void* lo, const void* hi) {
     sEfbFreedPending.store(true, std::memory_order_release);
 }
 static PcGfxHostMap<uintptr_t, PcEfbCopy> sEfbCopies;
-static bool sRadarProbeDraw = false;
 static PcGfxHostMap<uintptr_t, PcTlut> sTlutObjects;
 static PcGfxHostMap<u32, PcTlut> sLoadedTluts;
 static PcGfxHostMap<uintptr_t, PcTextureSource> sTextureSources;
@@ -8940,7 +8939,7 @@ void pc_gfx_flush_batch(void) {
     // and report how many pixels the draw changed, and where. Diagnostic
     // only. malloc, not new: operator new is routed to the game's heaps.
     static const bool probeDiffEnv = getenv("PIKMIN_PROBE_DIFF") != nullptr;
-    const bool probeDiff = probeDiffEnv || sRadarProbeDraw;
+    const bool probeDiff = probeDiffEnv;
     static unsigned char* diffBefore = nullptr;
     static unsigned char* diffAfter = nullptr;
     static size_t diffCap = 0;
@@ -11918,12 +11917,8 @@ void pc_gfx_copy_tex(void* dest, GXBool clear) {
     // revealed its final quad was still in the immediate stream when the
     // radar texture was copied, so the pause map contained only the cleared
     // background. Finish that complete primitive before flushing/capturing.
-    const bool hadImmediate = sInPrimitive;
-    const size_t immediateVerts = sVertexStream.size();
     close_complete_immediate();
-    sRadarProbeDraw = sTexCopyFmt == GX_CTF_R4;
     pc_gfx_flush_batch();
-    sRadarProbeDraw = false;
     pc_gfx_note_gl_state_change();
 
     PcEfbCopy& copy = sEfbCopies[reinterpret_cast<uintptr_t>(dest)];
@@ -11970,25 +11965,6 @@ void pc_gfx_copy_tex(void* dest, GXBool clear) {
     map_gx_rect(float(sTexCopySrc[0]), float(sTexCopySrc[1]), float(sTexCopySrc[2]), float(sTexCopySrc[3]), sx, sy, sw, sh);
     const GLboolean scissorWasEnabled = glIsEnabled(GL_SCISSOR_TEST);
     glDisable(GL_SCISSOR_TEST);
-    if (sTexCopyFmt == GX_CTF_R4) {
-        PcGfxHostVector<u8> pixels(size_t(sw) * size_t(sh) * 4);
-        glReadPixels(sx, sy, sw, sh, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-        unsigned minRgb = 255, maxRgb = 0;
-        uint64_t sumRgb = 0, nonBlack = 0;
-        for (size_t i = 0; i + 3 < pixels.size(); i += 4) {
-            const unsigned rgb = unsigned(pixels[i]) + unsigned(pixels[i + 1]) + unsigned(pixels[i + 2]);
-            minRgb = std::min(minRgb, rgb / 3);
-            maxRgb = std::max(maxRgb, rgb / 3);
-            sumRgb += rgb;
-            nonBlack += rgb != 0;
-        }
-        const size_t count = size_t(sw) * size_t(sh);
-        SDL_Log("[RADARDBG] copy dest=%p dst=%dx%d src=(%u,%u,%u,%u)->(%d,%d,%d,%d) fbo=%d immediate=%d/%zu rgb=%u..%u avg=%.2f nonblack=%llu/%zu glerr=0x%x",
-                dest, w, h, sTexCopySrc[0], sTexCopySrc[1], sTexCopySrc[2], sTexCopySrc[3], sx, sy, sw, sh,
-                sourceDrawFbo, int(hadImmediate), immediateVerts, minRgb, maxRgb,
-                count ? double(sumRgb) / double(count * 3) : 0.0,
-                (unsigned long long)nonBlack, count, unsigned(glGetError()));
-    }
     // Fila 0 de una textura GX es la de arriba; en GL el framebuffer empieza abajo.
     glBlitFramebuffer_ptr(sx, sy, sx + sw, sy + sh, 0, h, w, 0, GL_COLOR_BUFFER_BIT, GL_LINEAR);
     glBindFramebuffer_ptr(GL_DRAW_FRAMEBUFFER, GLuint(sourceDrawFbo));
