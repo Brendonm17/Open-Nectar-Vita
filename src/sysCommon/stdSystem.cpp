@@ -12,7 +12,13 @@
 #include "Texture.h"
 #include "sysNew.h"
 #include "system.h"
+#ifdef __vita__
+#include "gl/vita_drawrec.h" // Draw-record join
+#endif
 #include <stddef.h>
+#if defined(PIKI_PC_PORT)
+#include "pc_bundle_compat.h"
+#endif
 
 /**
  * @todo: Documentation
@@ -102,8 +108,15 @@ AyuHeap* StdSystem::getHeap(int heapIdx)
  * @param heapIdx Target heap to reset.
  * @param flag Reset behaviour flag.
  */
+#ifdef __vita__
+extern "C" void vita_gxq_sync(void);   // pc_port/gl/vita_gxq.cpp
+#endif
 void StdSystem::resetHeap(int heapIdx, int flag)
 {
+#ifdef __vita__
+	// Translator must finish with the arena first.
+	vita_gxq_sync();
+#endif
 	// Evict first: the registry entries for objects that lived in this heap
 	// must go before the memory does, or a later loadShape() cache hit hands
 	// out a pointer into freed storage. See GfxobjInfo::mOwnerHeap.
@@ -395,6 +408,9 @@ void StdSystem::addGfxObject(GfxobjInfo* other)
  */
 void StdSystem::attachObjs()
 {
+#ifdef __vita__
+	vita_drawrec_join(kDrJoinAttach);
+#endif
 	if (gsys->mIsRendering) {
 		ERROR("WARNING!!! trying to attachobjs when using the GP!!!\n");
 	}
@@ -628,6 +644,10 @@ void StdSystem::loadBundle(immut char* pPath, bool loadWithCache)
 		}
 		case 3: // DCK Animation
 		{
+#if defined(PIKI_PC_PORT)
+			// Retail key name for logoMotion.
+			pcCanonicalizeBundleAnimationPath(path.mString);
+#endif
 			AnimData* dck = mCurrentShape->loadDck(path.mString, *fs);
 			addAnimation(dck, path.mString);
 			break;

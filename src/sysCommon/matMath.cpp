@@ -3,9 +3,45 @@
 #include "SRT.h"
 #include "Vector.h"
 
+#if defined(__vita__)
+#include <string.h>
+#endif
+
 f32 sintable[0x1000];
 f32 costable[0x1000];
 immut Matrix4f Matrix4f::ident;
+
+#if defined(__vita__)
+/* PS Vita: sinf and cosf skipped for an angle of exactly +0 */
+// True when this angle takes the constants
+static inline bool pcTrig0(f32 angle)
+{
+	u32 bits;
+	memcpy(&bits, &angle, sizeof(bits));
+	return bits == 0u;
+}
+
+static inline f32 pcTrig0Opaque(f32 value)
+{
+	__asm__("" : "+t"(value));
+	return value;
+}
+
+static inline void pcTrig0SinCos(immut Vector3f& angles, f32& sinX, f32& sinY, f32& sinZ, f32& cosX, f32& cosY, f32& cosZ)
+{
+	const bool zeroX = pcTrig0(angles.x);
+	const bool zeroY = pcTrig0(angles.y);
+	const bool zeroZ = pcTrig0(angles.z);
+
+	sinX = zeroX ? pcTrig0Opaque(0.0f) : sinf(angles.x);
+	sinY = zeroY ? pcTrig0Opaque(0.0f) : sinf(angles.y);
+	sinZ = zeroZ ? pcTrig0Opaque(0.0f) : sinf(angles.z);
+
+	cosX = zeroX ? pcTrig0Opaque(1.0f) : cosf(angles.x);
+	cosY = zeroY ? pcTrig0Opaque(1.0f) : cosf(angles.y);
+	cosZ = zeroZ ? pcTrig0Opaque(1.0f) : cosf(angles.z);
+}
+#endif
 
 /**
  * @todo: Documentation
@@ -178,6 +214,11 @@ void Matrix4f::makeSRT(immut Vector3f& scale, immut Vector3f& rotation, immut Ve
 {
 	STACK_PAD_VAR(6);
 
+#if defined(__vita__)
+	// Same six values, +0 angle calls skipped
+	f32 sinX, sinY, sinZ, cosX, cosY, cosZ;
+	pcTrig0SinCos(rotation, sinX, sinY, sinZ, cosX, cosY, cosZ);
+#else
 	f32 sinX = sinf(rotation.x);
 	f32 sinY = sinf(rotation.y);
 	f32 sinZ = sinf(rotation.z);
@@ -185,6 +226,7 @@ void Matrix4f::makeSRT(immut Vector3f& scale, immut Vector3f& rotation, immut Ve
 	f32 cosX = cosf(rotation.x);
 	f32 cosY = cosf(rotation.y);
 	f32 cosZ = cosf(rotation.z);
+#endif
 
 	f32 cosX_cosZ = cosX * cosZ;
 	f32 sinX_sinY = sinX * sinY;
@@ -217,6 +259,11 @@ void Matrix4f::makeConcatSRT(immut Matrix4f* a, Matrix4f& b, immut SRT& srt)
 {
 	STACK_PAD_VAR(6);
 
+#if defined(__vita__)
+	// Same six values, +0 angle calls skipped
+	f32 sinX, sinY, sinZ, cosX, cosY, cosZ;
+	pcTrig0SinCos(srt.r, sinX, sinY, sinZ, cosX, cosY, cosZ);
+#else
 	f32 sinX = sinf(srt.r.x);
 	f32 sinY = sinf(srt.r.y);
 	f32 sinZ = sinf(srt.r.z);
@@ -224,6 +271,7 @@ void Matrix4f::makeConcatSRT(immut Matrix4f* a, Matrix4f& b, immut SRT& srt)
 	f32 cosX = cosf(srt.r.x);
 	f32 cosY = cosf(srt.r.y);
 	f32 cosZ = cosf(srt.r.z);
+#endif
 
 	f32 cosX_cosZ = cosX * cosZ;
 	f32 sinX_sinY = sinX * sinY;

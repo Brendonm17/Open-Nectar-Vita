@@ -134,11 +134,21 @@ void PikiMgr::update()
 	MonoObjectMgr::update();
 }
 
+#if defined(PIKI_PC_PORT) && defined(__vita__)
+// Pikmin draw split (viewPiki.cpp)
+bool pcPikiDrawRun(Graphics& gfx, Creature** list, int* status, int count);
+#endif
+
 /**
  * @todo: Documentation
  */
 void PikiMgr::refresh(Graphics& graphics)
 {
+#if defined(PIKI_PC_PORT) && defined(__vita__)
+	if (pcPikiDrawRun(graphics, mObjectList, mEntryStatus, mMaxElements)) {
+		return;
+	}
+#endif
 	MonoObjectMgr::refresh(graphics);
 }
 

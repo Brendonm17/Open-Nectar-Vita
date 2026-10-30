@@ -61,6 +61,12 @@ public:
 
 	void reset(int);
 
+#if defined(PIKI_PC_PORT) && defined(__vita__)
+	// PS Vita plant A/B flip halves.
+	bool pcRefreshA(Graphics& gfx, Shape*& shapeOut);
+	bool pcWouldError(Graphics& gfx);
+#endif
+
 protected:
 	virtual void doKill(); // _10C
 
@@ -166,6 +172,17 @@ public:
 	immut char* getPlantName(int);
 	void addUseList(int);
 	Creature* birth();
+
+#if defined(PIKI_PC_PORT) && defined(__vita__)
+	// Plant draw, split into A and B when possible.
+	virtual void refresh(Graphics&); // _58
+	// Plants in ObjectMgr::refresh order; -1 when an object is not a Plant.
+	int pcSplitSnapshot(Plant** out, int cap);
+	// Load-time test for the A/B flip.
+	bool pcSplitShapesOk();
+	// A plant type's shape, or null.
+	Shape* pcPlantShape(int type) { return (mPlantShapes && mPlantShapes[type]) ? mPlantShapes[type]->mShape : nullptr; }
+#endif
 
 protected:
 	virtual Creature* createObject(); // _78

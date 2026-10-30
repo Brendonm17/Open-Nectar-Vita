@@ -53,6 +53,9 @@ public:
  */
 struct MonoObjectMgr : public ObjectMgr {
 	friend struct SearchSystem;
+#if defined(__vita__)
+	friend struct PcSearchSnap;
+#endif
 
 public:
 	MonoObjectMgr();
@@ -64,6 +67,11 @@ public:
 	virtual void drawShadow(Graphics&, Texture*);       // _5C
 	virtual int getSize() { return mNumObjects; }       // _60 (weak)
 	virtual int getMax() { return mMaxElements; }       // _64 (weak)
+#if defined(__vita__)
+	// Slot-table findClosest.
+	virtual Creature* findClosest(immut Vector3f&, f32, immut Condition*); // _68
+	virtual Creature* findClosest(immut Vector3f&, immut Condition*);      // _6C
+#endif
 	virtual void search(ObjectMgr*);                    // _70
 	virtual Creature* birth();                          // _78
 	virtual void kill(Creature*);                       // _7C
@@ -97,6 +105,9 @@ protected:
  * @note Size: 0x4C.
  */
 struct PolyObjectMgr : public ObjectMgr {
+#if defined(__vita__)
+	friend struct PcSearchSnap;
+#endif
 	PolyObjectMgr(int);
 
 	// completely guessing on this name

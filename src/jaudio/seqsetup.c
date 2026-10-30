@@ -457,6 +457,9 @@ BOOL Jaq_StartSeq(u32 trackId)
 	}
 	}
 	Jac_RegisterDspPlayerCallback(&Jaq_RootCallback, rootseq[trackId]);
+#if defined(PIKI_PC_PORT)
+	PlayerCallbackMarkSeqSafe(&Jaq_RootCallback);   // JAudio only
+#endif
 	return TRUE;
 }
 

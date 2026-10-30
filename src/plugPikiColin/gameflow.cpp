@@ -1,4 +1,7 @@
 #include "gameflow.h"
+#ifdef __vita__
+#include "gl/vita_drawrec.h"
+#endif
 
 #include "BaseApp.h"
 #include "Controller.h"
@@ -622,6 +625,10 @@ void GameFlow::hardReset(BaseApp* baseApp)
  */
 void GameFlow::softReset()
 {
+#ifdef __vita__
+	// Join any open drawrec segment.
+	vita_drawrec_join(kDrJoinReset);
+#endif
 	// make sure we don't debug-print all this while soft-resetting.
 	BOOL togglePrint   = gsys->mTogglePrint;
 	gsys->mTogglePrint = TERNARY_DEVELOP(TRUE, FALSE);
@@ -637,11 +644,33 @@ void GameFlow::softReset()
 		// set up the application heap stack to the max size we can
 		int max      = heap->getMaxFree();
 		int type     = heap->setAllocType(AYU_STACK_GROW_UP);
+#ifdef __vita__
+		// App stack from the overlay heap; malloc fallback.
+		max &= ~7;
+		u8* appStack = static_cast<u8*>(heap->push(max));
+		if (!appStack) {
+			printf("[PC Heap] app stack: overlay push of %d bytes failed, using malloc\n", max);
+			static u8* sVitaPrevAppStack = nullptr;
+			if (sVitaPrevAppStack) { delete[] sVitaPrevAppStack; sVitaPrevAppStack = nullptr; }
+			PikiPcPersistentAlloc keep;
+			appStack = new u8[max];
+			sVitaPrevAppStack = appStack;
+		}
+#else
 		u8* appStack = new u8[heap->getMaxFree()];
+#endif
 		heap->setAllocType(type);
 		gsys->mHeaps[SYSHEAP_App].init("app", AYU_STACK_GROW_UP, appStack, max);
 		app->useHeap(SYSHEAP_App);
 		gsys->getHeap(gsys->getHeapNum())->setAllocType(AYU_STACK_GROW_DOWN);
+#if defined(PIKI_PC_PORT)
+		// Release the previous section's game heaps.
+		piki_pc_release_game_heaps(PIKI_HEAP_REL(SYSHEAP_Ovl, AYU_STACK_GROW_UP)
+		                         | PIKI_HEAP_REL(SYSHEAP_App, AYU_STACK_GROW_UP) | PIKI_HEAP_REL(SYSHEAP_App, AYU_STACK_GROW_DOWN)
+		                         | PIKI_HEAP_REL(SYSHEAP_Teki, AYU_STACK_GROW_UP) | PIKI_HEAP_REL(SYSHEAP_Teki, AYU_STACK_GROW_DOWN)
+		                         | PIKI_HEAP_REL(SYSHEAP_Movie, AYU_STACK_GROW_UP) | PIKI_HEAP_REL(SYSHEAP_Movie, AYU_STACK_GROW_DOWN)
+		                         | PIKI_HEAP_REL(SYSHEAP_Message, AYU_STACK_GROW_UP) | PIKI_HEAP_REL(SYSHEAP_Message, AYU_STACK_GROW_DOWN));
+#endif
 
 		switch (mNextGameSectionID) {
 		case SECTION_NinLogo:
@@ -684,6 +713,13 @@ void GameFlow::softReset()
 	}
 
 	gsys->resetHeap(SYSHEAP_App, AYU_STACK_GROW_UP);
+#if defined(PIKI_PC_PORT)
+	// Release the last level's App-UP heaps.
+	piki_pc_release_game_heaps(PIKI_HEAP_REL(SYSHEAP_App, AYU_STACK_GROW_UP)
+		                         | PIKI_HEAP_REL(SYSHEAP_Teki, AYU_STACK_GROW_UP) | PIKI_HEAP_REL(SYSHEAP_Teki, AYU_STACK_GROW_DOWN)
+		                         | PIKI_HEAP_REL(SYSHEAP_Movie, AYU_STACK_GROW_UP) | PIKI_HEAP_REL(SYSHEAP_Movie, AYU_STACK_GROW_DOWN)
+		                         | PIKI_HEAP_REL(SYSHEAP_Message, AYU_STACK_GROW_UP) | PIKI_HEAP_REL(SYSHEAP_Message, AYU_STACK_GROW_DOWN));
+#endif
 
 	gsys->getHeap(SYSHEAP_App)->setAllocType(AYU_STACK_GROW_UP);
 	app->useHeap(SYSHEAP_App);

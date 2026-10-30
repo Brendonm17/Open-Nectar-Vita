@@ -571,7 +571,11 @@ void Boss::drawShape(Graphics& gfx)
 		mWorldMtx.makeSRT(Vector3f(1.0f, 1.0f, 1.0f), Vector3f(0.0f, 0.0f, 0.0f), Vector3f(0.0f, 0.0f, 0.0f));
 		gfx.mCamera->mLookAtMtx.multiplyTo(mWorldMtx, transformMtx);
 
+#if defined(__vita__)
+		gfx.setLightingNoPrev(false, nullptr);
+#else
 		gfx.setLighting(false, nullptr);
+#endif
 		gfx.setFog(false);
 		gfx.useTexture(nullptr, GX_TEXMAP0);
 

@@ -228,6 +228,22 @@ void PcamCamera::control(Controller& controller)
 #endif
 
 	bool doRotate = controller.mTriggerL / 170.0f >= getParameterF(PCAMF_RotationButtonThreshold);
+#if defined(PIKI_PC_PORT)
+	// Camera-stick scheme: right stick orbits, flick toggles zoom.
+	f32 azimuth    = controller.getMainStickX();
+	bool stickZoom = false;
+	if (pc_window_camera_stick_active()) {
+		const f32 cx = pc_window_get_camera_stick_x();
+		const f32 cy = pc_window_get_camera_stick_y();
+		static bool zoomArmed = true;
+		if (cx > 0.15f || cx < -0.15f) { doRotate = true; azimuth = cx; }
+		if (zoomArmed && (cy > 0.7f || cy < -0.7f)) { stickZoom = true; zoomArmed = false; }
+		else if (cy < 0.3f && cy > -0.3f) zoomArmed = true;
+	}
+#else
+	const f32 azimuth    = controller.getMainStickX();
+	const bool stickZoom = false;
+#endif
 	bool isZClick = false;
 	if (controller.keyClick(KBBTN_Z)) {
 		isZClick = true;
@@ -237,8 +253,8 @@ void PcamCamera::control(Controller& controller)
 		xSubY = controller.getSubStickY();
 	}
 	PcamControlInfo info;
-	info.init(true, doRotate, controller.keyClick(KBBTN_L) != 0, controller.keyClick(KBBTN_R) && !controller.keyDown(KBBTN_X), isZClick,
-	          false, false, controller.getMainStickX(), xSubY, controller.getSubStickY());
+	info.init(true, doRotate, controller.keyClick(KBBTN_L) != 0, (controller.keyClick(KBBTN_R) && !controller.keyDown(KBBTN_X)) || stickZoom, isZClick,
+	          false, false, azimuth, xSubY, controller.getSubStickY());
 	control(info);
 }
 

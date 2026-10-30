@@ -135,16 +135,17 @@ static inline void GXColor4u8(const u8 r, const u8 g, const u8 b, const u8 a)
 	pc_gfx_color(r, g, b, a);
 }
 
+// Raw FIFO writers, routed to the port's vertex decoder.
 static inline void GXTexCoord2s8(const s8 u, const s8 v)
 {
-	GXWGFifo.s8 = u;
-	GXWGFifo.s8 = v;
+	pc_gfx_push_s8(u);
+	pc_gfx_push_s8(v);
 }
 
 static inline void GXTexCoord2u8(u8 s, u8 t)
 {
-	GXWGFifo.u8 = s;
-	GXWGFifo.u8 = t;
+	pc_gfx_push_u8(s);
+	pc_gfx_push_u8(t);
 }
 
 static inline void GXPosition2u16(u16 x, u16 y)

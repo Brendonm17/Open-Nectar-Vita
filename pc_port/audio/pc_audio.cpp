@@ -5,6 +5,7 @@
 #include "audio/pc_jam.h"
 #include "audio/pc_wave_bank.h"
 #include "audio/pc_sequence_archive.h"
+#include "dolphin_stubs/dvd_image.h"
 #include <SDL2/SDL.h>
 #include <atomic>
 #include <cstdio>
@@ -550,20 +551,13 @@ bool pc_audio_play_stx(const char* path) {
         return false;
     }
 
-    std::ifstream input(path, std::ios::binary | std::ios::ate);
-    if (!input) {
+    std::vector<u8> file;
+    if (!pc_disc_read_whole_file(path, file)) {
         printf("[PC Port Warning] Could not open STX stream: %s\n", path);
         return false;
     }
-    const std::streamsize fileSize = input.tellg();
-    if (fileSize < 32) {
+    if (file.size() < 32) {
         printf("[PC Port Warning] Invalid STX stream (short header): %s\n", path);
-        return false;
-    }
-    input.seekg(0);
-    std::vector<u8> file(static_cast<size_t>(fileSize));
-    if (!input.read(reinterpret_cast<char*>(file.data()), fileSize)) {
-        printf("[PC Port Warning] Failed reading STX stream: %s\n", path);
         return false;
     }
 

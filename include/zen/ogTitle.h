@@ -27,6 +27,9 @@ public:
 		MENU_Sound    = 2,
 		MENU_Rumble   = 3,
 		MENU_Language = 4,
+#if defined(__vita__)
+		MENU_More = 5, // the port's More Settings page
+#endif
 
 	};
 

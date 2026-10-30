@@ -9,6 +9,12 @@
 #include "gl/pc_gfx.h"
 #include <cstdio>
 #include <cstring>
+#ifdef __vita__
+#include <psp2/kernel/threadmgr.h>
+extern "C" void nectar_gil_release(void);   // defined in os_stubs.cpp
+extern "C" void nectar_gil_acquire(void);
+extern "C" int nectar_gil_waiters(void);
+#endif
 
 #if defined(PIKI_PC_PORT) && defined(PIKI_PC_SETTINGS_MENU)
 #include "settings/pc_settings.h"
@@ -21,9 +27,7 @@ static VIRetraceCallback sPostRetraceCallback = nullptr;
 extern "C" {
 
 void __VIInit(VITVMode mode)   { (void)mode; }
-void VIInit(void) {
-    printf("[PC Port] VIInit() - Video stub initialized\n");
-}
+void VIInit(void)              { }
 void VIFlush(void)             { }
 void VIWaitForRetrace(void)    { 
     sRetraceCount++; 
@@ -38,6 +42,14 @@ void VIWaitForRetrace(void)    {
     pc_gfx_present();
     pc_window_swap_buffers();
     pc_window_poll_events(nullptr);
+#ifdef __vita__
+    // Per-frame cooperative yield to blocked workers.
+    if (nectar_gil_waiters() > 0) {
+        nectar_gil_release();
+        sceKernelDelayThread(200);
+        nectar_gil_acquire();
+    }
+#endif
 }
 void VIConfigure(const GXRenderModeObj* obj) { (void)obj; }
 
@@ -53,7 +65,9 @@ VIRetraceCallback VISetPostRetraceCallback(VIRetraceCallback callback) {
 void  VISetNextFrameBuffer(void* fb) { (void)fb; }
 void* VIGetCurrentFrameBuffer()      { return nullptr; }
 void  __VIGetCurrentPosition(s16* x, s16* y) { *x = 0; *y = 0; }
-void  VISetBlack(BOOL isBlack)       { (void)isBlack; }
+static volatile int sViBlack = 0;
+void  VISetBlack(BOOL isBlack)       { sViBlack = isBlack ? 1 : 0; }
+extern "C" int pc_vi_get_black(void) { return sViBlack; }
 u32   VIGetRetraceCount(void)        { return sRetraceCount; }
 u32   VIGetNextField(void)           { return 0; }
 u32   VIGetCurrentLine(void)         { return 0; }

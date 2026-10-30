@@ -112,7 +112,12 @@ private:
 	P2DPicture* mPartIconTemplate;          // _80
 	P2DPicture* mPartIcons[MAX_UFO_PARTS];  // _84
 	s16 mVisiblePikiCount;                  // _FC
+#if defined(PIKI_PC_PORT)
+	PikiRaderEntry* mPikiEntries;
+	int mPikiEntryCount;
+#else
 	PikiRaderEntry mPikiEntries[MAX_PIKI_ON_FIELD]; // _100
+#endif
 	P2DPicture* mMapPicture;                        // _420
 	P2DPane* mIconPane;                             // _424
 	f32 mCurrentScale;                              // _428

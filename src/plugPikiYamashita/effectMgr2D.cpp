@@ -130,6 +130,18 @@ void zen::EffectMgr2D::draw(Graphics& gfx)
 	mParticleManager.draw(gfx);
 }
 
+#if defined(PIKI_PC_PORT)
+void zen::EffectMgr2D::draw(Graphics& gfx, int sx0, int sx1)
+{
+	mCamera.update(f32(gfx.mScreenWidth) / f32(gfx.mScreenHeight), 30.0f, 1.0f, 5000.0f);
+	gfx.setCamera(&mCamera);
+	gfx.setPerspective(mCamera.mPerspectiveMatrix.mMtx, mCamera.mFov, mCamera.mAspectRatio, mCamera.mNear, mCamera.mFar, 1.0f);
+	gfx.setScissor(RectArea(sx0, 0, sx1, gfx.mScreenHeight));
+	gfx.useMatrix(gfx.mCamera->mLookAtMtx, 0);
+	mParticleManager.draw(gfx);
+}
+#endif
+
 /**
  * @todo: Documentation
  */

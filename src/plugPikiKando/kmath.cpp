@@ -22,11 +22,7 @@ DEFINE_PRINT("kmath")
  */
 bool isNan(f32 value)
 {
-	if ((u32)value == (u32)NAN) {
-		return true;
-	}
-
-	return false;
+	return value != value;
 }
 
 /**

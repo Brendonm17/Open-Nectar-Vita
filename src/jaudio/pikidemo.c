@@ -194,6 +194,7 @@ static DemoStatus DEMO_STATUS[DEMOID_COUNT] = {
  */
 void Jac_DemoSceneInit(void)
 {
+	PC_JAC_JOIN();
 	now_loading         = 0;
 	event_pause_counter = 0;
 }
@@ -214,6 +215,7 @@ static void Jac_DemoCheckFrameCall()
  */
 void Jac_DemoEventUnPauseCheck()
 {
+	PC_JAC_JOIN();
 	if (event_pause_counter) {
 		event_pause_counter--;
 
@@ -230,6 +232,7 @@ void Jac_DemoEventUnPauseCheck()
  */
 BOOL Jac_DemoCheck()
 {
+	PC_JAC_JOIN();
 	if (demo_end_delay) {
 		return TRUE;
 	}
@@ -246,6 +249,7 @@ BOOL Jac_DemoCheck()
  */
 BOOL Jac_DemoWalkCheck()
 {
+	PC_JAC_JOIN();
 	if (demo_end_delay != 0) {
 		return FALSE;
 	}
@@ -273,6 +277,7 @@ BOOL Jac_DemoWalkCheck()
  */
 BOOL Jac_DemoCheckEvent(u8 evt)
 {
+	PC_JAC_JOIN();
 	if (Jac_DemoCheck()) {
 		switch (current_demo_no) {
 		case DEMOID_GenericDayEnd:
@@ -372,6 +377,7 @@ static void DoSequence(u32 cinID, u32 frameId)
  */
 void Jac_PlayDemoSequenceDirect(u32 id)
 {
+	PC_JAC_JOIN();
 	demo_bgm_seqp = Jam_GetTrackHandle(0x30000);
 	Jam_WritePortAppDirect(demo_bgm_seqp, 0, id);
 }
@@ -381,6 +387,7 @@ void Jac_PlayDemoSequenceDirect(u32 id)
  */
 void Jac_InitDemoSystem()
 {
+	PC_JAC_JOIN();
 	demo_seqp = Jam_GetTrackHandle(0x1000f);
 	if (demo_seqp) {
 		Jal_AddCmdQueue(&demo_q, demo_seqp, 2);
@@ -393,6 +400,7 @@ void Jac_InitDemoSystem()
  */
 void Jac_StartDemo(u32 cinID)
 {
+	PC_JAC_JOIN();
 	u32* REF_id        = &cinID;
 	DemoStatus* status = &DEMO_STATUS[cinID];
 	if (cinID >= DEMOID_CHECK_BGM_CAT) {
@@ -723,6 +731,7 @@ void Jac_StartDemo(u32 cinID)
  */
 void Jac_DemoSound(int id)
 {
+	PC_JAC_JOIN();
 	STACK_PAD_VAR(1);
 	int* REF_id;
 
@@ -741,6 +750,7 @@ void Jac_DemoSound(int id)
  */
 BOOL Jac_DemoFrame(int id)
 {
+	PC_JAC_JOIN();
 	if (current_demo_no == DEMOID_FINISHED) {
 		return FALSE;
 	}
@@ -757,6 +767,7 @@ BOOL Jac_DemoFrame(int id)
  */
 void Jac_BgmAnimEndRecover()
 {
+	PC_JAC_JOIN();
 	DemoStatus* status = &DEMO_STATUS[current_demo_no];
 	switch (status->mBgmFadeMode) {
 	case 0:
@@ -783,6 +794,7 @@ void Jac_BgmAnimEndRecover()
  */
 void Jac_BgmAnimEndStop()
 {
+	PC_JAC_JOIN();
 	DemoStatus* status = &DEMO_STATUS[current_demo_no];
 	int flag           = status->mAudioConfig;
 	if (flag && !(flag & 0x20)) {
@@ -799,6 +811,7 @@ void Jac_BgmAnimEndStop()
  */
 void Jac_DemoBGMForceStop()
 {
+	PC_JAC_JOIN();
 	demo_bgm_seqp = Jam_GetTrackHandle(0x30000);
 	Jam_WritePortAppDirect(demo_bgm_seqp, 0, 0);
 
@@ -919,6 +932,7 @@ void __Jac_FinishDemo()
  */
 void Jac_FinishDemo(void)
 {
+	PC_JAC_JOIN();
 	int cinID     = current_demo_no;
 	int* REF_demo = &cinID;
 	STACK_PAD_VAR(1);
@@ -972,6 +986,7 @@ void Jac_FinishDemo(void)
  */
 void Jac_FinishDemo_NoErase()
 {
+	PC_JAC_JOIN();
 	__Jac_FinishDemo();
 }
 
@@ -1110,6 +1125,7 @@ void __Prepare_BGM(u32 cinID)
  */
 void Jac_PrepareDemo(u32 cinID)
 {
+	PC_JAC_JOIN();
 	STACK_PAD_VAR(1);
 	u32* REF_id = &cinID;
 	if (cinID >= DEMOID_CHECK_BGM_CAT) {
@@ -1159,6 +1175,7 @@ void Jac_PrepareDemo(u32 cinID)
  */
 void Jac_StartPartsFindDemo(u32 jingleType, BOOL hasAudio)
 {
+	PC_JAC_JOIN();
 	STACK_PAD_VAR(2);
 	u32* REF_p1;
 
@@ -1199,6 +1216,7 @@ void Jac_StartPartsFindDemo(u32 jingleType, BOOL hasAudio)
  */
 void Jac_FinishPartsFindDemo(void)
 {
+	PC_JAC_JOIN();
 	if (parts_find_demo_state) {
 		event_pause_counter = 3;
 		Jac_DemoFade(0, 0x46, 1.0f);
@@ -1212,6 +1230,7 @@ void Jac_FinishPartsFindDemo(void)
  */
 void Jac_StartTextDemo(int textID)
 {
+	PC_JAC_JOIN();
 	if (text_demo_state != 1 && current_demo_no == DEMOID_FINISHED) {
 		switch (parts_find_demo_state) {
 		case 0:
@@ -1233,6 +1252,7 @@ void Jac_StartTextDemo(int textID)
  */
 void Jac_FinishTextDemo(void)
 {
+	PC_JAC_JOIN();
 	if (text_demo_state != 0 && current_demo_no == DEMOID_FINISHED) {
 		switch (parts_find_demo_state) {
 		case 0:
@@ -1252,6 +1272,7 @@ void Jac_FinishTextDemo(void)
  */
 void Jac_SetDemoPartsID(int id)
 {
+	PC_JAC_JOIN();
 	int* REF_id;
 
 	REF_id        = &id;
@@ -1263,6 +1284,7 @@ void Jac_SetDemoPartsID(int id)
  */
 void Jac_SetDemoOnyons(int num)
 {
+	PC_JAC_JOIN();
 	int* REF_num;
 
 	REF_num        = &num;
@@ -1274,6 +1296,7 @@ void Jac_SetDemoOnyons(int num)
  */
 void Jac_SetDemoPartsCount(int count)
 {
+	PC_JAC_JOIN();
 	int* REF_count;
 
 	REF_count      = &count;

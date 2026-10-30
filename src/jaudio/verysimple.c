@@ -62,6 +62,7 @@ static BOOL InitQueue()
  */
 void Jac_StopSe(s32)
 {
+	PC_JAC_JOIN();
 	if (cmdqueue_reset) {
 		(cmdqueue_reset != 0);
 	}
@@ -72,6 +73,7 @@ void Jac_StopSe(s32)
  */
 BOOL Jac_PauseCheck()
 {
+	PC_JAC_JOIN();
 	return pausemode | container;
 }
 
@@ -81,6 +83,7 @@ BOOL Jac_PauseCheck()
  */
 void Jac_UpdateRocketParam(void)
 {
+	PC_JAC_JOIN();
 	TRAP_UNIMPLEMENTED;
 }
 
@@ -89,6 +92,7 @@ void Jac_UpdateRocketParam(void)
  */
 void Jac_SysSEDemoFadeCheck()
 {
+	PC_JAC_JOIN();
 	if (sys_voldown_flag == 0) {
 		return;
 	}
@@ -108,6 +112,7 @@ void Jac_SysSEDemoFadeCheck()
  */
 void Jac_PlaySystemSe(s32 id)
 {
+	PC_JAC_JOIN();
 	if (!cmdqueue_reset) {
 		cmdqueue_reset = InitQueue();
 		if (!cmdqueue_reset) {
@@ -259,6 +264,7 @@ void Jac_PlaySystemSe(s32 id)
  */
 void Jac_StopSystemSe(s32 id)
 {
+	PC_JAC_JOIN();
 	if (cmdqueue_reset == FALSE) {
 		cmdqueue_reset = InitQueue();
 	}
@@ -288,6 +294,7 @@ void Jac_StopSystemSe(s32 id)
  */
 void Jac_PlaySe(u32)
 {
+	PC_JAC_JOIN();
 }
 
 /**
@@ -378,6 +385,7 @@ static void AuxBusInit()
  */
 void Jac_SetThreadPriority(void)
 {
+	PC_JAC_JOIN();
 	TRAP_UNIMPLEMENTED;
 }
 
@@ -394,6 +402,7 @@ static void __BootSoundOK(u32)
  */
 BOOL Jac_CheckBootOk()
 {
+	PC_JAC_JOIN();
 	return boot_ok;
 }
 
@@ -402,6 +411,7 @@ BOOL Jac_CheckBootOk()
  */
 void Jac_Start(void* heap, u32 heapSize, u32 aramSize, immut char* rootPath)
 {
+	PC_JAC_JOIN();
 	STACK_PAD_VAR(1);
 
 	if (rootPath) {
@@ -446,6 +456,7 @@ void Jac_Start(void* heap, u32 heapSize, u32 aramSize, immut char* rootPath)
  */
 void Jac_StopSoundAll(void)
 {
+	PC_JAC_JOIN();
 	TRAP_UNIMPLEMENTED;
 }
 
@@ -454,6 +465,7 @@ void Jac_StopSoundAll(void)
  */
 void Jac_Freeze_Precall()
 {
+	PC_JAC_JOIN();
 	BOOL enabled = OSDisableInterrupts();
 	jcs_* handle = Get_GlobalHandle();
 	AllStop_1Shot(handle);
@@ -467,6 +479,7 @@ void Jac_Freeze_Precall()
  */
 void Jac_Freeze()
 {
+	PC_JAC_JOIN();
 	BOOL enabled = OSDisableInterrupts();
 	StopAudioThread();
 	OSRestoreInterrupts(enabled);
@@ -486,6 +499,7 @@ static void __ResetCounter()
  */
 void Jac_Silence_Check(void)
 {
+	PC_JAC_JOIN();
 	TRAP_UNIMPLEMENTED;
 }
 
@@ -494,6 +508,7 @@ void Jac_Silence_Check(void)
  */
 void Jac_AddDVDBuffer(u8* buf, u32 bufferSize)
 {
+	PC_JAC_JOIN();
 	DVDT_SetBuffer(buf, 1, bufferSize);
 	lend_buffer = buf;
 }
@@ -503,6 +518,7 @@ void Jac_AddDVDBuffer(u8* buf, u32 bufferSize)
  */
 void Jac_BackDVDBuffer()
 {
+	PC_JAC_JOIN();
 	if (lend_buffer) {
 		DVDT_CloseBuffer(lend_buffer);
 	}

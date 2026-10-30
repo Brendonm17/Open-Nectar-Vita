@@ -1,0 +1,34 @@
+// Generated Cg TEV fragment shader (Open Nectar / PS Vita)
+void main(
+	half4 vColor : COLOR0,
+	float2 vTexCoord0 : TEXCOORD0,
+	uniform sampler2D uTex0 : TEXUNIT0,
+	uniform half4 uTevPrev,
+	uniform half4 uTevReg0,
+	uniform half4 uTevReg1,
+	uniform half4 uTevReg2,
+	uniform half4 uTevKonst_0,
+	uniform half4 uFogColour,
+	float vFog : TEXCOORD6,
+	out half4 out_color : COLOR)
+{
+	half4 rast0 = vColor;
+	half4 prev = (half4)uTevPrev;
+	half4 c0 = (half4)uTevReg0;
+	half4 c1 = (half4)uTevReg1;
+	half4 c2 = (half4)uTevReg2;
+	// stage 0
+	{
+		half4 tex = h4tex2D(uTex0, vTexCoord0);
+		half4 rast = rast0;
+		half4 konst = (half4)uTevKonst_0;
+		half3 cMix = half3(0.0h, 0.0h, 0.0h) * (half3(1.0h, 1.0h, 1.0h) - rast.rgb) + tex.rgb * rast.rgb;
+		half3 cResult = half3(0.0h, 0.0h, 0.0h) + cMix;
+		half aMix = 0.0h * (1.0h - rast.a) + tex.a * rast.a;
+		half aResult = 0.0h + aMix;
+		prev.rgb = cResult;
+		prev.a = aResult;
+	}
+	if (uFogColour.a > 0.0h) prev.rgb = lerp(prev.rgb, uFogColour.rgb, (half)saturate(vFog));
+	out_color = prev;
+}

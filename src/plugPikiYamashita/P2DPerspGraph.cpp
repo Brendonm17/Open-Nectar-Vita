@@ -1,6 +1,9 @@
 #include "DebugLog.h"
 #include "Dolphin/gx.h"
 #include "P2D/Graph.h"
+#if defined(PIKI_PC_PORT)
+#include "gl/pc_gfx.h"
+#endif
 #include "sysNew.h"
 
 /**
@@ -91,6 +94,13 @@ void P2DPerspGraph::setPort()
 	f32 height = f32(mViewportBounds.getHeight());
 
 	MTXPerspective(perspMtx.mMtx, mFovy, width / height, mNearClipZ, mFarClipZ);
+#if defined(PIKI_PC_PORT)
+	// Centred 4:3 HUD box.
+	{
+		const f32 sx = pc_gfx_ui_projection_scale_x();
+		for (int c = 0; c < 4; c++) perspMtx.mMtx[0][c] *= sx;
+	}
+#endif
 	GXSetProjection(perspMtx.mMtx, GX_PERSPECTIVE);
 
 	for (int i = 0; i < 4; i++) {

@@ -104,6 +104,12 @@ struct DynCollShape : public DynCollObject {
 	Matrix4f mInverseMatrix;    ///< _09C, matrix for transforming other objects into this object's local space from world space.
 	Matrix4f mViewMtx;          ///< _0DC, object's transform matrix, transformed to the camera's view space.
 	SRT mLocalSRT;              ///< _11C, object's scale (_11C), rotation (_128) and position (_134) in its local space.
+#if defined(PIKI_PC_PORT)
+	// SRT at the last rebuild.
+	SRT mPcLastSRT;
+	Matrix4f mPcLastMtx;
+	int mPcSameCount = -1;
+#endif
 };
 
 /**

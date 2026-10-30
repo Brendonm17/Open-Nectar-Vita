@@ -1,3 +1,6 @@
+#ifdef __vita__
+#include "gl/vita_drawrec.h"
+#endif
 #include "NewPikiGame.h"
 
 #include "Controller.h"
@@ -43,6 +46,9 @@
 #include "zen/ogTutorial.h"
 #if defined(PIKI_PC_PORT)
 #include "timing/pc_render_phase.h"
+#if defined(PIKI_PC_PORT)
+#include "gl/pc_gfx.h"
+#endif
 #endif
 
 //////////////////////////////////////////////////////
@@ -2105,6 +2111,10 @@ public:
 		// do the main frame render
 
 		MATCHING_START_TIMER("mainRender", true);
+#ifdef __vita__
+		// Arm the drawrec lane.
+		vita_drawrec_arm(1);
+#endif
 		mainRender(gfx);
 		MATCHING_STOP_TIMER("mainRender");
 
@@ -2176,6 +2186,10 @@ public:
 		}
 
 		BaseGameSection::draw(gfx);
+#ifdef __vita__
+		// J_sim: join and disarm the drawrec lane.
+		vita_drawrec_arm(0);
+#endif
 		if (!mIsInitialSetup) {
 			// check if we should advance the time of day
 			if (!gsys->resetPending() && (!mActiveMenu || gameflow.mMoviePlayer->mIsActive)) {
@@ -2291,6 +2305,10 @@ public:
 	 */
 	void mainRender(Graphics& gfx)
 	{
+#if defined(PIKI_PC_PORT)
+		pc_gfx_set_section_clip_43(0);
+		pc_settings_set_in_field(1);
+#endif
 		gfx.setViewport(AREA_FULL_SCREEN(gfx));
 		gfx.setScissor(AREA_FULL_SCREEN(gfx));
 		gfx.setClearColour(COLOUR_TRANSPARENT);
@@ -2860,6 +2878,10 @@ NewPikiGameSection::NewPikiGameSection()
 	} else if (fpsModeValue == 2) {
 		frameClampValue = 0;  // 120 Hz ticks; 0 is a port-only value, the game never sets it
 	}
+#ifdef __vita__
+	// Fixed 30 Hz gameplay.
+	frameClampValue = 2;
+#endif
 	gsys->setFrameClamp(frameClampValue);
 
 #if defined(WIN32) || defined(DEVELOP)

@@ -518,6 +518,22 @@ bool CollPart::collide(immut Vector3f& pos, f32 radius, Vector3f& pushVector)
 	return false;
 }
 
+#if defined(__vita__)
+/**
+ * @brief Sphere-pair test, length first: false when out of reach, else sep normalised and dist its length.
+ */
+static inline __attribute__((always_inline, no_instrument_function)) bool pcAtariSphereReach(Vector3f& sep, f32 reach, f32& dist)
+{
+	const f32 len      = sep.length();
+	const bool reached = (len <= reach);
+	if (reached && len != 0.0f) {
+		sep.div(len);
+	}
+	dist = len;
+	return reached;
+}
+#endif
+
 /**
  * @brief Collides this part against another part (sphere/cylinder/tube combinations).
  */
@@ -525,7 +541,14 @@ bool CollPart::collide(CollPart* collidePart, Vector3f& pushVector)
 {
 	if (isBouncySphereType() && collidePart->isBouncySphereType()) {
 		Vector3f sep = collidePart->mCentre - mCentre;
+#if defined(__vita__)
+		f32 dist;
+		if (!pcAtariSphereReach(sep, mRadius + collidePart->mRadius, dist)) {
+			return false;
+		}
+#else
 		f32 dist     = sep.normalise();
+#endif
 		if (dist <= mRadius + collidePart->mRadius) {
 			pushVector = sep;
 			pushVector = pushVector * (mRadius + collidePart->mRadius - dist);

@@ -3,8 +3,16 @@
 #include "pc_window.h"
 #include <chrono>
 #include <thread>
+#ifdef __vita__
+#include <psp2/kernel/threadmgr.h>
+#endif
+#ifdef __vita__
+extern "C" void nectar_gil_release(void);
+extern "C" void nectar_gil_acquire(void);
+extern "C" int  vita_platform_intercepted(void);
+extern "C" void vita_audio_set_paused(int on);
+#endif
 #include "timing/pc_frame_scheduler.h"
-#include "timing/pc_tick_profiler.h"
 #include "audio/pc_audio.h"
 #include "timing/pc_render_phase.h"
 #include "pc_gfx.h"
@@ -139,7 +147,7 @@ void DVDStream::init()
 {
 	mOffset  = 0;
 	mPending = mFileInfo.length;
-	sprintf(lastName, mPath);
+	sprintf(lastName, "%s", mPath);
 }
 
 /**
@@ -276,9 +284,11 @@ static bool pc_replay_test_enabled()
 void System::run(BaseApp* app)
 {
 	GXInvalidateTexAll();
+#if !defined(__vita__)
     printf("[PC Port] Starting System::run main loop...\n");
 
     auto lastFpsPrint = std::chrono::steady_clock::now();
+#endif
 
     // Initialize frame scheduler for fixed-step timing
     PcFrameScheduler frameScheduler;
@@ -305,6 +315,24 @@ void System::run(BaseApp* app)
 
 		// Get schedule from fixed-step scheduler
 		double now = std::chrono::steady_clock::now().time_since_epoch().count() / 1e9;
+#ifdef __vita__
+		// Background pause.
+		{
+			static bool wasIntercepted = false;
+			const bool intercepted = vita_platform_intercepted() != 0;
+			if (intercepted != wasIntercepted) {
+				wasIntercepted = intercepted;
+				vita_audio_set_paused(intercepted ? 1 : 0);
+			}
+			if (intercepted) {
+				nectar_gil_release();
+				sceKernelDelayThread(50 * 1000);
+				nectar_gil_acquire();
+				frameScheduler.reset(std::chrono::steady_clock::now().time_since_epoch().count() / 1e9, mFrameRate);
+				continue;
+			}
+		}
+#endif
 		PcFrameSchedule schedule = frameScheduler.advance(now, mFrameRate);
 
 		if (schedule.logicalTicks > 0) {
@@ -358,13 +386,20 @@ void System::run(BaseApp* app)
 				// Never sleep past one whole frame: a clock jump or a clamp
 				// change must not park the loop for an unbounded stretch.
 				if (waitFor > schedule.fixedDelta) waitFor = schedule.fixedDelta;
+#ifdef __vita__
+				nectar_gil_release();
 				std::this_thread::sleep_for(std::chrono::duration<double>(waitFor));
+				nectar_gil_acquire();
+#else
+				std::this_thread::sleep_for(std::chrono::duration<double>(waitFor));
+#endif
 			} else {
 				std::this_thread::yield();
 			}
 		}
 #endif
 
+#if !defined(__vita__)
         // Print FPS every 2 seconds
         auto nowChrono = std::chrono::steady_clock::now();
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(nowChrono - lastFpsPrint).count();
@@ -378,15 +413,10 @@ void System::run(BaseApp* app)
                    getFrameRate(), mDeltaTime * 1000.0, mFrameRate,
                    pc_gfx_get_specialised_program_count(),
                    pc_gfx_get_shader_specialisation() ? "" : " (ubershader)");
-            // The budget is always the 60 Hz one: the question this answers is
-            // whether a tick would fit there, not whether it fits the 30 Hz
-            // period it is currently running at.
-            if (pc_tick_profiler_enabled()) {
-                fputs(pc_tick_profiler_report(1000.0 / 60.0).c_str(), stdout);
-            }
             fflush(stdout);
             lastFpsPrint = nowChrono;
         }
+#endif
 	}
 
 #if PIKI_PC_PORT

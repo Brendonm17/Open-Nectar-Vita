@@ -36,6 +36,10 @@
 #include "jaudio/pikiinter.h"
 #include "sysMath.h"
 #include "sysNew.h"
+#if defined(__vita__)
+#include "gl/vita_drawrec.h" // Draw-record building and bomb lanes
+void pcNodeListWatch(CoreNode* root); // node.cpp: watched lists
+#endif
 
 /**
  * @todo: Documentation
@@ -156,6 +160,9 @@ ItemShapeObject::ItemShapeObject(Shape* shape, immut char* objName, immut char* 
  */
 MeltingPotMgr::MeltingPotMgr(ItemMgr* mgr)
 {
+#if defined(__vita__)
+	pcNodeListWatch(&mRootNode);
+#endif
 	mItemMgr   = mgr;
 	mGoalProps = new GoalItemProp();
 	mGoalAI    = new GoalAI();
@@ -733,6 +740,10 @@ void ItemCreature::doAI()
  */
 void ItemCreature::refresh(Graphics& gfx)
 {
+#if defined(__vita__)
+	// Draw-record bomb lane.
+	const bool rec = g_pcDrRecObj == this && mItemShapeObject && pcDrItemBegin(*this, mItemShapeObject->mShape, gfx);
+#endif
 	bool isOffCamera = false;
 
 	if (!gfx.mCamera->isPointVisible(mSRT.t, getBoundingSphereRadius())) {
@@ -749,6 +760,26 @@ void ItemCreature::refresh(Graphics& gfx)
 		gfx.mCamera->mLookAtMtx.multiplyTo(mWorldMtx, mtx);
 		mItemAnimator.updateContext();
 		mItemShapeObject->mShape->updateAnim(gfx, mtx, nullptr, this);
+#if defined(__vita__)
+		if (rec) {
+			PcDrItemRec r;
+			r.obj        = this;
+			r.shape      = mItemShapeObject->mShape;
+			r.dyn        = nullptr;
+			r.animDyn    = nullptr;
+			r.build      = nullptr;
+			r.val        = 0.0f;
+			r.lane       = kDrLaneBomb;
+			r.priceClass = kDrPcBomb;
+			r.animVal    = false;
+			r.light      = false;
+			r.ident      = !isOffCamera;
+			r.draw       = !isOffCamera;
+			r.stamp      = false;
+			pcDrItemRecord(r, gfx);
+			return;
+		}
+#endif
 
 		if (!isOffCamera) {
 			gfx.useMatrix(Matrix4f::ident, 0);
@@ -1095,6 +1126,10 @@ void BuildingItem::update()
  */
 void BuildingItem::refresh(Graphics& gfx)
 {
+#if defined(__vita__)
+	// Draw-record building lane.
+	const bool rec = g_pcDrRecObj == this && mItemShapeObject && pcDrItemBegin(*this, mItemShapeObject->mShape, gfx);
+#endif
 	f32 val = 0.0f;
 	if (mObjType == OBJTYPE_SluiceSoft) {
 		val = 0.0f;
@@ -1106,7 +1141,13 @@ void BuildingItem::refresh(Graphics& gfx)
 		val = 2.0f;
 	}
 
+#if defined(__vita__)
+	if (!rec) {
+		mAnimatedMaterials.animate(&val);
+	}
+#else
 	mAnimatedMaterials.animate(&val);
+#endif
 
 	bool isOffCamera = false;
 	if (!gfx.mCamera->isPointVisible(mSRT.t, getBoundingSphereRadius())) {
@@ -1123,7 +1164,11 @@ void BuildingItem::refresh(Graphics& gfx)
 		gfx.mCamera->mLookAtMtx.multiplyTo(mWorldMtx, mtx);
 		mItemAnimator.updateContext();
 		mItemShapeObject->mShape->updateAnim(gfx, mtx, nullptr, this);
+#if defined(__vita__)
+		if (!isOffCamera && !rec) {
+#else
 		if (!isOffCamera) {
+#endif
 			gfx.useMatrix(Matrix4f::ident, 0);
 			mItemShapeObject->mShape->drawshape(gfx, *gfx.mCamera, &mAnimatedMaterials);
 		}
@@ -1131,6 +1176,26 @@ void BuildingItem::refresh(Graphics& gfx)
 
 	mPlatMgr.update(gfx);
 	mCollInfo->updateInfo(gfx, false);
+#if defined(__vita__)
+	if (rec) {
+		// The record.
+		PcDrItemRec r;
+		r.obj        = this;
+		r.shape      = mItemShapeObject->mShape;
+		r.dyn        = &mAnimatedMaterials;
+		r.animDyn    = &mAnimatedMaterials;
+		r.build      = nullptr;
+		r.val        = val;
+		r.lane       = kDrLaneBuilding;
+		r.priceClass = kDrPcBuilding;
+		r.animVal    = true;
+		r.light      = false;
+		r.ident      = !isOffCamera;
+		r.draw       = !isOffCamera;
+		r.stamp      = true;
+		pcDrItemRecord(r, gfx);
+	}
+#endif
 }
 
 /**

@@ -14,6 +14,9 @@
 #include "sysNew.h"
 #include "zen/ogRader.h"
 #include "zen/ogSub.h"
+#if defined(PIKI_PC_PORT)
+#include "settings/pc_settings.h"
+#endif
 
 
 /**
@@ -157,8 +160,16 @@ zen::ogRaderMgr::ogRaderMgr()
 	Colour white(255, 255, 255, 255);
 	Colour black(0, 0, 0, 0);
 
+#if defined(PIKI_PC_PORT)
+	mPikiEntryCount = 2 * pc_settings_get_piki_limit() + 2;
+	if (mPikiEntryCount < MAX_PIKI_ON_FIELD) mPikiEntryCount = MAX_PIKI_ON_FIELD;
+	mPikiEntries = new PikiRaderEntry[mPikiEntryCount];
+	const int entryCount = mPikiEntryCount;
+#else
+	const int entryCount = MAX_PIKI_ON_FIELD;
+#endif
 	PikiRaderEntry* data = mPikiEntries;
-	for (i = 0; i < MAX_PIKI_ON_FIELD; i++) {
+	for (i = 0; i < entryCount; i++) {
 		data->mPic = new P2DPicture(mBluePikiIconTemplate->getTexture(0));
 		mIconPane->appendChild(data->mPic);
 		data->mPic->move((i % 10) * 10 + 10, (i / 10) * 10 + 10);
@@ -350,7 +361,12 @@ void zen::ogRaderMgr::getAllPikiPos()
 {
 	PikiRaderEntry* data = mPikiEntries;
 	mVisiblePikiCount    = 0;
-	for (int i = 0; i < MAX_PIKI_ON_FIELD; i++) {
+#if defined(PIKI_PC_PORT)
+	const int entryCount = mPikiEntryCount;
+#else
+	const int entryCount = MAX_PIKI_ON_FIELD;
+#endif
+	for (int i = 0; i < entryCount; i++) {
 		data->mPic->hide();
 		data++;
 	}
@@ -360,6 +376,7 @@ void zen::ogRaderMgr::getAllPikiPos()
 	CI_LOOP(iterator)
 	{
 		Piki* piki = static_cast<Piki*>(*iterator);
+		if (mVisiblePikiCount >= entryCount) break;
 		if (piki->isAlive()) {
 			Vector3f pos = ogCalcDispXZ(piki->mSRT.t);
 			data->mColor = piki->mColor;
@@ -375,6 +392,7 @@ void zen::ogRaderMgr::getAllPikiPos()
 	CI_LOOP(iterator2)
 	{
 		PikiHeadItem* piki = static_cast<PikiHeadItem*>(*iterator2);
+		if (mVisiblePikiCount >= entryCount) break;
 
 		Vector3f pos = ogCalcDispXZ(piki->mSRT.t);
 		data->mColor = -1;

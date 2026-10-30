@@ -77,6 +77,47 @@ static inline void bBoard_lerpColor(Colour* outColor, Colour* colA, f32 ratioA, 
 	outColor->a = bBoard_lerpColorComp(colA->a, ratioA, colB->a, ratioB);
 }
 
+#if defined(__vita__) && defined(__ARM_NEON)
+#include <arm_neon.h>
+#include <cstring>
+
+/* PS Vita: particle colour lerp in NEON */
+
+static inline __attribute__((always_inline, no_instrument_function)) void
+pcPtclLerpNeon(immut Colour* primCur, immut Colour* primNext, immut Colour* envCur, immut Colour* envNext, f32 r1, f32 t,
+               Colour* primColor, Colour* envColor)
+{
+	u32 primCurBits, primNextBits, envCurBits, envNextBits;
+	memcpy(&primCurBits, primCur, sizeof(u32));
+	memcpy(&primNextBits, primNext, sizeof(u32));
+	memcpy(&envCurBits, envCur, sizeof(u32));
+	memcpy(&envNextBits, envNext, sizeof(u32));
+	// Lane 0 primary colour, lane 1 environment
+	const uint32x2_t cur  = vset_lane_u32(envCurBits, vdup_n_u32(primCurBits), 1);
+	const uint32x2_t next = vset_lane_u32(envNextBits, vdup_n_u32(primNextBits), 1);
+
+	const uint16x8_t cur16      = vmovl_u8(vreinterpret_u8_u32(cur));
+	const uint16x8_t next16     = vmovl_u8(vreinterpret_u8_u32(next));
+	const float32x4_t primCurF  = vcvtq_f32_u32(vmovl_u16(vget_low_u16(cur16)));
+	const float32x4_t envCurF   = vcvtq_f32_u32(vmovl_u16(vget_high_u16(cur16)));
+	const float32x4_t primNextF = vcvtq_f32_u32(vmovl_u16(vget_low_u16(next16)));
+	const float32x4_t envNextF  = vcvtq_f32_u32(vmovl_u16(vget_high_u16(next16)));
+
+	float32x4_t prim = vmulq_n_f32(primNextF, t);
+	prim             = vmlaq_n_f32(prim, primCurF, r1);
+	float32x4_t env  = vmulq_n_f32(envNextF, t);
+	env              = vmlaq_n_f32(env, envCurF, r1);
+
+	const uint16x4_t prim16 = vmovn_u32(vcvtq_u32_f32(prim));
+	const uint16x4_t env16  = vmovn_u32(vcvtq_u32_f32(env));
+	const uint32x2_t out    = vreinterpret_u32_u8(vmovn_u16(vcombine_u16(prim16, env16)));
+	const u32 primOut       = vget_lane_u32(out, 0);
+	const u32 envOut        = vget_lane_u32(out, 1);
+	memcpy(primColor, &primOut, sizeof(u32));
+	memcpy(envColor, &envOut, sizeof(u32));
+}
+#endif
+
 /**
  * @todo: Documentation
  */
@@ -106,8 +147,13 @@ void zen::bBoardColourAnim::update(f32 timeStep, Colour* primColor, Colour* envC
 		t = 1.0f;
 	}
 
+#if defined(__vita__) && defined(__ARM_NEON)
+	pcPtclLerpNeon(&mAnimData->mPrimColors[mCurrentFrame], &mAnimData->mPrimColors[mCurrentFrame + 1], &mAnimData->mEnvColors[mCurrentFrame],
+	               &mAnimData->mEnvColors[mCurrentFrame + 1], 1.0f - t, t, primColor, envColor);
+#else
 	bBoard_lerpColor(primColor, &mAnimData->mPrimColors[mCurrentFrame], 1.0f - t, &mAnimData->mPrimColors[mCurrentFrame + 1], t);
 	bBoard_lerpColor(envColor, &mAnimData->mEnvColors[mCurrentFrame], 1.0f - t, &mAnimData->mEnvColors[mCurrentFrame + 1], t);
+#endif
 
 	if (mProgress >= nextThresh && ++mCurrentFrame >= mAnimData->mMaxFrame - 1) {
 		if (mAnimData->mFlags.all) {

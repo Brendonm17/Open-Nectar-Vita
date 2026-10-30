@@ -82,6 +82,11 @@ public:
 	Grass* getRandomGrass();
 
 	void killGrass() { mActiveGrass--; }
+#if defined(__vita__)
+	// Draw-record refresh and visibility predicate.
+	void pcRefreshBody(Graphics& gfx);
+	bool pcDrDraws(Graphics& gfx, Shape** shapes, int& shapeCount);
+#endif
 
 protected:
 	void create(int, f32, int);
@@ -122,6 +127,10 @@ public:
 	void setSizeAndNum(f32, int);
 	void killPebble();
 	Pebble* getRandomPebble();
+#if defined(__vita__)
+	void pcRefreshBody(Graphics& gfx);
+	bool pcDrDraws(Graphics& gfx, Shape** shapes, int& shapeCount);
+#endif
 
 protected:
 	void create(int, f32, int);

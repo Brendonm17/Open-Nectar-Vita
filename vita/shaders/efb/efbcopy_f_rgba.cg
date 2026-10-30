@@ -1,0 +1,5 @@
+// EFB copy to an RGBA8 texture: the box-filtered colour as is.
+float4 main(float4 vUV01 : TEXCOORD0, float4 vUV23 : TEXCOORD1, uniform sampler2D uTex : TEXUNIT0) : COLOR
+{
+    return (tex2D(uTex, vUV01.xy) + tex2D(uTex, vUV01.zw) + tex2D(uTex, vUV23.xy) + tex2D(uTex, vUV23.zw)) * 0.25f;
+}

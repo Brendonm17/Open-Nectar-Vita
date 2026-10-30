@@ -3,6 +3,9 @@
 #include "Dolphin/gx.h"
 #include "P2D/Graph.h"
 #include "PUT/Geometry.h"
+#if defined(PIKI_PC_PORT)
+#include "gl/pc_gfx.h"
+#endif
 
 /**
  * @todo: Documentation
@@ -91,7 +94,19 @@ void P2DGrafContext::setScissor()
 	scissor.normalize();
 	scissor.add(0, -1);
 	if (scissor.intersect(bounds)) {
+#if defined(PIKI_PC_PORT)
+		// Interface: scissor in the centred 4:3 box.
+		if (pc_gfx_get_section_clip_43()) {
+			GXSetScissor(scissor.mMinX, scissor.mMinY, scissor.getWidth(), scissor.getHeight());
+		} else {
+			int bx, bw;
+			pc_gfx_ui_box(&bx, &bw);
+			const f32 sx = f32(bw) / 640.0f;
+			GXSetScissor(u32(bx + scissor.mMinX * sx), scissor.mMinY, u32(scissor.getWidth() * sx), scissor.getHeight());
+		}
+#else
 		GXSetScissor(scissor.mMinX, scissor.mMinY, scissor.getWidth(), scissor.getHeight());
+#endif
 	}
 }
 

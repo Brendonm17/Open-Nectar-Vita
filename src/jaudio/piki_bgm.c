@@ -139,6 +139,7 @@ static BOOL Jac_UpdateBgmCrossVol(BgmControl_* bgmControl);
  */
 s32 Jac_BgmFrameCallback(void* callbackArg)
 {
+	PC_JAC_JOIN();
 	call_counter += 1;
 	if ((call_counter & 7) == 0) {
 		Jac_BgmFrameWork();
@@ -151,6 +152,7 @@ s32 Jac_BgmFrameCallback(void* callbackArg)
  */
 void Jac_InitBgm(void)
 {
+	PC_JAC_JOIN();
 	u32 i;
 	for (i = 0; i < 3; i++) {
 		bgm[i].isActive         = 0;
@@ -188,6 +190,9 @@ void Jac_InitBgm(void)
 		buffer[1] = (u8*)OSAlloc2(0x8000);
 	}
 	Jac_RegisterPlayerCallback(Jac_BgmFrameCallback, 0);
+#if defined(PIKI_PC_PORT)
+	PlayerCallbackMarkSeqSafe(Jac_BgmFrameCallback);   // JAudio-only: may run off the game thread
+#endif
 }
 
 /**
@@ -195,6 +200,7 @@ void Jac_InitBgm(void)
  */
 void Jac_FadeOutBgm(u32 trackIndex, u32 fadeFrames)
 {
+	PC_JAC_JOIN();
 	fadeouttime = fadeFrames;
 	Jac_SetBgmModeFlag(trackIndex, 8, 1);
 }
@@ -204,6 +210,7 @@ void Jac_FadeOutBgm(u32 trackIndex, u32 fadeFrames)
  */
 void Jac_StopBgm(u32 trackIndex)
 {
+	PC_JAC_JOIN();
 	if (bgm[trackIndex].isActive) {
 		Jaf_StopSeq(bgm[trackIndex].trackHandle);
 		bgm[trackIndex].isActive = 0;
@@ -215,6 +222,7 @@ void Jac_StopBgm(u32 trackIndex)
  */
 void Jac_ReadyBgm(u32 bgmID)
 {
+	PC_JAC_JOIN();
 	u32* REF_id = &bgmID;
 
 	if (bgmID < 2) {
@@ -237,6 +245,7 @@ void Jac_ReadyBgm(u32 bgmID)
  */
 void Jac_PlayBgm(u32 trackIndex, u32 bgmID)
 {
+	PC_JAC_JOIN();
 	STACK_PAD_VAR(4);
 	u32* REF_b = &bgmID;
 	u8* seqState;
@@ -327,6 +336,7 @@ void Jac_PlayBgm(u32 trackIndex, u32 bgmID)
  */
 BOOL Jac_ChangeBgmMode(u32 trackIndex, u8 modeFlags)
 {
+	PC_JAC_JOIN();
 	if (modeFlags == bgm[trackIndex].currentMode) {
 		return FALSE;
 	}
@@ -346,6 +356,7 @@ BOOL Jac_ChangeBgmMode(u32 trackIndex, u8 modeFlags)
  */
 void Jac_SetBgmModeFlag(u32 trackIndex, u8 flagMask, u8 enabled)
 {
+	PC_JAC_JOIN();
 #if defined(VERSION_GPIP01)
 	STACK_PAD_VAR(2);
 	if (call_counter < 6000 && Jac_GetCurrentScene() == SCENE_Course && flagMask != 8 && flagMask != 4) {
@@ -389,6 +400,7 @@ void Jac_SetBgmModeFlag(u32 trackIndex, u8 flagMask, u8 enabled)
  */
 void Jac_BgmFrameWork(void)
 {
+	PC_JAC_JOIN();
 	if (bgm_semaphore == 0) {
 		bgm_semaphore = TRUE;
 
@@ -430,6 +442,7 @@ void Jac_BgmFrameWork(void)
  */
 void Jac_MoveBgmTrackVol(BgmControl_* bgmControl)
 {
+	PC_JAC_JOIN();
 	seqp_* track2;
 	seqp_* track;
 	u32 i;
@@ -452,6 +465,7 @@ void Jac_MoveBgmTrackVol(BgmControl_* bgmControl)
  */
 void Jac_ChangeBgmTrackVol(BgmControl_* bgmControl)
 {
+	PC_JAC_JOIN();
 	STACK_PAD_VAR(4);
 	u32 i;
 	seqp_* track2 = Jaf_HandleToSeq(bgmControl->trackHandle);
@@ -518,6 +532,7 @@ static BOOL Jac_UpdateBgmCrossVol(BgmControl_* bgmControl)
  */
 void Jac_GameVolume(u8 bgmLevel, u8 seLevel)
 {
+	PC_JAC_JOIN();
 	u16 soundEffectVolume;
 	u16 demoVolume;
 	game_bgm_volume = GAMEBGM_VOL_TABLE[bgmLevel];
@@ -539,8 +554,19 @@ void Jac_GameVolume(u8 bgmLevel, u8 seLevel)
  */
 void Jac_EasyCrossFade(u8 crossfadeMode, u32 fadeFrames)
 {
+	PC_JAC_JOIN();
 	u8* REF_type = &crossfadeMode;
 	u32* REF_val = &fadeFrames;
+
+#if defined(PIKI_PC_PORT)
+	if (crossfadeMode <= 1 && !bgm[crossfadeMode].isActive) {
+		if (crossfadeMode == 1 && bgm[0].isActive && Jac_GetCurrentScene() == SCENE_Title) {
+			bgm[0].gameVolume = 0.0f;
+			bgm[0].crossfade  = fadeFrames;
+		}
+		return;
+	}
+#endif
 
 	switch (crossfadeMode) {
 	case 0: // exit boss mode
@@ -577,6 +603,7 @@ void Jac_EasyCrossFade(u8 crossfadeMode, u32 fadeFrames)
  */
 void Jac_DemoFade(u8 fadeType, u32 fadeFrames, f32 volumeScale)
 {
+	PC_JAC_JOIN();
 	u8* REF_type  = &fadeType;
 	u32* REF_val  = &fadeFrames;
 	f32* REF_mult = &volumeScale;
@@ -619,6 +646,7 @@ void Jac_DemoFade(u8 fadeType, u32 fadeFrames, f32 volumeScale)
  */
 void Jac_EnterBossMode(void)
 {
+	PC_JAC_JOIN();
 	Jac_EasyCrossFade(1, 100);
 }
 
@@ -627,5 +655,6 @@ void Jac_EnterBossMode(void)
  */
 void Jac_ExitBossMode(void)
 {
+	PC_JAC_JOIN();
 	Jac_EasyCrossFade(0, 100);
 }

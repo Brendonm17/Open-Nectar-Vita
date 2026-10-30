@@ -2,6 +2,10 @@
 #include "port/jaudio_host.h"
 #endif
 #include "pc_window.h"
+#ifdef __vita__
+#include "vita_platform.h"
+#include "vita_rt.h"
+#endif
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
@@ -28,6 +32,10 @@ static std::chrono::steady_clock::time_point sNextPresentDeadline;
 
 // Settings-menu video state (PC only).
 static int sDisplayMode = PC_WINDOW_FULLSCREEN_WINDOWED;
+#ifdef __vita__
+extern "C" void nectar_gil_release(void);
+extern "C" void nectar_gil_acquire(void);
+#endif
 static bool sVsyncEnabled = true;   // presentation pacing on/off
 static char sLastVideoError[256] = { 0 };
 
@@ -55,6 +63,10 @@ static bool sSettingsMenuOpen = false;
 
 // Virtual cursor (mouse-controlled cursor, separate from movement stick)
 static s8 sVirtualCursorX = 0;
+static float sCameraStickX = 0.0f, sCameraStickY = 0.0f;
+static int sRightStickRole = PC_ROLE_SQUAD, sDpadRole = PC_ROLE_OFF;
+static float sCameraSpeed = 1.0f;
+static int sDpadInvert = 0;
 static s8 sVirtualCursorY = 0;
 
 // Mouse cursor delta for direct mouse input (PC_CONTROL_MOUSE_CURSOR relative mode)
@@ -91,10 +103,18 @@ const int kDefaultGamepadBindings[PC_KEY_ACT_COUNT] = {
     /* PC_KEY_ACT_B       */ SDL_CONTROLLER_BUTTON_B,
     /* PC_KEY_ACT_X       */ SDL_CONTROLLER_BUTTON_X,
     /* PC_KEY_ACT_Y       */ SDL_CONTROLLER_BUTTON_Y,
+#ifdef __vita__
+    // Vita: R on the R shoulder, Z on Select.
+    /* PC_KEY_ACT_Z       */ SDL_CONTROLLER_BUTTON_BACK,
+    /* PC_KEY_ACT_START   */ SDL_CONTROLLER_BUTTON_START,
+    /* PC_KEY_ACT_L       */ SDL_CONTROLLER_BUTTON_LEFTSHOULDER,
+    /* PC_KEY_ACT_R       */ SDL_CONTROLLER_BUTTON_RIGHTSHOULDER,
+#else
     /* PC_KEY_ACT_Z       */ SDL_CONTROLLER_BUTTON_RIGHTSHOULDER,
     /* PC_KEY_ACT_START   */ SDL_CONTROLLER_BUTTON_START,
     /* PC_KEY_ACT_L       */ SDL_CONTROLLER_BUTTON_LEFTSHOULDER,
     /* PC_KEY_ACT_R       */ -1, // Right analog trigger supplies R by default
+#endif
     /* PC_KEY_ACT_DPAD_UP    */ SDL_CONTROLLER_BUTTON_DPAD_UP,
     /* PC_KEY_ACT_DPAD_DOWN  */ SDL_CONTROLLER_BUTTON_DPAD_DOWN,
     /* PC_KEY_ACT_DPAD_LEFT  */ SDL_CONTROLLER_BUTTON_DPAD_LEFT,
@@ -246,12 +266,27 @@ bool pc_window_init(const char* title, int width, int height) {
     sWindowHeight = height;
     sShouldClose = false;
 
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER | SDL_INIT_EVENTS) < 0) {
+#ifdef __vita__
+    const Uint32 sdlInitFlags = SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER | SDL_INIT_EVENTS;
+#else
+    const Uint32 sdlInitFlags = SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER | SDL_INIT_EVENTS;
+#endif
+    if (SDL_Init(sdlInitFlags) < 0) {
         printf("[PC Port Error] SDL_Init failed: %s\n", SDL_GetError());
         fflush(stdout);
         return false;
     }
 
+#ifdef __vita__
+    if (!vita_rt_start()) {
+        printf("[PC Port Error] render thread / vitaGL init failed\n");
+        SDL_Quit();
+        return false;
+    }
+    sWindowWidth = NECTAR_VITA_SCREEN_W;
+    sWindowHeight = NECTAR_VITA_SCREEN_H;
+    pc_window_set_vsync_enabled(false);
+#else
     // The current GX translation backend intentionally uses compatibility
     // features (GLSL 1.20 attribute/varying syntax and GL_QUADS). A Core
     // profile accepts the context but rejects every draw, producing a black
@@ -301,6 +336,7 @@ bool pc_window_init(const char* title, int width, int height) {
     // driver VSync with that limiter caused some compositor/Mesa paths to wait
     // two or three refreshes (the world map spent ~51 ms in swap alone).
     SDL_GL_SetSwapInterval(0);
+#endif // !__vita__
     
     // Enable relative mouse mode for cursor control
     // We'll toggle this with a key press (e.g., Tab) or when the game starts
@@ -324,21 +360,17 @@ bool pc_window_init(const char* title, int width, int height) {
         const double requested = strtod(value, nullptr);
         if (requested >= 20.0 && requested <= 1000.0) sTargetRefreshRate = requested;
     }
-    printf("[PC Port] Target refresh rate: %.2f Hz\n", sTargetRefreshRate);
 
     // Check for connected controllers
     for (int i = 0; i < SDL_NumJoysticks(); ++i) {
         if (SDL_IsGameController(i)) {
             sController = SDL_GameControllerOpen(i);
             if (sController) {
-                printf("[PC Port] Opened Game Controller: %s\n", SDL_GameControllerName(sController));
-                fflush(stdout);
                 break;
             }
         }
     }
 
-    printf("[PC Port] SDL2 Window & OpenGL Context initialized successfully (%dx%d)\n", sWindowWidth, sWindowHeight);
     return true;
 }
 
@@ -387,16 +419,12 @@ void pc_window_poll_events(PADStatus* pad) {
             case SDL_CONTROLLERDEVICEADDED:
                 if (!sController) {
                     sController = SDL_GameControllerOpen(event.cdevice.which);
-                    if (sController) {
-                        printf("[PC Port] Connected Game Controller: %s\n", SDL_GameControllerName(sController));
-                    }
                 }
                 break;
             case SDL_CONTROLLERDEVICEREMOVED:
                 if (sController && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(sController)) == event.cdevice.which) {
                     SDL_GameControllerClose(sController);
                     sController = nullptr;
-                    printf("[PC Port] Game Controller disconnected\n");
                 }
                 break;
             case SDL_KEYDOWN:
@@ -554,16 +582,16 @@ void pc_window_poll_events(PADStatus* pad) {
         int ly = SDL_GameControllerGetAxis(sController, SDL_CONTROLLER_AXIS_LEFTY);
         if (sStickInvert & 1) lx = -lx;
         if (sStickInvert & 2) ly = -ly;
-        if (abs(lx) > axisDeadZone) stickX = (s8)(lx / 256);
-        if (abs(ly) > axisDeadZone) stickY = (s8)(-ly / 256); // SDL Y-down to GC Y-up
+        if (abs(lx) > axisDeadZone) stickX = pc_pad_axis_from_sdl(lx);
+        if (abs(ly) > axisDeadZone) stickY = pc_pad_axis_from_sdl(-ly); // SDL Y-down to GC Y-up
 
         // Right Stick (C-Stick)
         int rx = SDL_GameControllerGetAxis(sController, SDL_CONTROLLER_AXIS_RIGHTX);
         int ry = SDL_GameControllerGetAxis(sController, SDL_CONTROLLER_AXIS_RIGHTY);
         if (sCStickInvert & 1) rx = -rx;
         if (sCStickInvert & 2) ry = -ry;
-        if (abs(rx) > axisDeadZone) substickX = (s8)(rx / 256);
-        if (abs(ry) > axisDeadZone) substickY = (s8)(-ry / 256);
+        if (abs(rx) > axisDeadZone) substickX = pc_pad_axis_from_sdl(rx);
+        if (abs(ry) > axisDeadZone) substickY = pc_pad_axis_from_sdl(-ry);
 
         // Optional digital bindings for stick directions are merged after the
         // analog axes, so every action exposed by the remapping UI is effective.
@@ -580,11 +608,78 @@ void pc_window_poll_events(PADStatus* pad) {
     // ── Mouse Input (Virtual Cursor) ──
     // In mouse modes: mouse controls virtual cursor (separate from movement stick)
     // Movement stick (stickX/stickY) comes from WASD or gamepad left stick
+#ifdef __vita__
+    if (true) {
+#else
     if (sControlMode != PC_CONTROL_CLASSIC) {
+#endif
         int mouseX, mouseY;
         Uint32 mouseState = 0;
         bool isRelative = sMouseRelativeMode;
         
+#ifdef __vita__
+        // Right stick and d-pad roles: Squad, Camera, Cursor.
+        {
+            static std::chrono::steady_clock::time_point lastPoll;
+            const auto nowPoll = std::chrono::steady_clock::now();
+            float dt = lastPoll.time_since_epoch().count() ? std::chrono::duration<float>(nowPoll - lastPoll).count() : 0.0f;
+            lastPoll = nowPoll;
+            if (dt > 0.1f) dt = 0.1f;
+            float fx = 0.0f, fy = 0.0f;   // right stick, y down
+            float px = 0.0f, py = 0.0f;   // d-pad, y up
+            bool dpadDown = false, lHeld = false;
+            if (sController) {
+                int rx = SDL_GameControllerGetAxis(sController, SDL_CONTROLLER_AXIS_RIGHTX);
+                int ry = SDL_GameControllerGetAxis(sController, SDL_CONTROLLER_AXIS_RIGHTY);
+                if (sCStickInvert & 1) rx = -rx;
+                if (sCStickInvert & 2) ry = -ry;
+                const int stickDz = sStickDeadZone * 256;
+                const float dz = float(stickDz);
+                if (abs(rx) > stickDz) fx = (rx > 0 ? rx - dz : rx + dz) / (32767.0f - dz);
+                if (abs(ry) > stickDz) fy = (ry > 0 ? ry - dz : ry + dz) / (32767.0f - dz);
+                fx = std::clamp(fx, -1.0f, 1.0f); fy = std::clamp(fy, -1.0f, 1.0f);
+                if (SDL_GameControllerGetButton(sController, SDL_CONTROLLER_BUTTON_DPAD_LEFT)) px -= 1.0f;
+                if (SDL_GameControllerGetButton(sController, SDL_CONTROLLER_BUTTON_DPAD_RIGHT)) px += 1.0f;
+                if (SDL_GameControllerGetButton(sController, SDL_CONTROLLER_BUTTON_DPAD_UP)) py += 1.0f;
+                dpadDown = SDL_GameControllerGetButton(sController, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0;
+                const int lBtn = pc_window_get_gamepad_binding(PC_KEY_ACT_L);
+                lHeld = lBtn >= 0 && lBtn < SDL_CONTROLLER_BUTTON_MAX
+                     && SDL_GameControllerGetButton(sController, static_cast<SDL_GameControllerButton>(lBtn)) != 0;
+            }
+#if defined(PIKI_PC_SETTINGS_MENU)
+            // Menu screens: d-pad acts as the stick.
+            if (pc_settings_menu_nav()) {
+                if (px < 0.0f) stickX = -127; else if (px > 0.0f) stickX = 127;
+                if (py > 0.0f) stickY = 127; else if (dpadDown) stickY = -127;
+                px = 0.0f; py = 0.0f; dpadDown = false;
+            }
+#endif
+            const bool dpadHasRole = sDpadRole != PC_ROLE_OFF;
+            if (dpadHasRole && dpadDown && !lHeld) { py -= 1.0f; button &= ~PAD_BUTTON_DOWN; }
+            if (sDpadInvert & 1) px = -px;
+            if (sDpadInvert & 2) py = -py;
+            sCameraStickX = 0.0f; sCameraStickY = 0.0f;
+            substickX = 0; substickY = 0;
+            switch (sRightStickRole) {
+            case PC_ROLE_SQUAD:  substickX = (s8)(fx * 127.0f); substickY = (s8)(-fy * 127.0f); break;
+            case PC_ROLE_CAMERA: sCameraStickX = fx * sCameraSpeed; sCameraStickY = -fy; break;
+            case PC_ROLE_CURSOR: {
+                constexpr float kCountsPerSecond = 900.0f;
+                sMouseCursorDeltaX += fx * kCountsPerSecond * sMouseSensitivity * dt;
+                sMouseCursorDeltaY += fy * kCountsPerSecond * sMouseSensitivity * dt;
+                sMouseCursorDeltaX = std::clamp(sMouseCursorDeltaX, -4096.0f, 4096.0f);
+                sMouseCursorDeltaY = std::clamp(sMouseCursorDeltaY, -4096.0f, 4096.0f);
+            } break;
+            default: break;
+            }
+            switch (sDpadRole) {
+            case PC_ROLE_SQUAD:  if (px != 0.0f) substickX = (s8)(px * 127.0f); if (py != 0.0f) substickY = (s8)(py * 127.0f); break;
+            case PC_ROLE_CAMERA: if (px != 0.0f) sCameraStickX = px * sCameraSpeed; if (py != 0.0f) sCameraStickY = py; break;
+            default: break;
+            }
+        }
+        (void)mouseX; (void)mouseY; (void)isRelative;
+#else
         if (isRelative) {
             mouseState = SDL_GetRelativeMouseState(&mouseX, &mouseY);
 
@@ -631,6 +726,7 @@ void pc_window_poll_events(PADStatus* pad) {
             }
         }
         
+#endif
         // Also map mouse buttons to A/B for convenience
         if (mouseState & SDL_BUTTON(SDL_BUTTON_LEFT)) {
             button |= PAD_BUTTON_A;
@@ -666,8 +762,14 @@ void pc_window_poll_events(PADStatus* pad) {
 }
 
 void pc_window_swap_buffers(void) {
-    if (sWindow) {
-        SDL_GL_SwapWindow(sWindow);
+#ifdef __vita__
+    const bool canPresent = true;
+    vita_platform_present();
+#else
+    const bool canPresent = sWindow != nullptr;
+    if (canPresent) SDL_GL_SwapWindow(sWindow);
+#endif
+    if (canPresent) {
         // VSync Off must not retain the software presentation limiter. Game
         // simulation uses the fixed-step scheduler independently.
         if (sVsyncEnabled) {
@@ -684,7 +786,15 @@ void pc_window_swap_buffers(void) {
             if (sNextPresentDeadline.time_since_epoch().count() == 0) {
                 sNextPresentDeadline = now + period;
             } else {
-                if (now < sNextPresentDeadline) std::this_thread::sleep_until(sNextPresentDeadline);
+                if (now < sNextPresentDeadline) {
+#ifdef __vita__
+                    nectar_gil_release();
+                    std::this_thread::sleep_until(sNextPresentDeadline);
+                    nectar_gil_acquire();
+#else
+                    std::this_thread::sleep_until(sNextPresentDeadline);
+#endif
+                }
                 now = std::chrono::steady_clock::now();
                 do {
                     sNextPresentDeadline += period;
@@ -707,9 +817,14 @@ void pc_window_set_swap_interval(int interval) {
     // nonsense.
     if (interval < 0) interval = 1;
     if (sLogicalRetraceInterval == interval) return;
+#ifdef __vita__
+    // Flip interval in vblanks.
+    vita_platform_set_vsync_interval(interval);
+#else
     // Use one pacing mechanism only. SDL_GL_SwapWindow must not add a second,
     // driver-controlled wait on top of the emulated 60 Hz VI interval.
     SDL_GL_SetSwapInterval(0);
+#endif
     sLogicalRetraceInterval = interval;
     sNextPresentDeadline = std::chrono::steady_clock::time_point {};
 }
@@ -732,7 +847,6 @@ void pc_window_shutdown(void) {
         sWindow = nullptr;
     }
     SDL_Quit();
-    printf("[PC Port] SDL2 Window & OpenGL Context shut down\n");
 }
 
 bool pc_window_should_close(void) {
@@ -830,9 +944,8 @@ SDL_GameController* pc_window_get_controller(void) {
 
 // Control mode functions
 void pc_window_set_control_mode(int mode) {
-    if (mode >= PC_CONTROL_CLASSIC && mode <= PC_CONTROL_MOUSE_CURSOR) {
+    if (mode >= PC_CONTROL_CLASSIC && mode <= PC_CONTROL_CAMERA_STICK) {
         sControlMode = mode;
-        printf("[PC Port] Control mode set to %d\n", mode);
 
         // Clear mouse deltas on mode transition to avoid consuming accumulated movement
         sMouseCursorDeltaX = 0.0f;
@@ -889,6 +1002,59 @@ void pc_window_set_settings_menu_open(bool open) {
 }
 
 // Virtual cursor getters (used by navi.cpp for mouse-controlled cursor)
+float pc_window_get_camera_stick_x(void) { return sCameraStickX; }
+float pc_window_get_camera_stick_y(void) { return sCameraStickY; }
+int   pc_window_camera_stick_active(void) { return sRightStickRole == PC_ROLE_CAMERA || sDpadRole == PC_ROLE_CAMERA; }
+int   pc_window_get_right_stick_role(void) { return sRightStickRole; }
+int   pc_window_get_dpad_role(void) { return sDpadRole; }
+void  pc_window_set_dpad_invert(int flags) { sDpadInvert = flags & 3; }
+void  pc_window_rumble(int chan, float intensity) {
+    static float sLast = 0.0f;
+    if (chan != 0) return;
+    if (intensity < 0.0f) intensity = 0.0f;
+    if (intensity > 1.0f) intensity = 1.0f;
+    if (intensity == 0.0f && sLast == 0.0f) return;
+    sLast = intensity;
+    if (!sController || !SDL_GameControllerHasRumble(sController)) return;
+    const Uint16 level = (Uint16)(intensity * 65535.0f + 0.5f);
+    SDL_GameControllerRumble(sController, level, level, intensity > 0.0f ? 120 : 0);
+}
+int   pc_window_button_glyph(char letter) {
+    // Cells: 0 Cross, 1 Circle, 2 Square, 3 Triangle, 4 L, 5 R, 6 Start, 7 Select, 8 left stick, 9 right stick, 10 d-pad.
+    int action = -1;
+    switch (letter) {
+    case 'a': action = PC_KEY_ACT_A; break;
+    case 'b': action = PC_KEY_ACT_B; break;
+    case 'x': action = PC_KEY_ACT_X; break;
+    case 'y': action = PC_KEY_ACT_Y; break;
+    case 'z': action = PC_KEY_ACT_Z; break;
+    case 'l': action = PC_KEY_ACT_L; break;
+    case 'r': action = PC_KEY_ACT_R; break;
+    case 'm': return 8;
+    case 'c': return sRightStickRole == PC_ROLE_SQUAD ? 9 : sDpadRole == PC_ROLE_SQUAD ? 10 : 9;
+    default:  return -1;
+    }
+    switch (pc_window_get_gamepad_binding(action)) {
+    case SDL_CONTROLLER_BUTTON_A:             return 0;
+    case SDL_CONTROLLER_BUTTON_B:             return 1;
+    case SDL_CONTROLLER_BUTTON_X:             return 2;
+    case SDL_CONTROLLER_BUTTON_Y:             return 3;
+    case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:  return 4;
+    case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: return 5;
+    case SDL_CONTROLLER_BUTTON_START:         return 6;
+    case SDL_CONTROLLER_BUTTON_BACK:          return 7;
+    default:                                  return -1;
+    }
+}
+void  pc_window_set_camera_speed(float speed) { sCameraSpeed = std::clamp(speed, 0.25f, 4.0f); }
+void  pc_window_set_stick_roles(int rightStick, int dpad) {
+    if (rightStick < PC_ROLE_SQUAD || rightStick > PC_ROLE_CURSOR) rightStick = PC_ROLE_SQUAD;
+    if (dpad < PC_ROLE_OFF || dpad > PC_ROLE_CAMERA) dpad = PC_ROLE_OFF;
+    sRightStickRole = rightStick; sDpadRole = dpad;
+#ifdef __vita__
+    pc_window_set_control_mode(rightStick == PC_ROLE_CURSOR ? PC_CONTROL_MOUSE_CURSOR : PC_CONTROL_CLASSIC);
+#endif
+}
 extern "C" s8 pc_window_get_virtual_cursor_x(void) {
     return sVirtualCursorX;
 }

@@ -20,6 +20,127 @@ DEFINE_ERROR(__LINE__) // Never used in the DLL
  */
 DEFINE_PRINT("Node");
 
+#if defined(__vita__)
+/* PS Vita: watched lists. */
+struct PcWatchedList {
+	CoreNode* mRoot;       // the list head, null for a free slot
+	u32 mGen;              // never 0 once registered
+	u32 mCursorGen;        // the cursor below is valid for this generation (0: none)
+	int mCursorIdx;        // index of mCursorNode, as a walk from the head counts
+	CoreNode* mCursorNode; // what that walk returned (null at the end)
+	u32 mCountGen;         // mCount is valid for this generation (0: none)
+	int mCount;            // getChildCount()
+};
+static const int kPcWatchedLists = 8;
+static PcWatchedList sPcWatched[kPcWatchedLists];
+static int sPcWatchedNext         = 0;
+static u32 sPcGenSource           = 0;
+
+static inline u32 pcNextGen()
+{
+	if (++sPcGenSource == 0) {
+		sPcGenSource = 1;
+	}
+	return sPcGenSource;
+}
+
+static inline PcWatchedList* pcWatchedFind(CoreNode* root)
+{
+	for (int i = 0; i < kPcWatchedLists; i++) {
+		if (sPcWatched[i].mRoot == root) {
+			return &sPcWatched[i];
+		}
+	}
+	return nullptr;
+}
+
+static inline void pcWatchedBump(CoreNode* root)
+{
+	if (!root) {
+		return;
+	}
+	PcWatchedList* list = pcWatchedFind(root);
+	if (list) {
+		list->mGen = pcNextGen();
+	}
+}
+
+// The original walk: idx steps from the head, a negative idx taking none.
+static inline CoreNode* pcNodeWalk(CoreNode* root, int idx)
+{
+	CoreNode* node = root->mChild;
+	for (int i = 0; i < idx; i++) {
+		node = node->mNext;
+	}
+	return node;
+}
+
+/** @brief Registers a list head. */
+void pcNodeListWatch(CoreNode* root)
+{
+	PcWatchedList* list = pcWatchedFind(root);
+	if (!list) {
+		list           = &sPcWatched[sPcWatchedNext];
+		sPcWatchedNext = (sPcWatchedNext + 1) % kPcWatchedLists;
+	}
+	list->mRoot       = root;
+	list->mGen        = pcNextGen();
+	list->mCursorGen  = 0;
+	list->mCursorIdx  = 0;
+	list->mCursorNode = nullptr;
+	list->mCountGen   = 0;
+	list->mCount      = 0;
+}
+
+/** @brief Marks a watched head changed. */
+void pcNodeListTouched(CoreNode* root)
+{
+	pcWatchedBump(root);
+}
+
+/** @brief The head's current generation, or 0 if not watched. */
+u32 pcNodeListGen(CoreNode* root)
+{
+	PcWatchedList* list = pcWatchedFind(root);
+	return list ? list->mGen : 0;
+}
+
+/** @brief The node idx steps from root->mChild, cached for in-order stepping. */
+CoreNode* pcNodeListAt(CoreNode* root, int idx)
+{
+	PcWatchedList* list = (idx >= 0) ? pcWatchedFind(root) : nullptr;
+	if (!list) {
+		return pcNodeWalk(root, idx);
+	}
+	CoreNode* node;
+	if (list->mCursorGen == list->mGen && idx == list->mCursorIdx) {
+		node = list->mCursorNode;
+	} else if (list->mCursorGen == list->mGen && idx == list->mCursorIdx + 1 && list->mCursorNode) {
+		node = list->mCursorNode->mNext;
+	} else {
+		node = pcNodeWalk(root, idx);
+	}
+	list->mCursorGen  = list->mGen;
+	list->mCursorIdx  = idx;
+	list->mCursorNode = node;
+	return node;
+}
+
+/** @brief Cached root->getChildCount(). */
+int pcNodeListCount(CoreNode* root)
+{
+	PcWatchedList* list = pcWatchedFind(root);
+	if (!list) {
+		return root->getChildCount();
+	}
+	if (list->mCountGen != list->mGen) {
+		list->mCount    = root->getChildCount();
+		list->mCountGen = list->mGen;
+	}
+	return list->mCount;
+}
+#endif
+
 /**
  * @todo: Documentation
  */
@@ -43,6 +164,9 @@ void CoreNode::add(CoreNode* toAdd)
 
 	// 	Set the parent of the new child to this node
 	toAdd->mParent = this;
+#if defined(__vita__)
+	pcWatchedBump(this);
+#endif
 }
 
 /**
@@ -50,6 +174,9 @@ void CoreNode::add(CoreNode* toAdd)
  */
 void CoreNode::del()
 {
+#if defined(__vita__)
+	pcWatchedBump(mParent);
+#endif
 	// If there's no parent, there's nothing to delete
 	if (mParent) {
 		CoreNode* child = mParent->mChild;
@@ -189,6 +316,9 @@ void NodeMgr::Del(Node* node)
 	if (!node->mParent) {
 		return;
 	}
+#if defined(__vita__)
+	pcWatchedBump(node->mParent);
+#endif
 
 	Node* child = static_cast<Node*>(node->mParent->mChild);
 	Node* prev  = nullptr;

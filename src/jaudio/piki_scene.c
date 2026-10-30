@@ -86,6 +86,7 @@ static u8 header[] = { 0x00, 0x64, 0x0C, 0x62, 0x00, 0x58, 0xEE, 0x80, 0xBB, 0x8
  */
 void Jac_Delete_CurrentBgmWave()
 {
+	PC_JAC_JOIN();
 	Jac_StopBgm(0);
 	Jac_StopBgm(1);
 	WaveScene_Close(current_bgm, 0);
@@ -128,6 +129,7 @@ static void __Loaded(u32 a)
  */
 u32 Jac_GetCurrentScene()
 {
+	PC_JAC_JOIN();
 	return current_scene;
 }
 
@@ -136,6 +138,7 @@ u32 Jac_GetCurrentScene()
  */
 BOOL Jac_TellChgMode()
 {
+	PC_JAC_JOIN();
 	return chgmode;
 }
 
@@ -148,6 +151,7 @@ BOOL Jac_TellChgMode()
  */
 void Jac_SceneSetup(u32 sceneID, u32 stage)
 {
+	PC_JAC_JOIN();
 	STACK_PAD_VAR(4);
 	u32* REF_sceneID = &sceneID;
 	u32* REF_stage   = &stage;
@@ -358,6 +362,7 @@ void Jac_SceneSetup(u32 sceneID, u32 stage)
  */
 void Jac_SceneExit(u32 nextSceneID, u32 stage)
 {
+	PC_JAC_JOIN();
 	int fade;
 	int newBgm;
 
@@ -416,6 +421,7 @@ void Jac_SceneExit(u32 nextSceneID, u32 stage)
  */
 void Jac_SetStreamLevel(u16 streamLevel, u16 seLevel)
 {
+	PC_JAC_JOIN();
 	stream_level    = streamLevel;
 	stream_se_level = seLevel;
 }
@@ -425,6 +431,7 @@ void Jac_SetStreamLevel(u16 streamLevel, u16 seLevel)
  */
 void Jac_UpdateStreamLevel()
 {
+	PC_JAC_JOIN();
 	if (StreamCheckAudioFormat(0) == AUDIOFRMT_ADPCM4X) {
 		StreamChgVolume(0, 0x7fff, 0x7fff);
 		StreamChgMixLevel(0, stream_level, stream_se_level);
@@ -467,6 +474,7 @@ static int MovieSync(u32 callbackArg, s32 cmd)
  */
 void Jac_InitStreamSystem(void)
 {
+	PC_JAC_JOIN();
 	RegisterStreamCallback(MovieSync);
 }
 
@@ -475,6 +483,7 @@ void Jac_InitStreamSystem(void)
  */
 void Jac_StopDemoSound(u32 id)
 {
+	PC_JAC_JOIN();
 	if (StreamSyncCheckBusy(0, id) == 1) {
 		stop_flag = 1;
 	}
@@ -485,6 +494,7 @@ void Jac_StopDemoSound(u32 id)
  */
 void Jac_PrepareDemoSound(u32 id)
 {
+	PC_JAC_JOIN();
 	char buffer[64];
 	STACK_PAD_VAR(3);
 	u32* REF_id = &id;
@@ -510,6 +520,7 @@ void Jac_PrepareDemoSound(u32 id)
  */
 void Jac_StartDemoSound(u32 id)
 {
+	PC_JAC_JOIN();
 
 	if (current_prepare != id && StreamSyncCheckBusy(0, id) == 1) {
 		stop_ready = 0;
@@ -540,6 +551,7 @@ void Jac_StartDemoSound(u32 id)
  */
 void Jac_CheckReadyDemoSound(u32 a)
 {
+	PC_JAC_JOIN();
 	TRAP_UNIMPLEMENTED;
 }
 
@@ -549,6 +561,7 @@ void Jac_CheckReadyDemoSound(u32 a)
  */
 void Jac_StreamSetup(void)
 {
+	PC_JAC_JOIN();
 	TRAP_UNIMPLEMENTED;
 }
 
@@ -558,5 +571,6 @@ void Jac_StreamSetup(void)
  */
 void Jac_StreamUpdate(void)
 {
+	PC_JAC_JOIN();
 	TRAP_UNIMPLEMENTED;
 }

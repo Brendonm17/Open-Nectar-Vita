@@ -4,6 +4,9 @@
 #include "MapMgr.h"
 #include "SoundMgr.h"
 #include "jaudio/pikiinter.h"
+#if defined(__vita__)
+#include "gl/vita_drawrec.h"
+#endif
 
 /**
  * @todo: Documentation
@@ -240,6 +243,16 @@ void RockGen::update()
  */
 void RockGen::refresh(Graphics& gfx)
 {
+#if defined(__vita__)
+	if (g_pcDrRecObj == this && pcDrGrassRecord(*this, true, gfx)) {
+		return;
+	}
+	pcRefreshBody(gfx);
+}
+
+void RockGen::pcRefreshBody(Graphics& gfx)
+{
+#endif
 	if (!gfx.mCamera->isPointVisible(mSRT.t, getSize() * 4.0f)) {
 		return;
 	}
@@ -260,6 +273,32 @@ void RockGen::refresh(Graphics& gfx)
 		itemMgr->getPebbleShape(pebble.mShapeIndex)->drawshape(gfx, *gfx.mCamera, nullptr);
 	}
 }
+
+#if defined(__vita__)
+bool RockGen::pcDrDraws(Graphics& gfx, Shape** shapes, int& shapeCount)
+{
+	shapeCount = 0;
+	if (!gfx.mCamera->isPointVisible(mSRT.t, getSize() * 4.0f)) {
+		return false;
+	}
+	bool any = false;
+	for (int i = 0; i < mMaxPebbles; i++) {
+		if (!mPebbles[i].mHealth) {
+			continue;
+		}
+		any            = true;
+		Shape* s       = itemMgr->getPebbleShape(mPebbles[i].mShapeIndex);
+		bool have      = false;
+		for (int k = 0; k < shapeCount; k++) {
+			have = have || shapes[k] == s;
+		}
+		if (!have && shapeCount < 3) {
+			shapes[shapeCount++] = s;
+		}
+	}
+	return any;
+}
+#endif
 
 /**
  * @todo: Documentation
@@ -367,6 +406,16 @@ void GrassGen::update()
  */
 void GrassGen::refresh(Graphics& gfx)
 {
+#if defined(__vita__)
+	if (g_pcDrRecObj == this && pcDrGrassRecord(*this, false, gfx)) {
+		return;
+	}
+	pcRefreshBody(gfx);
+}
+
+void GrassGen::pcRefreshBody(Graphics& gfx)
+{
+#endif
 	if (gfx.mCamera->isPointVisible(mSRT.t, getSize() * 4.0f)) {
 		for (int i = 0; i < mTotalGrassCount; i++) {
 			Grass& blade = mGrass[i];
@@ -383,6 +432,32 @@ void GrassGen::refresh(Graphics& gfx)
 		}
 	}
 }
+
+#if defined(__vita__)
+bool GrassGen::pcDrDraws(Graphics& gfx, Shape** shapes, int& shapeCount)
+{
+	shapeCount = 0;
+	if (!gfx.mCamera->isPointVisible(mSRT.t, getSize() * 4.0f)) {
+		return false;
+	}
+	bool any = false;
+	for (int i = 0; i < mTotalGrassCount; i++) {
+		if (!mGrass[i].mHealth) {
+			continue;
+		}
+		any       = true;
+		Shape* s  = itemMgr->getGrassShape(mGrass[i].mGrassShapeId);
+		bool have = false;
+		for (int k = 0; k < shapeCount; k++) {
+			have = have || shapes[k] == s;
+		}
+		if (!have && shapeCount < 3) {
+			shapes[shapeCount++] = s;
+		}
+	}
+	return any;
+}
+#endif
 
 /**
  * @todo: Documentation

@@ -2,6 +2,26 @@
 #include <stdint.h>
 #include "Dolphin/os.h"
 #include "hvqm4.h"
+#include <stdio.h>
+#include "Dolphin/OS/OSThread.h"
+#if defined(__vita__)
+#include <psp2/kernel/threadmgr.h>
+#endif
+#if defined(__vita__)
+#ifdef __cplusplus
+extern "C" {
+#endif
+void nectar_gil_acquire(void);
+void nectar_gil_release(void);
+int  nectar_gil_held(void);
+#ifdef __cplusplus
+}
+#endif
+#endif
+#if defined(PIKI_PC_PORT)
+// GOP-skip catch-up state.
+static int sCatchUp = 0;
+#endif
 #include "jaudio/dspbuf.h"
 #include "jaudio/dummyprobe.h"
 #include "jaudio/dvdthread.h"
@@ -28,6 +48,11 @@ static struct RecHeader {
 } rec_header;
 
 static int v_header;
+#if defined(PIKI_PC_PORT)
+// Big-endian header field swaps.
+static inline u32 hvqm_swap32(u32 v) { return __builtin_bswap32(v); }
+static inline u16 hvqm_swap16(u16 v) { return __builtin_bswap16(v); }
+#endif
 static int gop_baseframe;
 static u32 gop_frame;
 static int vh_state;
@@ -186,9 +211,13 @@ static void InitAudio1(StreamHeader_* header, u8* data, u32 size)
  */
 void Jac_HVQM_Init(immut char* movieFilePath, u8* data, u32 bufferSize)
 {
+	PC_JAC_JOIN();
 	// TODO: Use this in more places below instead of hardcoding 0x40000
 	u32 audioBufferSize = 0x40000;
 	playback_first_wait = TRUE;
+#if defined(PIKI_PC_PORT)
+	sCatchUp = 0;
+#endif
 	for (u32 i = 0; i < bufferSize; i++) {
 		(void)&i;
 		data[i] = 0;
@@ -236,7 +265,11 @@ void Jac_HVQM_Init(immut char* movieFilePath, u8* data, u32 bufferSize)
 	dvdfile_size -= 0x80000;
 	volatile u32 status;
 	DVDT_LoadtoDRAM(dvdcount, movieFilePath, (uintptr_t)dvd_buf[dvdcount % 3], 0, 0x80000, (u32*)&status, 0);
-	while (status == 0) { }
+	while (status == 0) {
+#if defined(PIKI_PC_PORT)
+		OSYieldThread();
+#endif
+	}
 
 	dvd_ctrl[0].mFileOffset = 0;
 	dvd_ctrl[0].mState      = 2;
@@ -246,6 +279,13 @@ void Jac_HVQM_Init(immut char* movieFilePath, u8* data, u32 bufferSize)
 	__ReLoad();
 
 	file_header = *(HVQM_FileHeader*)dvd_buf[0];
+#if defined(PIKI_PC_PORT)
+	file_header.mTotalFrames  = hvqm_swap32(file_header.mTotalFrames);
+	file_header.mFileSize     = hvqm_swap32(file_header.mFileSize);
+	file_header.mSampleRate   = hvqm_swap32(file_header.mSampleRate);
+	file_header.mInfo.width   = hvqm_swap16(file_header.mInfo.width);
+	file_header.mInfo.height  = hvqm_swap16(file_header.mInfo.height);
+#endif
 
 	arcoffset += 0x44;
 	gop_baseframe = 0;
@@ -336,7 +376,11 @@ void Jac_HVQM_Init(immut char* movieFilePath, u8* data, u32 bufferSize)
 
 		InitPic();
 		int start = Jac_GetCurrentSCounter();
+#if defined(PIKI_PC_PORT)
+		for (int spins = 0; start == (int)Jac_GetCurrentSCounter() && spins < 4000; ++spins) { OSYieldThread(); }
+#else
 		while (start == Jac_GetCurrentSCounter()) { }
+#endif
 	}
 
 	return;
@@ -373,6 +417,7 @@ static void hvqm_forcestop()
  */
 void Jac_HVQM_ThreadStart(void)
 {
+	PC_JAC_JOIN();
 	TRAP_UNIMPLEMENTED;
 }
 
@@ -381,6 +426,7 @@ void Jac_HVQM_ThreadStart(void)
  */
 BOOL Jac_HVQM_Update(void)
 {
+	PC_JAC_JOIN();
 #if defined(VERSION_GPIP01)
 	STACK_PAD_VAR(3);
 #else
@@ -398,6 +444,9 @@ BOOL Jac_HVQM_Update(void)
 			if (__VirtualLoad(arcoffset, sizeof(gop_header), (u8*)gop_header) == 0) {
 				return FALSE;
 			}
+#if defined(PIKI_PC_PORT)
+			for (int gi = 0; gi < 5; gi++) gop_header[gi] = hvqm_swap32(gop_header[gi]);
+#endif
 			arcoffset += 0x14;
 			gop_subframe++;
 		}
@@ -406,6 +455,11 @@ BOOL Jac_HVQM_Update(void)
 			if (__VirtualLoad(arcoffset, sizeof(rec_header), (u8*)&rec_header) == 0) {
 				return 0;
 			}
+#if defined(PIKI_PC_PORT)
+			rec_header.mRecordType = hvqm_swap16(rec_header.mRecordType);
+			rec_header.mFrameFlags = hvqm_swap16(rec_header.mFrameFlags);
+			rec_header.mDataSize   = hvqm_swap32(rec_header.mDataSize);
+#endif
 			arcoffset += 8;
 		}
 
@@ -454,6 +508,9 @@ BOOL Jac_HVQM_Update(void)
 					record_ok = 0;
 					goto end;
 				}
+#if defined(PIKI_PC_PORT)
+				v_header = (int)hvqm_swap32((u32)v_header);
+#endif
 				vh_state += 1;
 				// fallthrough
 			}
@@ -468,6 +525,20 @@ BOOL Jac_HVQM_Update(void)
 			}
 			case 2:
 			{
+#if defined(PIKI_PC_PORT)
+				if (gop_subframe == 0 && !playback_first_wait) {   // first picture of the GOP
+					const int behind = AUDIO_FRAME - (int)PIC_FRAME;
+					if (sCatchUp && behind <= 4) {
+						sCatchUp = 0;
+					} else if (!sCatchUp && behind > 12) {
+						sCatchUp = 1;
+					}
+				}
+				if (sCatchUp) {
+					vh_state = 0;   // picture not decoded
+					break;
+				}
+#endif
 				if (CheckDraw(v_header + gop_baseframe) == 0) {
 					record_ok = 0;
 					goto end;
@@ -480,7 +551,11 @@ BOOL Jac_HVQM_Update(void)
 			record_ok = 1;
 			arcoffset += rec_header.mDataSize;
 			int start_time = OSGetTime();
+#if defined(PIKI_PC_PORT)
+			u32 dec        = sCatchUp ? 0u : Decode1(data, v_header + gop_baseframe, rec_header.mFrameFlags & 0xff);
+#else
 			u32 dec        = Decode1(data, v_header + gop_baseframe, rec_header.mFrameFlags & 0xff);
+#endif
 			time_delta     = OSGetTime() - start_time;
 			if (dec <= 1) {
 				PIC_FRAME++;
@@ -524,13 +599,18 @@ end:
  */
 void Jac_HVQM_ForceStop(void)
 {
+	PC_JAC_JOIN();
 	gop_frame = file_header.mTotalFrames;
 	StreamSyncStopAudio(0);
 	BOOL inter   = OSDisableInterrupts();
 	dvdfile_size = 0;
 	if (dvd_loadfinish != 1 && dvd_active != 0) {
 		OSRestoreInterrupts(inter);
-		while (dvd_loadfinish != 1) { }
+		while (dvd_loadfinish != 1) {
+#if defined(PIKI_PC_PORT)
+			OSYieldThread();
+#endif
+		}
 
 	} else {
 		OSRestoreInterrupts(inter);
@@ -544,6 +624,7 @@ void Jac_HVQM_ForceStop(void)
  */
 void Jac_CountReadyPictures(void)
 {
+	PC_JAC_JOIN();
 	TRAP_UNIMPLEMENTED;
 }
 
@@ -552,6 +633,7 @@ void Jac_CountReadyPictures(void)
  */
 int Jac_GetPicture(void* data, int* x, int* y)
 {
+	PC_JAC_JOIN();
 	int offset = 0;
 	int index  = -1;
 	*x         = file_header.mInfo.width;
@@ -650,6 +732,17 @@ static BOOL CheckDraw(u32 id)
 /**
  * @TODO: Documentation
  */
+// Picture decode without the cooperative lock.
+#if defined(__vita__)
+#define DEC_OFF_GIL(call) do { \
+	const int held_ = nectar_gil_held(); \
+	if (held_) nectar_gil_release(); \
+	call; \
+	if (held_) nectar_gil_acquire(); \
+} while (0)
+#else
+#define DEC_OFF_GIL(call) do { call; } while (0)
+#endif
 static int Decode1(u8* data, u32 frameId, u8 frameType)
 {
 	u32 id    = (frameId - pic_ctrl[0].mFrameNumber) % PIC_BUFFERS;
@@ -664,7 +757,7 @@ static int Decode1(u8* data, u32 frameId, u8 frameType)
 #if defined(VERSION_GPIP01)
 		Probe_Start(12, "HVQM-I-PIC");
 #endif
-		HVQM4DecodeIpic(hvqm_obj, data, (u8*)ref);
+		DEC_OFF_GIL(HVQM4DecodeIpic(hvqm_obj, data, (u8*)ref));
 #if defined(VERSION_GPIP01)
 		Probe_Finish(12);
 #endif
@@ -677,7 +770,7 @@ static int Decode1(u8* data, u32 frameId, u8 frameType)
 #if defined(VERSION_GPIP01)
 		Probe_Start(11, "HVQM-P-PIC");
 #endif
-		HVQM4DecodePpic(hvqm_obj, data, (u8*)ref, (u8*)ref1);
+		DEC_OFF_GIL(HVQM4DecodePpic(hvqm_obj, data, (u8*)ref, (u8*)ref1));
 #if defined(VERSION_GPIP01)
 		Probe_Finish(11);
 #endif
@@ -690,7 +783,7 @@ static int Decode1(u8* data, u32 frameId, u8 frameType)
 #if defined(VERSION_GPIP01)
 		Probe_Start(13, "HVQM-B-PIC");
 #endif
-		HVQM4DecodeBpic(hvqm_obj, data, (u8*)ref, (u8*)ref2, (u8*)ref1);
+		DEC_OFF_GIL(HVQM4DecodeBpic(hvqm_obj, data, (u8*)ref, (u8*)ref2, (u8*)ref1));
 #if defined(VERSION_GPIP01)
 		Probe_Finish(13);
 #endif

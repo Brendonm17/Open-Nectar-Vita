@@ -679,7 +679,11 @@ s32 DVDT_LoadFile(immut char* file, u8* dst)
 	STACK_PAD_VAR(2);
 	DVDT_LoadtoDRAM(0, file, (u32)dst, 0, 0, (u32*)&status, NULL);
 
-	while (status == 0) { }
+	while (status == 0) {
+#if defined(PIKI_PC_PORT)
+		OSYieldThread();
+#endif
+	}
 
 	if (status == -1) {
 		return 0;
@@ -710,6 +714,7 @@ void DVDT_CheckPass(u32 owner, u32* status, Jac_DVDCallback callback)
  */
 void Jac_CheckFile(immut char*)
 {
+	PC_JAC_JOIN();
 	TRAP_UNIMPLEMENTED;
 	static DVDFileInfo finfo;
 }
@@ -720,6 +725,7 @@ void Jac_CheckFile(immut char*)
  */
 void Jac_LoadFile(immut char*, u8*)
 {
+	PC_JAC_JOIN();
 	TRAP_UNIMPLEMENTED;
 	static DVDFileInfo finfo;
 }
@@ -748,6 +754,7 @@ void DVDT_UnPause()
  */
 void Jac_RegisterDVDErrorCallback(void (*)(immut char*, u8*))
 {
+	PC_JAC_JOIN();
 	TRAP_UNIMPLEMENTED;
 }
 
@@ -756,6 +763,7 @@ void Jac_RegisterDVDErrorCallback(void (*)(immut char*, u8*))
  */
 s32 Jac_RegisterExtFastOpen(immut char* ext)
 {
+	PC_JAC_JOIN();
 	char file[64];
 	DVDT_ExtendPath(file, ext);
 	return Jac_RegisterFastOpen(file);
@@ -770,6 +778,7 @@ static u32 dvd_entrynum[32];
  */
 s32 Jac_RegisterFastOpen(immut char* file)
 {
+	PC_JAC_JOIN();
 	volatile int num;
 	immut char** REF_file = &file;
 	STACK_PAD_VAR(3);
@@ -802,6 +811,7 @@ s32 Jac_RegisterFastOpen(immut char* file)
  */
 BOOL Jac_DVDOpen(immut char* name, DVDFileInfo* info)
 {
+	PC_JAC_JOIN();
 	int entry = Jac_RegisterFastOpen(name);
 
 	if (entry == -1) {

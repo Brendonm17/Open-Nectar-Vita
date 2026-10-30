@@ -831,7 +831,11 @@ public:
 		gfx.calcViewMatrix(Matrix4f::ident, mtx2);
 		gfx.setPerspective(camera.mPerspectiveMatrix.mMtx, camera.mFov, camera.mAspectRatio, camera.mNear, camera.mFar, 1.0f);
 		gfx.useMatrix(gfx.mCamera->mLookAtMtx, 0);
+#if defined(__vita__)
+		gfx.setLightingNoPrev(false, nullptr);
+#else
 		gfx.setLighting(false, nullptr);
+#endif
 		gfx.useTexture(nullptr, GX_TEXMAP0);
 		mGameModeMgr->draw(gfx, mFont);
 		if (mActiveMenu) {

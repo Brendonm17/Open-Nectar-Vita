@@ -33,8 +33,17 @@ DEFINE_PRINT("Texture");
 /**
  * @todo: Documentation
  */
+#if defined(__vita__)
+// Plain Texture vtable, for the drawrec eligibility report.
+const void* g_pcPlainTextureVtbl = nullptr;
+#endif
 Texture::Texture()
 {
+#if defined(__vita__)
+	if (!g_pcPlainTextureVtbl) {
+		g_pcPlainTextureVtbl = *reinterpret_cast<const void* const*>(this);
+	}
+#endif
 	// One of these following two mystery members aren't initialized on OGL.
 	// It's totally ambigious which one still exists, so I'll just pick one.
 	_30 = 0;

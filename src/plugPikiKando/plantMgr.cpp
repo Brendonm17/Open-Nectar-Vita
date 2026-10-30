@@ -9,6 +9,18 @@
 #include "SoundMgr.h"
 #include "gameflow.h"
 #include "sysNew.h"
+#if defined(__vita__)
+void pcNodeListWatch(CoreNode* root);
+#endif
+#if defined(PIKI_PC_PORT) && defined(__vita__)
+#include "Collision.h"
+#include "PaniAnimator.h"
+#include "Shape.h"
+#include <cstring>
+bool pcPlantDrawRun(Graphics& gfx, PlantMgr* mgr);
+int pcSplitCountPartUpdaters(CollInfo* info);
+static void* sPcPlantVtbl = nullptr;               // Plant vtable
+#endif
 
 /**
  * @todo: Documentation
@@ -34,6 +46,9 @@ Plant::Plant()
 	mPlantType = PLANT_NULL;
 	mCollInfo  = new CollInfo(8);
 	mSearchBuffer.init(mPlantSearchData, 3);
+#if defined(PIKI_PC_PORT) && defined(__vita__)
+	sPcPlantVtbl = *reinterpret_cast<void* const*>(this);
+#endif
 }
 
 /**
@@ -142,6 +157,95 @@ void Plant::refresh(Graphics& gfx)
 	mCollInfo->updateInfo(gfx, false);
 }
 
+#if defined(PIKI_PC_PORT) && defined(__vita__)
+// PS Vita plant A/B flip.
+
+/**
+ * A: refresh without its GX half.
+ */
+bool Plant::pcRefreshA(Graphics& gfx, Shape*& shapeOut)
+{
+	PlantShapeObject* shape = plantMgr->mPlantShapes[mPlantType];
+	if (!mPlantAnimator.mAnimInfo) {
+		return false;
+	}
+
+	if (mCollInfo->hasInfo()) {
+
+		f32 rad = 2.0f * getBoundingSphereRadius();
+		if (rad > 0.0f) {
+			BoundBox box(Vector3f(mSRT.t.x - rad, mSRT.t.y, mSRT.t.z - rad),
+			             Vector3f(mSRT.t.x + rad, mSRT.t.y + 2.0f * rad, mSRT.t.z + rad));
+
+			if (!gfx.mCamera->isBoundVisible(box, 0x8000 | 0x20 | 0x10 | 0x1 | 0x2 | 0x4 | 0x8) && !_394) {
+				C_SAI(this)->start(this, PlantAI::STATE_Wait);
+				mIsCulled = true;
+				return false;
+			}
+		}
+	}
+
+	mIsCulled = false;
+	_394      = false;
+	mWorldMtx.makeSRT(mSRT.s, mSRT.r, mSRT.t);
+	Matrix4f mtx;
+	gfx.mCamera->mLookAtMtx.multiplyTo(mWorldMtx, mtx);
+
+	mPlantAnimator.updateContext();
+	shape->mShape->updateAnim(gfx, mtx, nullptr, this);
+
+	mCollInfo->updateInfo(gfx, false);
+	shapeOut = shape->mShape;
+	return true;
+}
+
+/**
+ * Whether this plant's A would hit an ERROR.
+ */
+bool Plant::pcWouldError(Graphics& gfx)
+{
+	if (!mPlantAnimator.mAnimInfo) {
+		return false;
+	}
+	BaseShape* shape = plantMgr->mPlantShapes[mPlantType]->mShape;
+	if (gfx.mNextFreeMatrixIdx + int(shape->mAnimMtxCount) > gfx.mMaxMatrixCount) {
+		return true;
+	}
+	AnimContext* base = shape->mCurrentAnimation;
+	if (!base || !base->mData) {
+		return true; // bind-pose branch
+	}
+	const bool baseBad = base->mData->mTotalFrameCount <= 0 || !(base->mCurrentFrame >= 0.0f) || !(base->mAnimSpeed >= 0.0f);
+	const PaniPlantAnimator& anim = mPlantAnimator;
+	for (int i = 0; i < shape->mJointCount; i++) {
+		AnimContext* ctx = shape->mAnimOverrides[i];
+		AnimData* data;
+		f32 frame;
+		if (anim.mContext == ctx) {
+			data  = anim.mAnimInfo->mData;
+			frame = anim.mAnimationCounter;
+		} else if (ctx == base) {
+			if (baseBad) {
+				return true;
+			}
+			continue;
+		} else {
+			data  = ctx->mData;
+			frame = ctx->mCurrentFrame;
+		}
+		if (!data) {
+			return true;
+		}
+		const int frameNum = int(frame);
+		if (frameNum < 0 || frameNum >= data->mTotalFrameCount) {
+			return true;
+		}
+	}
+	return false;
+}
+
+#endif
+
 /**
  * @todo: Documentation
  */
@@ -213,6 +317,9 @@ void PlantAI::TouchInit::act(AICreature* plant)
  */
 PlantMgr::PlantMgr(MapMgr* mgr)
 {
+#if defined(__vita__)
+	pcNodeListWatch(&mRootNode);
+#endif
 	mMapMgr = mgr;
 	gameflow.addGenNode("plantMgr", this);
 	mMotionTable = PaniPlantAnimator::createMotionTable();
@@ -415,6 +522,132 @@ void GenObjectPlant::render(Graphics&, Generator*)
 {
 	plantMgr->usePlantType(mPlantType);
 }
+
+#if defined(PIKI_PC_PORT) && defined(__vita__)
+// PS Vita plant A/B flip: manager side.
+
+/**
+ * The plant draw.
+ */
+void PlantMgr::refresh(Graphics& gfx)
+{
+	if (pcPlantDrawRun(gfx, this)) {
+		return;
+	}
+	ObjectMgr::refresh(gfx);
+}
+
+/**
+ * The plants in ObjectMgr::refresh order.
+ */
+int PlantMgr::pcSplitSnapshot(Plant** out, int cap)
+{
+	int count = 0;
+	Iterator it(this);
+	CI_LOOP(it)
+	{
+		Creature* obj = *it;
+		if (!sPcPlantVtbl || *reinterpret_cast<void* const*>(obj) != sPcPlantVtbl) {
+			return -1;
+		}
+		if (count < cap) {
+			out[count] = static_cast<Plant*>(obj);
+		}
+		count++;
+	}
+	return count;
+}
+
+/**
+ * Why a plant type's culled path cannot run on the worker, or null.
+ */
+static immut char* pcPlantAnimProblem(PlantShapeObject* obj, PaniMotionTable* table)
+{
+	AnimMgr* mgr = obj->mAnimMgr;
+	if (!mgr) {
+		return "no animation manager";
+	}
+	for (AnimInfo* info = static_cast<AnimInfo*>(mgr->mAnimList.mChild); info; info = static_cast<AnimInfo*>(info->mNext)) {
+		if (!info->mData) {
+			return "an animation not loaded";
+		}
+	}
+	PaniMotion* motion = (table && PlantMotion::Touch < table->mMotionCount) ? table->getMotion(PlantMotion::Touch) : nullptr;
+	if (!motion) {
+		return "no touch motion";
+	}
+	AnimInfo* touch = nullptr;
+	int idx         = 0;
+	for (AnimInfo* info = static_cast<AnimInfo*>(mgr->mAnimList.mChild); info; info = static_cast<AnimInfo*>(info->mNext), idx++) {
+		if (idx == motion->mAnimID) {
+			touch = info;
+			break;
+		}
+	}
+	if (!touch) {
+		return "no touch animation";
+	}
+	const f32 start = f32(touch->getKeyValue(0));
+	if (start < 0.0f || start >= touch->mData->mTotalFrameCount) {
+		return "an illegal touch start frame";
+	}
+	return nullptr;
+}
+
+/**
+ * Load-time test of the plant types for the A/B flip.
+ */
+bool PlantMgr::pcSplitShapesOk()
+{
+	struct Key {
+		PlantMgr* mMgr;
+		PlantShapeObject* mShapes[PLANT_COUNT];
+		int mCount;
+	};
+	static Key sKey;
+	static bool sKeyValid = false;
+	static bool sOk       = false;
+	Key key;
+	memset(&key, 0, sizeof(key));
+	key.mMgr = this;
+	for (int i = PLANT_START; i < PLANT_COUNT; i++) {
+		key.mShapes[i] = mPlantShapes[i];
+	}
+	key.mCount = getSize();
+	if (sKeyValid && memcmp(&key, &sKey, sizeof(key)) == 0) {
+		return sOk;
+	}
+	sKey      = key;
+	sKeyValid = true;
+
+	bool ok = true;
+	for (int i = PLANT_START; i < PLANT_COUNT; i++) {
+		PlantShapeObject* obj = mPlantShapes[i];
+		if (!obj || !obj->mShape) {
+			continue;
+		}
+		Shape* shape        = obj->mShape;
+		const bool lights   = shape->mLightGroup.Child() != nullptr;
+		const bool bindPose = !shape->mCurrentAnimation || !shape->mCurrentAnimation->mData;
+		ok                  = ok && !lights && !bindPose && !pcPlantAnimProblem(obj, mMotionTable);
+	}
+
+	int others = 0, updaters = 0;
+	Iterator it(this);
+	CI_LOOP(it)
+	{
+		Creature* obj = *it;
+		if (!sPcPlantVtbl || *reinterpret_cast<void* const*>(obj) != sPcPlantVtbl) {
+			++others;
+			continue;
+		}
+		updaters += pcSplitCountPartUpdaters(obj->mCollInfo);
+	}
+	ok  = ok && others == 0 && updaters == 0;
+	sOk = ok;
+	return ok;
+}
+#endif
 
 #ifdef WIN32
 

@@ -25,6 +25,7 @@ static int current_process = 0xFFFFFFFF;
  */
 void Jac_OutputMode(int mode)
 {
+	PC_JAC_JOIN();
 	Jac_SetOutputMode(mode);
 }
 
@@ -33,6 +34,7 @@ void Jac_OutputMode(int mode)
  */
 void Jac_SetBGMVolume(u8 vol)
 {
+	PC_JAC_JOIN();
 	if (vol > 10) {
 		vol = 10;
 	}
@@ -48,6 +50,7 @@ void Jac_SetBGMVolume(u8 vol)
  */
 void Jac_SetSEVolume(u8 vol)
 {
+	PC_JAC_JOIN();
 	if (vol > 10) {
 		vol = 10;
 	}
@@ -63,6 +66,7 @@ void Jac_SetSEVolume(u8 vol)
  */
 void Jac_Gsync()
 {
+	PC_JAC_JOIN();
 	if (vol_chg) {
 		vol_chg = FALSE;
 		Jac_GameVolume(game_bgm_vol, game_se_vol);
@@ -81,6 +85,7 @@ void Jac_Gsync()
  */
 void Jac_DebugCall(void)
 {
+	PC_JAC_JOIN();
 	TRAP_UNIMPLEMENTED;
 }
 
@@ -98,6 +103,7 @@ void __print_thread(immut char*, OSThread*)
  */
 void Jac_SetProcessStatus(u32 processStat)
 {
+	PC_JAC_JOIN();
 	if (current_process != -1) {
 		if ((processStat & 1) == 1) {
 			if (current_process == processStat - 1 && stacklevel != 0) {
@@ -120,5 +126,6 @@ void Jac_SetProcessStatus(u32 processStat)
  */
 void Jac_CheckStreamBufferEmpty(void)
 {
+	PC_JAC_JOIN();
 	TRAP_UNIMPLEMENTED;
 }

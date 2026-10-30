@@ -98,7 +98,11 @@ void GenObjectMapParts::render(Graphics& gfx, Generator* gen)
 	mtx2.makeSRT(Vector3f(1.0f, 1.0f, 1.0f), Vector3f(0.0f, 0.0f, 0.0f), globalPos);
 	gfx.calcViewMatrix(mtx2, mtx);
 	gfx.useMatrix(mtx, 0);
+#if defined(__vita__)
+	gfx.setLightingNoPrev(true, nullptr);
+#else
 	gfx.setLighting(true, nullptr);
+#endif
 	shape->drawshape(gfx, *gfx.mCamera, nullptr);
 
 	globalPos = mEndPosition + gen->getPos();

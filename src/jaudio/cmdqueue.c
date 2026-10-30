@@ -129,4 +129,7 @@ static s32 Jal_FrameWork(void* callbackArg)
 void Jal_CmdQueue_Init(void)
 {
 	Jac_RegisterPlayerCallback(Jal_FrameWork, NULL);
+#if defined(PIKI_PC_PORT)
+	PlayerCallbackMarkSeqSafe(Jal_FrameWork);
+#endif
 }

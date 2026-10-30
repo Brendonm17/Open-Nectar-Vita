@@ -15,6 +15,14 @@
 #include <cstring>
 #include <cmath>
 
+// PS Vita: NEON PSMTXConcat.
+#if defined(__vita__) && defined(__ARM_NEON)
+#include <arm_neon.h>
+#define PC_MTX_NEON 1
+#else
+#define PC_MTX_NEON 0
+#endif
+
 extern "C" {
 
 /* ── EXI (from Dolphin/exi.h) ── */
@@ -59,7 +67,8 @@ void PSMTXIdentity(Mtx mtx) {
     mtx[0][0] = 1.0f; mtx[1][1] = 1.0f; mtx[2][2] = 1.0f;
 }
 void PSMTXCopy(const Mtx src, Mtx dst) { memcpy(dst, src, sizeof(Mtx)); }
-void PSMTXConcat(const Mtx a, const Mtx b, Mtx ab) {
+// Scalar concatenation.
+void pc_mtx_concat_scalar(const Mtx a, const Mtx b, Mtx ab) {
     Mtx tmp;
     for (int i = 0; i < 3; i++) {
         for (int j = 0; j < 4; j++) {
@@ -68,6 +77,41 @@ void PSMTXConcat(const Mtx a, const Mtx b, Mtx ab) {
         tmp[i][3] += a[i][3];
     }
     memcpy(ab, tmp, sizeof(Mtx));
+}
+#if PC_MTX_NEON
+// NEON concatenation, bit-exact with the scalar path. Output may alias either input.
+static inline void pc_mtx_concat_neon(const Mtx a, const Mtx b, Mtx ab) {
+    const float32x4_t b0 = vld1q_f32(b[0]);
+    const float32x4_t b1 = vld1q_f32(b[1]);
+    const float32x4_t b2 = vld1q_f32(b[2]);
+    const float32x4_t a0 = vld1q_f32(a[0]);
+    const float32x4_t a1 = vld1q_f32(a[1]);
+    const float32x4_t a2 = vld1q_f32(a[2]);
+    const float32x4_t negZero = vdupq_n_f32(-0.0f);
+    const uint32x4_t lane3 = vsetq_lane_u32(0xFFFFFFFFu, vdupq_n_u32(0u), 3);
+    float32x4_t r0 = vmulq_lane_f32(b0, vget_low_f32(a0), 0);
+    float32x4_t r1 = vmulq_lane_f32(b0, vget_low_f32(a1), 0);
+    float32x4_t r2 = vmulq_lane_f32(b0, vget_low_f32(a2), 0);
+    r0 = vmlaq_lane_f32(r0, b1, vget_low_f32(a0), 1);
+    r1 = vmlaq_lane_f32(r1, b1, vget_low_f32(a1), 1);
+    r2 = vmlaq_lane_f32(r2, b1, vget_low_f32(a2), 1);
+    r0 = vmlaq_lane_f32(r0, b2, vget_high_f32(a0), 0);
+    r1 = vmlaq_lane_f32(r1, b2, vget_high_f32(a1), 0);
+    r2 = vmlaq_lane_f32(r2, b2, vget_high_f32(a2), 0);
+    r0 = vaddq_f32(r0, vbslq_f32(lane3, a0, negZero));
+    r1 = vaddq_f32(r1, vbslq_f32(lane3, a1, negZero));
+    r2 = vaddq_f32(r2, vbslq_f32(lane3, a2, negZero));
+    vst1q_f32(ab[0], r0);
+    vst1q_f32(ab[1], r1);
+    vst1q_f32(ab[2], r2);
+}
+#endif
+void PSMTXConcat(const Mtx a, const Mtx b, Mtx ab) {
+#if PC_MTX_NEON
+    pc_mtx_concat_neon(a, b, ab);
+#else
+    pc_mtx_concat_scalar(a, b, ab);
+#endif
 }
 /* Returns u32 (mtx.h line 149) */
 u32 PSMTXInverse(const Mtx src, Mtx inv) {

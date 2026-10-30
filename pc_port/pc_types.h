@@ -174,7 +174,7 @@ static unsigned int __pc_rlwinm(unsigned int value, unsigned int shift, unsigned
  *  header is force-included into every translation unit, so it lands before
  *  any use.
  * ────────────────────────────────────────────── */
-#if defined(__cplusplus) && defined(_WIN32)
+#if defined(__cplusplus) && (defined(_WIN32) || defined(__vita__))
 #include <cmath>
 namespace std {
 using ::acosf;
@@ -193,6 +193,22 @@ using ::sinf;
 using ::sqrtf;
 using ::tanf;
 } // namespace std
+#endif
+
+/* Vita: JAudio sequencer thread join/fork. */
+#if defined(__vita__)
+#ifdef __cplusplus
+extern "C" {
+#endif
+void vita_audio_seq_join(void) __attribute__((weak));
+void vita_audio_seq_fork(void) __attribute__((weak));
+int vita_audio_seq_on_thread(void) __attribute__((weak));
+#ifdef __cplusplus
+}
+#endif
+#define PC_JAC_JOIN() vita_audio_seq_join()
+#else
+#define PC_JAC_JOIN() ((void)0)
 #endif
 
 #endif /* _PC_TYPES_H */

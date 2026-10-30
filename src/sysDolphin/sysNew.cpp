@@ -6,9 +6,23 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 #include <limits>
 #include <mutex>
 #include <new>
+#if defined(PIKI_PC_PORT)
+#include "AyuStack.h"
+#include "GfxObject.h"
+#include "system.h"
+#ifdef __vita__
+#include "pc_gfx.h"
+#endif
+#ifdef __vita__
+#include <psp2/kernel/threadmgr.h>
+#else
+#include <thread>
+#endif
+#endif
 
 /**
  * @todo: Documentation
@@ -45,7 +59,13 @@ struct alignas(std::max_align_t) BootBlockHeader {
 static const u32 BOOT_MAGIC = 0x50694B31; // "PiK1"
 static constexpr size_t BOOT_BUCKET_COUNT = 4096;
 
-static std::mutex sAllocMutex;
+// Allocator mutex, constructed on first use and never destroyed.
+static std::mutex& allocMutex()
+{
+	alignas(std::mutex) static unsigned char storage[sizeof(std::mutex)];
+	static std::mutex& mutex = *new (storage) std::mutex;
+	return mutex;
+}
 static BootBlockHeader* sBootBuckets[BOOT_BUCKET_COUNT] = {};
 static size_t sLiveAllocations = 0;
 static size_t sLiveBytes = 0;
@@ -64,13 +84,194 @@ static size_t allocationBucket(const void* ptr)
 	return value & (BOOT_BUCKET_COUNT - 1);
 }
 
+// GameCube heap lifetimes.
+// BootBlockHeader::mPad tag: 0 = untagged, else kHeapTagBit | heap index << 8 | heap end.
+static const u32 kHeapTagBit = 0x80000000u;
+extern "C" void pc_settings_level_released(void);
+#ifdef __vita__
+extern "C" void vita_gxq_sync(void);
+#endif
+static int sPersistDepth = 0;   // PikiPcPersistentAlloc scope depth
+static size_t sHeapFreedBlocks = 0, sHeapFreedBytes = 0;
+#ifdef __vita__
+static uintptr_t sGameStackLo = 0, sGameStackHi = 0;
+#else
+static std::thread::id sGameThreadId;
+static bool sGameThreadKnown = false;
+#endif
+
+void piki_pc_mark_game_thread(void)
+{
+#ifdef __vita__
+	SceKernelThreadInfo info;
+	std::memset(&info, 0, sizeof(info));
+	info.size = sizeof(info);
+	if (sceKernelGetThreadInfo(sceKernelGetThreadId(), &info) >= 0 && info.stack && info.stackSize > 0) {
+		sGameStackLo = reinterpret_cast<uintptr_t>(info.stack);
+		sGameStackHi = sGameStackLo + static_cast<uintptr_t>(info.stackSize);
+	}
+#else
+	sGameThreadId    = std::this_thread::get_id();
+	sGameThreadKnown = true;
+#endif
+}
+
+static inline bool piki_pc_on_game_thread()
+{
+#ifdef __vita__
+	const uintptr_t sp = reinterpret_cast<uintptr_t>(__builtin_frame_address(0));
+	return sp >= sGameStackLo && sp < sGameStackHi;
+#else
+	return sGameThreadKnown && std::this_thread::get_id() == sGameThreadId;
+#endif
+}
+
+PikiPcPersistentAlloc::PikiPcPersistentAlloc() { if (piki_pc_on_game_thread()) ++sPersistDepth; }
+PikiPcPersistentAlloc::~PikiPcPersistentAlloc() { if (piki_pc_on_game_thread() && sPersistDepth > 0) --sPersistDepth; }
+
+// Heap tag for a game-thread allocation.
+static u32 piki_pc_heap_tag()
+{
+	if (sPersistDepth > 0 || !piki_pc_on_game_thread()) return 0;
+	System* system = gsys;
+	if (!system) return 0;
+	const int idx = system->mActiveHeapIdx;
+	if (idx < 0 || idx >= SYSHEAP_COUNT) return 0;
+	const int end = system->mHeaps[idx].mAllocType == AYU_STACK_GROW_UP ? AYU_STACK_GROW_UP : AYU_STACK_GROW_DOWN;
+	return kHeapTagBit | (u32(idx) << 8) | u32(end);
+}
+
+// Releases every game-thread allocation on the given heap ends.
+void piki_pc_release_game_heaps(unsigned heapEndMask)
+{
+	System* system = gsys;
+	if (!system || !heapEndMask) return;
+#ifdef __vita__
+	vita_gxq_sync();
+#endif
+	auto tagged = [heapEndMask](u32 tag) -> bool {
+		if (!(tag & kHeapTagBit)) return false;
+		const int heap = int((tag >> 8) & 0xFF);
+		const int end  = (tag & AYU_STACK_GROW_UP) ? 1 : 0;
+		return heap < 16 && (heapEndMask & (1u << (heap * 2 + end))) != 0;
+	};
+	unsigned heapMask = 0;   // heaps with any end released
+	for (int h = 0; h < SYSHEAP_COUNT; ++h) {
+		if (heapEndMask & (3u << (h * 2))) heapMask |= 1u << h;
+	}
+	for (GfxobjInfo* c = system->mGfxobjInfo.mNext; c && c != &system->mGfxobjInfo;) {
+		GfxobjInfo* next = c->mNext;
+		const BootBlockHeader* h = reinterpret_cast<const BootBlockHeader*>(c) - 1;
+		const bool ownerGone = c->mOwnerHeap >= 0 && c->mOwnerHeap < SYSHEAP_COUNT && (heapMask & (1u << c->mOwnerHeap));
+		if (ownerGone || (h->mMagic == BOOT_MAGIC && tagged(h->mPad))) c->remove();
+		c = next;
+	}
+	BootBlockHeader* doomed = nullptr;
+	{
+		std::lock_guard<std::mutex> lock(allocMutex());
+		for (size_t b = 0; b < BOOT_BUCKET_COUNT; ++b) {
+			for (BootBlockHeader** link = &sBootBuckets[b]; *link;) {
+				BootBlockHeader* h = *link;
+				if (h->mMagic == BOOT_MAGIC && tagged(h->mPad)) {
+					*link = h->mNext;
+					h->mMagic = 0;
+					sLiveAllocations--;
+					sLiveBytes -= h->mSize;
+					sTotalFrees++;
+					sHeapFreedBlocks++;
+					sHeapFreedBytes += h->mSize;
+					h->mNext = doomed;
+					doomed = h;
+				} else {
+					link = &h->mNext;
+				}
+			}
+		}
+	}
+#ifdef __vita__
+	size_t nBlocks = 0;
+	for (BootBlockHeader* h = doomed; h; h = h->mNext) ++nBlocks;
+	const size_t cap = nBlocks + SYSHEAP_COUNT;
+	uintptr_t* ranges = static_cast<uintptr_t*>(std::malloc(cap * 2 * sizeof(uintptr_t)));
+	size_t nRanges = 0;
+	if (ranges) {
+		auto add = [&](uintptr_t a, uintptr_t b) {
+			if (a < b) { ranges[2 * nRanges] = a; ranges[2 * nRanges + 1] = b; ++nRanges; }
+		};
+		for (BootBlockHeader* h = doomed; h; h = h->mNext) {
+			const uintptr_t a = reinterpret_cast<uintptr_t>(h + 1);
+			add(a, a + h->mSize);
+		}
+		for (int i = 0; i < SYSHEAP_COUNT; ++i) {
+			const AyuHeap& hp = system->mHeaps[i];
+			const bool up   = (heapEndMask & PIKI_HEAP_REL(i, AYU_STACK_GROW_UP)) != 0;
+			const bool down = (heapEndMask & PIKI_HEAP_REL(i, AYU_STACK_GROW_DOWN)) != 0;
+			if (up && down)  add(hp.mInitialStackTop, hp.mInitialStackLimit);
+			else if (up)     add(hp.mInitialStackTop, hp.mStackLimit);
+			else if (down)   add(hp.mStackTop, hp.mInitialStackLimit);
+		}
+		// Sort and merge ranges.
+		struct Pair { uintptr_t a, b; };
+		Pair* pr = reinterpret_cast<Pair*>(ranges);
+		std::sort(pr, pr + nRanges, [](const Pair& x, const Pair& y) { return x.a < y.a; });
+		size_t w = 0;
+		for (size_t i = 0; i < nRanges; ++i) {
+			if (w && pr[i].a <= pr[w - 1].b) { if (pr[i].b > pr[w - 1].b) pr[w - 1].b = pr[i].b; }
+			else pr[w++] = pr[i];
+		}
+		nRanges = w;
+	}
+#endif
+	while (doomed) {
+		BootBlockHeader* next = doomed->mNext;
+		std::free(doomed);
+		doomed = next;
+	}
+#ifdef __vita__
+	pc_gfx_level_flush(ranges, int(nRanges));
+#endif
+	pc_settings_level_released();
+}
+
 void piki_pc_dump_alloc_stats(void)
 {
-	std::lock_guard<std::mutex> lock(sAllocMutex);
+	std::lock_guard<std::mutex> lock(allocMutex());
 	fprintf(stderr,
 	        "[PC Alloc] live=%zu bytes=%zu peak=%zu/%zu total=%zu frees=%zu unknown-frees=%zu\n",
 	        sLiveAllocations, sLiveBytes, sPeakAllocations, sPeakBytes,
 	        sTotalAllocations, sTotalFrees, sUnknownFrees);
+}
+
+
+#ifdef __vita__
+#include <malloc.h>
+// Reports the newlib heap state.
+static void piki_pc_report_heap(const char* when)
+{
+	struct mallinfo mi = mallinfo();
+	printf("[PC Heap] %s: arena=%u KB used=%u KB free=%u KB largest-free=%u KB blocks=%u\n",
+	       when,
+	       (unsigned)(mi.arena / 1024), (unsigned)(mi.uordblks / 1024),
+	       (unsigned)(mi.fordblks / 1024), (unsigned)(mi.keepcost / 1024),
+	       (unsigned)mi.ordblks);
+}
+#else
+static void piki_pc_report_heap(const char*) { }
+#endif
+
+// Reports game heap capacity.
+void piki_pc_report_game_heaps(const char* when)
+{
+	System* system = gsys;
+	if (!system) return;
+	for (int i = 0; i < SYSHEAP_COUNT; ++i) {
+		AyuHeap* heap = &system->mHeaps[i];
+		const int freeBytes = (int)heap->getFree();
+		const int maxFree   = (int)heap->getMaxFree();
+		if (freeBytes == 0 && maxFree == 0) continue;
+		printf("[PC Arena] %s: heap '%s' free=%d KB largest=%d KB\n", when,
+		       heap->mName ? heap->mName : "?", freeBytes / 1024, maxFree / 1024);
+	}
 }
 
 void* piki_pc_alloc(size_t size)
@@ -90,6 +291,11 @@ void* piki_pc_alloc(size_t size)
 
 	void* raw = std::malloc(sizeof(BootBlockHeader) + size);
 	if (!raw) {
+		printf("[PC Alloc] MALLOC FAILED: want=%u live=%u liveBytes=%u peakBytes=%u total=%u\n",
+		       (unsigned)size, (unsigned)sLiveAllocations, (unsigned)sLiveBytes,
+		       (unsigned)sPeakBytes, (unsigned)sTotalAllocations);
+		piki_pc_report_heap("at failure");
+		piki_pc_report_game_heaps("at failure");
 		ERROR("allocation of %zu bytes failed", size);
 		throw std::bad_alloc();
 	}
@@ -98,10 +304,11 @@ void* piki_pc_alloc(size_t size)
 	header->mMagic          = BOOT_MAGIC;
 	header->mNext           = nullptr;
 	header->mSize           = size;
+	header->mPad            = piki_pc_heap_tag();
 
 	void* result = header + 1;
 	{
-		std::lock_guard<std::mutex> lock(sAllocMutex);
+		std::lock_guard<std::mutex> lock(allocMutex());
 		const size_t bucket = allocationBucket(result);
 		header->mNext = sBootBuckets[bucket];
 		sBootBuckets[bucket] = header;
@@ -119,27 +326,102 @@ void* piki_pc_alloc(size_t size)
 	return result;
 }
 
+#ifdef __vita__
+extern "C" void vita_gxq_note_free(const void* ptr, size_t bytes);
+
+// Deferred reclamation of large blocks.
+struct RetiredBlock { void* raw; uint32_t frame; };
+static constexpr size_t   kRetireMaxEntries = 512;
+static constexpr size_t   kRetireMaxBytes   = 8u * 1024u * 1024u;
+static constexpr uint32_t kRetireFrames     = 8;
+static RetiredBlock sRetire[kRetireMaxEntries];
+static size_t   sRetireCount = 0;
+static size_t   sRetireBytes = 0;
+static uint32_t sRetireFrame = 0;
+
+// Caller holds allocMutex().
+static bool retire_push_locked(BootBlockHeader* header)
+{
+	if (sRetireCount >= kRetireMaxEntries) return false;
+	if (sRetireBytes + header->mSize > kRetireMaxBytes) return false;
+	sRetire[sRetireCount].raw = header;
+	sRetire[sRetireCount].frame = sRetireFrame;
+	++sRetireCount;
+	sRetireBytes += header->mSize;
+	return true;
+}
+
+extern "C" void piki_pc_retire_tick(void)
+{
+	std::lock_guard<std::mutex> lock(allocMutex());
+	++sRetireFrame;
+	size_t keep = 0;
+	for (size_t i = 0; i < sRetireCount; ++i) {
+		if (sRetireFrame - sRetire[i].frame >= kRetireFrames) {
+			const BootBlockHeader* h = static_cast<const BootBlockHeader*>(sRetire[i].raw);
+			sRetireBytes -= h->mSize;
+			std::free(sRetire[i].raw);
+		} else {
+			sRetire[keep++] = sRetire[i];
+		}
+	}
+	sRetireCount = keep;
+}
+#endif
+
 void piki_pc_free(void* ptr)
 {
 	if (!ptr) {
 		return;
 	}
+#ifdef __vita__
+	size_t largeSize = 0;
+	{
+		const BootBlockHeader* header = static_cast<const BootBlockHeader*>(ptr) - 1;
+		if (header->mMagic == BOOT_MAGIC && header->mSize >= 65536) largeSize = header->mSize;
+	}
+	const bool tryRetire = largeSize != 0 && (sRetireBytes + largeSize) <= kRetireMaxBytes;
+	if (largeSize != 0 && !tryRetire) {
+		vita_gxq_note_free(ptr, largeSize);
+	}
+#endif
 
-	std::lock_guard<std::mutex> lock(sAllocMutex);
-	const size_t bucket = allocationBucket(ptr);
-	for (BootBlockHeader** link = &sBootBuckets[bucket]; *link; link = &(*link)->mNext) {
-		BootBlockHeader* header = *link;
-		if (header->mMagic == BOOT_MAGIC && header + 1 == ptr) {
-			*link = header->mNext;
-			header->mMagic = 0;
-			sLiveAllocations--;
-			sLiveBytes -= header->mSize;
-			sTotalFrees++;
-			std::free(header);
+	BootBlockHeader* drained = nullptr;   // freed after the lock if retiring failed
+	{
+		std::lock_guard<std::mutex> lock(allocMutex());
+		const size_t bucket = allocationBucket(ptr);
+		for (BootBlockHeader** link = &sBootBuckets[bucket]; *link; link = &(*link)->mNext) {
+			BootBlockHeader* header = *link;
+			if (header->mMagic == BOOT_MAGIC && header + 1 == ptr) {
+				*link = header->mNext;
+				header->mMagic = 0;
+				sLiveAllocations--;
+				sLiveBytes -= header->mSize;
+				sTotalFrees++;
+#ifdef __vita__
+				if (tryRetire) {
+					if (retire_push_locked(header)) return;
+					drained = header;
+					break;
+				}
+#endif
+				std::free(header);
+				return;
+			}
+		}
+		if (!drained) {
+			sUnknownFrees++;
 			return;
 		}
 	}
-	sUnknownFrees++;
+
+#ifdef __vita__
+	if (drained) {
+		vita_gxq_note_free(static_cast<char*>(static_cast<void*>(drained)) + sizeof(BootBlockHeader),
+		                   drained->mSize);
+		std::free(drained);
+	}
+#endif
 }
 
 void* operator new(size_t size)
@@ -195,6 +477,10 @@ void* System::alloc(size_t size)
 		}
 		result = heap->push(size);
 		if (!result) {
+#ifdef __vita__
+			fprintf(stderr, "[PC Alloc] heap '%s' OOM: wanted %d, free %d, maxFree %d\n",
+			        heap->mName, (int)size, (int)heap->getFree(), (int)heap->getMaxFree());
+#endif
 			ERROR("new[] %d failed in heap '%s'", size, heap->mName);
 		}
 

@@ -1,5 +1,6 @@
 #include <cstdlib>
 #include "audio/pc_wave_bank.h"
+#include "dolphin_stubs/dvd_image.h"
 
 #include <algorithm>
 #include <cmath>
@@ -45,20 +46,13 @@ bool PCWaveBank::load(const char* bxPath) {
         mError = "null BX path";
         return false;
     }
-    std::ifstream input(bxPath, std::ios::binary | std::ios::ate);
-    if (!input) {
+    std::vector<u8> file;
+    if (!pc_disc_read_whole_file(bxPath, file)) {
         mError = "could not open BX";
         return false;
     }
-    const std::streamsize fileSize = input.tellg();
-    if (fileSize < 16) {
+    if (file.size() < 16) {
         mError = "BX header is truncated";
-        return false;
-    }
-    input.seekg(0);
-    std::vector<u8> file(static_cast<size_t>(fileSize));
-    if (!input.read(reinterpret_cast<char*>(file.data()), fileSize)) {
-        mError = "could not read BX";
         return false;
     }
 
@@ -327,13 +321,12 @@ size_t PCWaveBank::waveCount() const {
 
 bool pc_decode_wave(const PCWaveInfo& wave, std::vector<s16>& pcm) {
     pcm.clear();
-    std::ifstream input(wave.archivePath, std::ios::binary | std::ios::ate);
-    if (!input) return false;
-    const std::streamsize fileSize = input.tellg();
-    if (fileSize < 0 || !range(wave.dataOffset, wave.dataLength, static_cast<size_t>(fileSize))) return false;
-    input.seekg(wave.dataOffset);
+    uint32_t fileSize = 0;
+    if (!pc_disc_file_size(wave.archivePath.c_str(), &fileSize)) return false;
+    if (!range(wave.dataOffset, wave.dataLength, static_cast<size_t>(fileSize))) return false;
     std::vector<u8> encoded(wave.dataLength);
-    if (!input.read(reinterpret_cast<char*>(encoded.data()), wave.dataLength)) return false;
+    if (pc_disc_read_range(wave.archivePath.c_str(), encoded.data(), wave.dataOffset, wave.dataLength)
+        != static_cast<int64_t>(wave.dataLength)) return false;
     pcm.resize(wave.sampleCount);
 
     if (wave.format == 0 || wave.format == 1) {

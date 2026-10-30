@@ -9,6 +9,7 @@
  */
 #include "Dolphin/os.h"
 #include "Dolphin/ar.h"
+#include "sysNew.h"
 #include "audio/pc_aram.h"
 
 #include <cstdarg>
@@ -23,6 +24,63 @@
 #include <vector>
 #include <chrono>
 #include <ctime>
+#ifdef __vita__
+#include <psp2/kernel/threadmgr.h>
+#include <psp2/kernel/cpu.h>
+#include "timing/pc_prof.h"
+#include "gl/vita_drawrec.h"   // drawrec: the join hook (kDrJoinGil)
+#include <malloc.h>
+extern "C" void vita_gxq_note_free(const void* ptr, size_t bytes);   // vita_gxq.cpp
+
+// Cooperative GIL
+static SceUID g_gil = -1;
+static SceUID g_gilOwner = -1;   // written only by the holder
+// Threads blocked in acquire.
+static volatile int g_gilWaiters = 0;
+// Pikmin A-phase worker (viewPiki.cpp).
+extern "C" void vita_pikia_join(void) __attribute__((weak));
+extern "C" int vita_pikia_on_worker(void) __attribute__((weak));
+// drawrec join and off-lock thread registry (pcDrawRec.cpp, vita_gxq.cpp).
+extern "C" void vita_drawrec_join(int site) __attribute__((weak));
+extern "C" int vita_offlock_on_worker(void) __attribute__((weak));
+extern "C" void nectar_gil_acquire(void) {
+    // The JAudio sequencer thread never holds the GIL.
+    if (vita_audio_seq_on_thread && vita_audio_seq_on_thread()) return;
+    if (vita_pikia_on_worker && vita_pikia_on_worker()) return;
+    if (vita_offlock_on_worker && vita_offlock_on_worker()) return;
+    if (g_gil >= 0) {
+        pc_prof_idle_set(1);   // lock wait is idle
+        __sync_fetch_and_add(&g_gilWaiters, 1);
+        sceKernelLockMutex(g_gil, 1, NULL);
+        __sync_fetch_and_sub(&g_gilWaiters, 1);
+        g_gilOwner = sceKernelGetThreadId();
+        pc_prof_idle_set(0);
+    }
+}
+extern "C" void nectar_gil_release(void) {
+    if (vita_audio_seq_on_thread && vita_audio_seq_on_thread()) return;
+    if (vita_pikia_on_worker && vita_pikia_on_worker()) return;
+    if (vita_offlock_on_worker && vita_offlock_on_worker()) return;
+    // Join the Pikmin A-phase run.
+    if (vita_pikia_join) vita_pikia_join();
+    // Join the open drawrec segment.
+    if (vita_drawrec_join) vita_drawrec_join(kDrJoinGil);
+    // Join the sequencer step.
+    if (vita_audio_seq_join) vita_audio_seq_join();
+    if (g_gil >= 0) { g_gilOwner = -1; pc_prof_idle_set(1); sceKernelUnlockMutex(g_gil, 1); }
+}
+// Threads blocked on the GIL.
+extern "C" int nectar_gil_waiters(void) { return g_gilWaiters; }
+// Whether this thread holds the GIL.
+extern "C" int nectar_gil_held(void) { return g_gil >= 0 && g_gilOwner == sceKernelGetThreadId(); }
+static void nectar_gil_init(void) {
+    if (g_gil < 0) {
+        g_gil = sceKernelCreateMutex("nectar_gil", 0, 0, NULL);
+        sceKernelLockMutex(g_gil, 1, NULL);   // the main thread starts holding it
+        g_gilOwner = sceKernelGetThreadId();
+    }
+}
+#endif
 
 /* ──────────────────────────────────────────────
  *  Global variables that were hardware-mapped on GC
@@ -49,13 +107,13 @@ OSThreadQueue __DVDThreadQueue = { nullptr, nullptr };
 /* ──────────────────────────────────────────────
  *  Timing - use std::chrono for real high-resolution timing
  * ────────────────────────────────────────────── */
-static auto sStartTime = std::chrono::high_resolution_clock::now();
+static auto sStartTime = std::chrono::steady_clock::now();
 
+// Ticks since OSInit at the GameCube timebase (40.5 MHz), 64-bit.
 static u64 pcGetTicksRaw() {
-    auto now = std::chrono::high_resolution_clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - sStartTime);
-    // Convert to GameCube timer ticks (OS_TIMER_CLOCK = bus/4 = 40.5 MHz)
-    return (u64)(elapsed.count() * 40.5);
+    const auto now = std::chrono::steady_clock::now();
+    const u64 us = (u64)std::chrono::duration_cast<std::chrono::microseconds>(now - sStartTime).count();
+    return us * 81ull / 2ull;
 }
 
 extern "C" {
@@ -64,8 +122,10 @@ extern "C" {
  *  OS Init
  * ────────────────────────────────────────────── */
 void OSInit(void) {
-    sStartTime = std::chrono::high_resolution_clock::now();
-    printf("[PC Port] OSInit() - System initialized\n");
+    sStartTime = std::chrono::steady_clock::now();
+#ifdef __vita__
+    nectar_gil_init();   // the main thread runs game code under the GIL
+#endif
 }
 
 void __OSPSInit()              { }
@@ -90,16 +150,14 @@ u32 OSGetConsoleType() { return OS_CONSOLE_RETAIL4; }
 BOOL OSGetResetSwitchState(void)                   { return FALSE; }
 void OSResetSystem(int reset, u32 resetCode, BOOL forceMenu) { (void)reset; (void)resetCode; (void)forceMenu; exit(0); }
 
+// Low 32 bits, wrapping like the console's tick register.
 OSTick OSGetTick() {
-    static auto start = std::chrono::steady_clock::now();
-    auto now = std::chrono::steady_clock::now();
-    // 1 microsecond = 40.5 ticks (GameCube timebase is 40.5MHz)
-    auto microseconds = std::chrono::duration_cast<std::chrono::microseconds>(now - start).count();
-    return (OSTick)(microseconds * 40.5);
+    return (OSTick)(pcGetTicksRaw() & 0xFFFFFFFFull);
 }
 
+// Full 64-bit count.
 OSTime OSGetTime() {
-    return (OSTime)OSGetTick();
+    return (OSTime)pcGetTicksRaw();
 }
 
 OSTime __OSGetSystemTime() {
@@ -133,6 +191,10 @@ void OSPanic(const char* file, int line, const char* message, ...) {
     vfprintf(stderr, message, args);
     fprintf(stderr, "\n");
     va_end(args);
+#ifdef __vita__
+    // Flush the log before aborting.
+    { extern void vita_log_flush(void); vita_log_flush(); }
+#endif
     abort();
 }
 
@@ -164,11 +226,33 @@ struct ThreadData {
     std::thread* thrd = nullptr;
     OSThreadStartFunction func = nullptr;
     void* param = nullptr;
+#ifdef __vita__
+    int   vuid = -1;        // SceUID of the native thread
+    bool  started = false;
+#endif
 };
+
+#ifdef __vita__
+// Native sceKernel threads.
+struct VitaThreadArg { OSThreadStartFunction func; void* param; };
+static int vita_thread_entry(SceSize args, void* argp) {
+    (void)args;
+    VitaThreadArg a = *(VitaThreadArg*)argp;   // sceKernelStartThread copied it in
+    nectar_gil_acquire();                      // run game code only under the GIL
+    if (a.func) a.func(a.param);
+    nectar_gil_release();
+    // Exit, not delete.
+    return sceKernelExitThread(0);
+}
+#endif
 
 static std::unordered_map<OSThread*, ThreadData> sThreads;
 static std::unordered_map<OSMutex*, std::mutex*> sMutexes;
 static std::unordered_map<OSCond*, std::condition_variable*> sConds;
+#ifdef __vita__
+// OSCond: polled generation counter.
+static std::unordered_map<OSCond*, uint32_t> sCondGen;
+#endif
 
 struct MsgQueueData {
     std::mutex mtx;
@@ -177,6 +261,16 @@ struct MsgQueueData {
 };
 static std::unordered_map<OSMessageQueue*, MsgQueueData*> sMsgQueues;
 static std::mutex sGlobalMtx; // For safe map access
+
+// Polled wait under the mutex.
+#ifdef __vita__
+#include <psp2/kernel/threadmgr.h>
+#define OS_MQ_WAIT(ul, cv, pred) do { while (!(pred)) { (ul).unlock(); nectar_gil_release(); sceKernelDelayThread(100); nectar_gil_acquire(); (ul).lock(); } } while (0)
+#define OS_MQ_NOTIFY(cv) ((void)0)
+#else
+#define OS_MQ_WAIT(ul, cv, pred) (cv).wait((ul), [&] { return (pred); })
+#define OS_MQ_NOTIFY(cv) (cv).notify_one()
+#endif
 
 void OSInitThreadQueue(OSThreadQueue* queue) {
     queue->head = nullptr;
@@ -187,17 +281,76 @@ OSThread* OSGetCurrentThread() { return __OSCurrentThread; }
 BOOL OSIsThreadTerminated(OSThread* thread)  { (void)thread; return FALSE; }
 s32  OSDisableScheduler()                    { return 0; }
 s32  OSEnableScheduler()                     { return 0; }
+#ifdef __vita__
+void OSYieldThread()
+{
+    nectar_gil_release();
+    if (g_gilWaiters > 0) {
+        // Up to 2 ms for the waiter to take the lock.
+        for (int i = 0; i < 40 && g_gilWaiters > 0; ++i) sceKernelDelayThread(50);
+    } else {
+        sceKernelDelayThread(0);
+    }
+    nectar_gil_acquire();
+}
+#else
 void OSYieldThread()                         { std::this_thread::yield(); }
+#endif
 
 BOOL OSCreateThread(OSThread* thread, OSThreadStartFunction func, void* param,
                     void* stack, u32 stackSize, OSPriority priority, u16 attr) {
-    (void)stack; (void)stackSize; (void)priority; (void)attr;
+    PikiPcPersistentAlloc pcKeep;   // port state outlives the level heaps (sysNew.cpp)
+    (void)stack; (void)priority; (void)attr;
     memset(thread, 0, sizeof(OSThread));
     thread->state = OS_THREAD_STATE_READY;
-    
+
+#ifdef __vita__
+    (void)stackSize;
+    // Created suspended, stack clamped; OSResumeThread starts it.
+    SceSize st = stackSize ? (SceSize)stackSize : 0x10000;
+    if (st < 0x8000) st = 0x8000;
+    if (st > 0x100000) st = 0x100000;
+    std::lock_guard<std::mutex> lock(sGlobalMtx);
+    // Reclaim finished worker threads.
+    {
+        int es;
+        auto ex = sThreads.find(thread);
+        if (ex != sThreads.end() && ex->second.vuid >= 0 && ex->second.started
+            && sceKernelGetThreadExitStatus(ex->second.vuid, &es) >= 0) {
+            sceKernelDeleteThread(ex->second.vuid);
+            ex->second.vuid = -1;
+        }
+        for (auto it = sThreads.begin(); it != sThreads.end();) {
+            if (it->first != thread && it->second.vuid >= 0 && it->second.started
+                && sceKernelGetThreadExitStatus(it->second.vuid, &es) >= 0) {
+                sceKernelDeleteThread(it->second.vuid);
+                it = sThreads.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    // Game worker threads: cores 0 and 2, priority band from 0xB4.
+    constexpr int workerPrioBase = 0xB4;
+    const SceUInt32 workerMask = SCE_KERNEL_CPU_MASK_USER_0 | SCE_KERNEL_CPU_MASK_USER_2;
+    // Two Vita priority steps per GC step from GC 13.
+    int vitaPrio = workerPrioBase + (int(priority) - 13) * 2;
+    if (vitaPrio < workerPrioBase) vitaPrio = workerPrioBase;
+    if (vitaPrio > 0xBF) vitaPrio = 0xBF;
+    // Movie playback thread (GC priority 20): core 1.
+    SceUInt32 threadMask = workerMask;
+    if (int(priority) == 20) threadMask = SCE_KERNEL_CPU_MASK_USER_1;
+    SceUID uid = sceKernelCreateThread("nectar_os", vita_thread_entry,
+                                       vitaPrio, st, 0, threadMask, NULL);
+    ThreadData d; d.func = func; d.param = param; d.vuid = uid; d.started = false;
+    sThreads[thread] = d;
+    if (uid < 0) printf("[VITA] sceKernelCreateThread failed: 0x%08X\n", (unsigned)uid);
+    return uid >= 0;
+#else
     std::lock_guard<std::mutex> lock(sGlobalMtx);
     sThreads[thread] = {nullptr, func, param};
     return TRUE;
+#endif
 }
 
 void OSExitThread(void* val)                 { (void)val; }
@@ -207,12 +360,21 @@ void OSDetachThread(OSThread* thread)        { (void)thread; }
 s32  OSResumeThread(OSThread* thread) {
     std::lock_guard<std::mutex> lock(sGlobalMtx);
     auto it = sThreads.find(thread);
-    if (it != sThreads.end() && !it->second.thrd) {
+    if (it == sThreads.end()) return 0;
+#ifdef __vita__
+    if (it->second.vuid >= 0 && !it->second.started) {
+        VitaThreadArg a { it->second.func, it->second.param };
+        sceKernelStartThread(it->second.vuid, sizeof(a), &a);  // copies a into the thread
+        it->second.started = true;
+    }
+#else
+    if (!it->second.thrd) {
         it->second.thrd = new std::thread([](OSThreadStartFunction f, void* p) {
             if (f) f(p);
         }, it->second.func, it->second.param);
     }
-    return 0; 
+#endif
+    return 0;
 }
 
 s32  OSSuspendThread(OSThread* thread)       { (void)thread; return 0; }
@@ -221,8 +383,19 @@ void OSWakeupThread(OSThreadQueue* queue)    { (void)queue; }
 void OSClearStack(u8 val)                    { (void)val; }
 OSPriority OSGetThreadPriority(OSThread* thread) { (void)thread; return 16; }
 BOOL OSIsThreadSuspended(OSThread* thread)   { (void)thread; return FALSE; }
-BOOL OSJoinThread(OSThread* thread, void** val) { 
+BOOL OSJoinThread(OSThread* thread, void** val) {
     (void)val;
+#ifdef __vita__
+    int uid = -1;
+    {
+        std::lock_guard<std::mutex> lock(sGlobalMtx);
+        auto it = sThreads.find(thread);
+        if (it != sThreads.end()) uid = it->second.vuid;
+    }
+    // Release the GIL while waiting, or the joined worker can never acquire it.
+    if (uid >= 0) { nectar_gil_release(); sceKernelWaitThreadEnd(uid, NULL, NULL); nectar_gil_acquire(); }
+    return TRUE;
+#else
     std::thread* t = nullptr;
     {
         std::lock_guard<std::mutex> lock(sGlobalMtx);
@@ -230,7 +403,8 @@ BOOL OSJoinThread(OSThread* thread, void** val) {
         if (it != sThreads.end()) t = it->second.thrd;
     }
     if (t && t->joinable()) t->join();
-    return TRUE; 
+    return TRUE;
+#endif
 }
 BOOL OSSetThreadPriority(OSThread* thread, OSPriority prio) { (void)thread; (void)prio; return TRUE; }
 OSThread* OSSetIdleFunction(OSIdleFunction idleFunc, void* param, void* stack, u32 stackSize) {
@@ -247,14 +421,43 @@ OSSwitchThreadCallback OSSetSwitchThreadCallback(OSSwitchThreadCallback callback
  *  Mutex & Cond
  * ────────────────────────────────────────────── */
 void OSInitMutex(OSMutex* mutex) { 
+    PikiPcPersistentAlloc pcKeep;   // port state outlives the level heaps (sysNew.cpp)
     std::lock_guard<std::mutex> lock(sGlobalMtx);
     sMutexes[mutex] = new std::mutex();
 }
 void OSInitCond(OSCond* cond) {
+    PikiPcPersistentAlloc pcKeep;   // port state outlives the level heaps (sysNew.cpp)
     std::lock_guard<std::mutex> lock(sGlobalMtx);
+#ifdef __vita__
+    sCondGen[cond] = 0;
+#else
     sConds[cond] = new std::condition_variable();
+#endif
 }
 void OSWaitCond(OSCond* cond, OSMutex* mutex) {
+    PikiPcPersistentAlloc pcKeep;   // port state outlives the level heaps (sysNew.cpp)
+#ifdef __vita__
+    std::mutex* m;
+    uint32_t gen;
+    {
+        std::lock_guard<std::mutex> lock(sGlobalMtx);
+        m = sMutexes[mutex];
+        gen = sCondGen[cond];
+    }
+    if (!m) return;
+    // The caller holds `mutex`; release it while waiting, reacquire on return.
+    m->unlock();
+    nectar_gil_release();
+    for (;;) {
+        {
+            std::lock_guard<std::mutex> lock(sGlobalMtx);
+            if (sCondGen[cond] != gen) break;
+        }
+        sceKernelDelayThread(100);
+    }
+    nectar_gil_acquire();
+    m->lock();
+#else
     std::condition_variable* cv;
     std::mutex* m;
     {
@@ -267,12 +470,19 @@ void OSWaitCond(OSCond* cond, OSMutex* mutex) {
         cv->wait(ul);
         ul.release(); // release ownership back since caller expects to hold it
     }
+#endif
 }
 void OSSignalCond(OSCond* cond) {
+    PikiPcPersistentAlloc pcKeep;   // port state outlives the level heaps (sysNew.cpp)
     std::lock_guard<std::mutex> lock(sGlobalMtx);
+#ifdef __vita__
+    sCondGen[cond]++;
+#else
     if (sConds.count(cond)) sConds[cond]->notify_one();
+#endif
 }
 void OSLockMutex(OSMutex* mutex) {
+    PikiPcPersistentAlloc pcKeep;   // port state outlives the level heaps (sysNew.cpp)
     std::mutex* m;
     {
         std::lock_guard<std::mutex> lock(sGlobalMtx);
@@ -281,6 +491,7 @@ void OSLockMutex(OSMutex* mutex) {
     if (m) m->lock();
 }
 void OSUnlockMutex(OSMutex* mutex) {
+    PikiPcPersistentAlloc pcKeep;   // port state outlives the level heaps (sysNew.cpp)
     std::mutex* m;
     {
         std::lock_guard<std::mutex> lock(sGlobalMtx);
@@ -289,6 +500,7 @@ void OSUnlockMutex(OSMutex* mutex) {
     if (m) m->unlock();
 }
 BOOL OSTryLockMutex(OSMutex* mutex) {
+    PikiPcPersistentAlloc pcKeep;   // port state outlives the level heaps (sysNew.cpp)
     std::mutex* m;
     {
         std::lock_guard<std::mutex> lock(sGlobalMtx);
@@ -302,6 +514,7 @@ BOOL OSTryLockMutex(OSMutex* mutex) {
  *  Message Queues (Real implementation)
  * ────────────────────────────────────────────── */
 void OSInitMessageQueue(OSMessageQueue* queue, OSMessage* buffer, s32 count) {
+    PikiPcPersistentAlloc pcKeep;   // port state outlives the level heaps (sysNew.cpp)
     queue->msgArray = buffer;
     queue->msgCount = count;
     queue->firstIndex = 0;
@@ -311,6 +524,7 @@ void OSInitMessageQueue(OSMessageQueue* queue, OSMessage* buffer, s32 count) {
 }
 
 BOOL OSSendMessage(OSMessageQueue* queue, OSMessage msg, s32 flags) {
+    PikiPcPersistentAlloc pcKeep;   // port state outlives the level heaps (sysNew.cpp)
     MsgQueueData* qd;
     {
         std::lock_guard<std::mutex> lock(sGlobalMtx);
@@ -321,16 +535,17 @@ BOOL OSSendMessage(OSMessageQueue* queue, OSMessage msg, s32 flags) {
     std::unique_lock<std::mutex> ul(qd->mtx);
     if (queue->usedCount >= queue->msgCount) {
         if (flags == OS_MESSAGE_NOBLOCK) return FALSE;
-        qd->cv_send.wait(ul, [&] { return queue->usedCount < queue->msgCount; });
+        OS_MQ_WAIT(ul, qd->cv_send, queue->usedCount < queue->msgCount);
     }
     s32 idx = (queue->firstIndex + queue->usedCount) % queue->msgCount;
     queue->msgArray[idx] = msg;
     queue->usedCount++;
-    qd->cv_recv.notify_one();
+    OS_MQ_NOTIFY(qd->cv_recv);
     return TRUE;
 }
 
 BOOL OSReceiveMessage(OSMessageQueue* queue, OSMessage* msg, s32 flags) {
+    PikiPcPersistentAlloc pcKeep;   // port state outlives the level heaps (sysNew.cpp)
     MsgQueueData* qd;
     {
         std::lock_guard<std::mutex> lock(sGlobalMtx);
@@ -341,16 +556,17 @@ BOOL OSReceiveMessage(OSMessageQueue* queue, OSMessage* msg, s32 flags) {
     std::unique_lock<std::mutex> ul(qd->mtx);
     if (queue->usedCount == 0) {
         if (flags == OS_MESSAGE_NOBLOCK) return FALSE;
-        qd->cv_recv.wait(ul, [&] { return queue->usedCount > 0; });
+        OS_MQ_WAIT(ul, qd->cv_recv, queue->usedCount > 0);
     }
     if (msg) *msg = queue->msgArray[queue->firstIndex];
     queue->firstIndex = (queue->firstIndex + 1) % queue->msgCount;
     queue->usedCount--;
-    qd->cv_send.notify_one();
+    OS_MQ_NOTIFY(qd->cv_send);
     return TRUE;
 }
 
 BOOL OSJamMessage(OSMessageQueue* queue, OSMessage msg, s32 flags) {
+    PikiPcPersistentAlloc pcKeep;   // port state outlives the level heaps (sysNew.cpp)
     MsgQueueData* qd;
     {
         std::lock_guard<std::mutex> lock(sGlobalMtx);
@@ -361,19 +577,24 @@ BOOL OSJamMessage(OSMessageQueue* queue, OSMessage msg, s32 flags) {
     std::unique_lock<std::mutex> ul(qd->mtx);
     if (queue->usedCount >= queue->msgCount) {
         if (flags == OS_MESSAGE_NOBLOCK) return FALSE;
-        qd->cv_send.wait(ul, [&] { return queue->usedCount < queue->msgCount; });
+        OS_MQ_WAIT(ul, qd->cv_send, queue->usedCount < queue->msgCount);
     }
     queue->firstIndex = (queue->firstIndex - 1 + queue->msgCount) % queue->msgCount;
     queue->msgArray[queue->firstIndex] = msg;
     queue->usedCount++;
-    qd->cv_recv.notify_one();
+    OS_MQ_NOTIFY(qd->cv_recv);
     return TRUE;
 }
 
 /* ──────────────────────────────────────────────
  *  Memory / Arena / Heap
  * ────────────────────────────────────────────── */
+#ifdef __vita__
+// Host arena.
+static u8 sArenaMemory[40 * 1024 * 1024];
+#else
 static u8 sArenaMemory[256 * 1024 * 1024]; // 256 MB simulated arena
+#endif
 static void* sArenaLo = sArenaMemory;
 static void* sArenaHi = sArenaMemory + sizeof(sArenaMemory);
 
@@ -388,7 +609,13 @@ void* OSInitAlloc(void* lo, void* hi, int maxHeaps) {
 volatile OSHeapHandle __OSCurrHeap = 0;
 
 void* OSAllocFromHeap(OSHeapHandle heap, u32 size) { (void)heap; return malloc(size); }
-void  OSFreeToHeap(OSHeapHandle heap, void* ptr)   { (void)heap; free(ptr); }
+void  OSFreeToHeap(OSHeapHandle heap, void* ptr)   {
+    (void)heap;
+#ifdef __vita__
+    if (ptr) vita_gxq_note_free(ptr, malloc_usable_size(ptr));   // translator may still read it
+#endif
+    free(ptr);
+}
 OSHeapHandle OSCreateHeap(void* start, void* end)  { (void)start; (void)end; return 0; }
 OSHeapHandle OSSetCurrentHeap(OSHeapHandle heap)   { OSHeapHandle old = __OSCurrHeap; __OSCurrHeap = heap; return old; }
 
@@ -501,6 +728,7 @@ void* PCResolveARQToken(u32 token) {
  */
 void ARQPostRequest(ARQRequest* task, u32 owner, u32 type, u32 priority,
                     u32 source, u32 dest, u32 length, ARQCallback callback) {
+    PikiPcPersistentAlloc pcKeep;   // port state outlives the level heaps (sysNew.cpp)
     (void)owner; (void)type; (void)priority;
     (void)source; (void)dest; (void)length;
     u32 token = sNextArqToken++;

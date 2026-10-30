@@ -103,6 +103,7 @@ static void DRAM_TO_DRAM_DMA(u32 src, u32 dst, u32 totalSize)
  */
 void Jac_GetUnlockHeap(jaheap_*)
 {
+	PC_JAC_JOIN();
 	TRAP_UNIMPLEMENTED;
 }
 
@@ -112,6 +113,7 @@ void Jac_GetUnlockHeap(jaheap_*)
  */
 void Jac_CheckAlloc(jaheap_*)
 {
+	PC_JAC_JOIN();
 	TRAP_UNIMPLEMENTED;
 }
 
@@ -120,6 +122,7 @@ void Jac_CheckAlloc(jaheap_*)
  */
 void Jac_InitHeap(jaheap_* heap)
 {
+	PC_JAC_JOIN();
 	heap->startAddress     = 0;
 	heap->usedSize         = 0;
 	heap->size             = 0;
@@ -139,6 +142,7 @@ void Jac_InitHeap(jaheap_* heap)
  */
 void Jac_SelfInitHeap(jaheap_* heap, u32 startAddr, u32 size, u32 memType)
 {
+	PC_JAC_JOIN();
 	heap->startAddress     = startAddr;
 	heap->size             = size;
 	heap->usedSize         = 0;
@@ -158,6 +162,7 @@ void Jac_SelfInitHeap(jaheap_* heap, u32 startAddr, u32 size, u32 memType)
  */
 BOOL Jac_SelfAllocHeap(jaheap_* parent, jaheap_* heap, u32 size, u32 startAddr)
 {
+	PC_JAC_JOIN();
 	if (parent->startAddress && parent->startAddress != -1) {
 		return FALSE;
 	}
@@ -208,6 +213,7 @@ BOOL Jac_SelfAllocHeap(jaheap_* parent, jaheap_* heap, u32 size, u32 startAddr)
  */
 BOOL Jac_SetGroupHeap(jaheap_* heapA, jaheap_* heapB)
 {
+	PC_JAC_JOIN();
 	if (heapA->groupOwner || heapA->nextGroupedHeap) {
 		return FALSE;
 	}
@@ -224,6 +230,7 @@ BOOL Jac_SetGroupHeap(jaheap_* heapA, jaheap_* heapB)
  */
 void Jac_CutdownHeap(jaheap_*)
 {
+	PC_JAC_JOIN();
 	TRAP_UNIMPLEMENTED;
 }
 
@@ -232,6 +239,7 @@ void Jac_CutdownHeap(jaheap_*)
  */
 void Jac_InitMotherHeap(jaheap_* heap, u32 startAddr, u32 size, u8 memType)
 {
+	PC_JAC_JOIN();
 	heap->startAddress     = startAddr + 0x1f & 0xffffffe0;
 	heap->usedSize         = 0;
 	heap->size             = size - (startAddr & 0x1f);
@@ -252,6 +260,7 @@ void Jac_InitMotherHeap(jaheap_* heap, u32 startAddr, u32 size, u8 memType)
  */
 BOOL Jac_AllocHeap(jaheap_* heap, jaheap_* parent, u32 size)
 {
+	PC_JAC_JOIN();
 	u32 y;
 	jaheap_* temp;
 	jaheap_* temp2;
@@ -361,6 +370,7 @@ BOOL Jac_AllocHeap(jaheap_* heap, jaheap_* parent, u32 size)
  */
 BOOL Jac_DeleteHeap(jaheap_* heap)
 {
+	PC_JAC_JOIN();
 	STACK_PAD_VAR(4);
 	jaheap_** pt = &heap;
 
@@ -469,6 +479,7 @@ static void Jac_Move_Children(jaheap_* heap, s32 flag)
  */
 void Jac_GarbageCollection_St(jaheap_* heap)
 {
+	PC_JAC_JOIN();
 	jaheap_* heap_00;
 	u32 src;
 	u32 dst;
@@ -511,6 +522,7 @@ void Jac_GarbageCollection_St(jaheap_* heap)
  */
 void Jac_CheckFreeHeap_Total(jaheap_*)
 {
+	PC_JAC_JOIN();
 	TRAP_UNIMPLEMENTED;
 }
 
@@ -520,6 +532,7 @@ void Jac_CheckFreeHeap_Total(jaheap_*)
  */
 void Jac_CheckFreeHeap_Linear(jaheap_*)
 {
+	PC_JAC_JOIN();
 	TRAP_UNIMPLEMENTED;
 }
 
@@ -528,6 +541,7 @@ void Jac_CheckFreeHeap_Linear(jaheap_*)
  */
 void Jac_ShowHeap(jaheap_* heap, u32 flag)
 {
+	PC_JAC_JOIN();
 	jaheap_** REF_heap = &heap;
 	jaheap_* c;
 	jaheap_** REF_c;

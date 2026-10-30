@@ -13,6 +13,16 @@
 cmake_minimum_required(VERSION 3.16)
 project(PikminPC VERSION 0.1.0 LANGUAGES C CXX)
 
+# Native Windows builds (case-insensitive FS): the include dir pc_port/gl makes
+# <GL/gl.h> resolve to pc_port/gl/gl.h (the port's own wrapper) and include/gl/
+# glext.h shadows the real one, so no GL type is ever declared. Cross builds
+# from Linux never see this. Pass a directory holding copies of the real
+# GL/gl.h + GL/glext.h here to search it FIRST (CMAKE_CXX_FLAGS -I lands after
+# include_directories, so a flag cannot do it).
+if(DEFINED NECTAR_INCLUDE_FIRST)
+    include_directories(BEFORE ${NECTAR_INCLUDE_FIRST})
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_C_STANDARD 11)
 
@@ -85,6 +95,22 @@ set(NATIVE_COMPILE_OPTIONS
 # with -DPIKMIN_NATIVE_JAUDIO=ON to drive audio from the original engine.
 option(PIKMIN_NATIVE_JAUDIO "Drive audio with the original src/jaudio engine" OFF)
 
+# DEBUG ONLY -- unlock every story stage so the world map can reach any level.
+# Used to drive the offline TEV-config harvest and to profile heavy areas. OFF by
+# default and compiled out entirely when off, so release builds carry no trace of
+# it. It overrides only the unlock CHECK, never the saved flags, so it cannot
+# write an unlocked save.
+option(NECTAR_DEBUG_UNLOCK "DEBUG: unlock all story stages (never enable for release)" OFF)
+if(NECTAR_DEBUG_UNLOCK)
+    add_compile_definitions(NECTAR_DEBUG_UNLOCK=1)
+    message(WARNING "NECTAR_DEBUG_UNLOCK is ON - all stages unlocked. DEBUG BUILD, do not ship.")
+endif()
+
+# Testing shortcuts (F5 stocks Pikmin, F6 skips an hour) and the menu row that
+# switches them on. Off by default so a release carries no trace of them; turn
+# on with -DPIKMIN_DEBUG_KEYS=ON while working on the Mods settings.
+option(PIKMIN_DEBUG_KEYS "Build the F5/F6 testing shortcuts" OFF)
+
 # ─── Version define for USA Rev 1 ───
 add_compile_definitions(
     PIKI_PC_PORT=1
@@ -99,6 +125,7 @@ add_compile_definitions(
     # its DSPchannel_ voice parameter blocks through pc_dsp_host. The two
     # cannot coexist -- see the guards in dolphin_stubs/audio_stubs.cpp.
     PIKI_USE_JAUDIO=$<BOOL:${PIKMIN_NATIVE_JAUDIO}>
+    PIKI_DEBUG_KEYS=$<BOOL:${PIKMIN_DEBUG_KEYS}>
     # Some SDL2 builds (including current Arch configurations) remap main to
     # SDL_main unless the application explicitly owns its entry point.
     SDL_MAIN_HANDLED=1
@@ -143,6 +170,9 @@ endif()
 set(PC_PORT_SOURCES
     pc_port/pc_main.cpp
     pc_port/pc_window.cpp
+    pc_port/pc_pad_axis.cpp
+    pc_port/pc_menu_repeat.cpp
+    pc_port/pc_photo_mode.cpp
     pc_port/gl/pc_gfx.cpp
     pc_port/gl/pc_tev_shader.cpp
     pc_port/timing/pc_frame_scheduler.cpp
@@ -151,7 +181,6 @@ set(PC_PORT_SOURCES
     pc_port/timing/pc_camera_snapshot.cpp
     pc_port/timing/pc_visual_runtime.cpp
     pc_port/timing/pc_render_packet.cpp
-    pc_port/timing/pc_tick_profiler.cpp
     pc_port/audio/pc_audio.cpp
     pc_port/audio/pc_envelope.cpp
     pc_port/audio/pc_jam.cpp
@@ -161,10 +190,12 @@ set(PC_PORT_SOURCES
     pc_port/audio/pc_aram.cpp
     pc_port/audio/pc_dsp_host.cpp
     pc_port/settings/pc_settings.cpp
+    pc_port/settings/pc_settings_p2d.cpp
     src/jaudio/pikiseq.c
     pc_port/dolphin_stubs/os_stubs.cpp
     pc_port/dolphin_stubs/gx_stubs.cpp
     pc_port/dolphin_stubs/dvd_stubs.cpp
+    pc_port/dolphin_stubs/dvd_image.cpp
     pc_port/dolphin_stubs/pad_stubs.cpp
     pc_port/dolphin_stubs/vi_stubs.cpp
     pc_port/dolphin_stubs/card_stubs.cpp
@@ -399,9 +430,11 @@ set_target_properties(pikmin_pc PROPERTIES
     OUTPUT_NAME "nectar"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
+if(NOT WIN32)
 add_custom_command(TARGET pikmin_pc POST_BUILD
     COMMAND /bin/chmod 775 "$<TARGET_FILE:pikmin_pc>"
     COMMENT "Ensuring the native Pikmin executable is runnable")
+endif()
 
 # Standalone first-run launcher. It accepts an original, uncompressed
 # GameCube ISO/GCM supplied by the user, extracts its FST into the per-user
@@ -442,6 +475,35 @@ add_executable(gamecube_image_test
 target_link_libraries(gamecube_image_test PRIVATE pikmin_disc_image)
 target_compile_options(gamecube_image_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
 
+# Disc image reader: the Vita build loads the game straight from an
+# .iso/.gcm/.rvz/.ciso in its data folder (the audio readers route through
+# it too). RVZ/WIA decompression uses whichever of zstd, liblzma and bzip2
+# the host has; the desktop game and the test pick them up the same way.
+find_library(NECTAR_ZSTD_LIB NAMES zstd libzstd)
+find_path(NECTAR_ZSTD_INC NAMES zstd.h)
+find_library(NECTAR_LZMA_LIB NAMES lzma liblzma)
+find_path(NECTAR_LZMA_INC NAMES lzma.h)
+find_library(NECTAR_BZ2_LIB NAMES bz2 libbz2)
+find_path(NECTAR_BZ2_INC NAMES bzlib.h)
+function(nectar_image_codecs target)
+    if(NECTAR_ZSTD_LIB AND NECTAR_ZSTD_INC)
+        target_compile_definitions(${target} PRIVATE NECTAR_IMAGE_ZSTD=1)
+        target_include_directories(${target} PRIVATE ${NECTAR_ZSTD_INC})
+        target_link_libraries(${target} PRIVATE ${NECTAR_ZSTD_LIB})
+    endif()
+    if(NECTAR_LZMA_LIB AND NECTAR_LZMA_INC)
+        target_compile_definitions(${target} PRIVATE NECTAR_IMAGE_LZMA=1)
+        target_include_directories(${target} PRIVATE ${NECTAR_LZMA_INC})
+        target_link_libraries(${target} PRIVATE ${NECTAR_LZMA_LIB})
+    endif()
+    if(NECTAR_BZ2_LIB AND NECTAR_BZ2_INC)
+        target_compile_definitions(${target} PRIVATE NECTAR_IMAGE_BZIP2=1)
+        target_include_directories(${target} PRIVATE ${NECTAR_BZ2_INC})
+        target_link_libraries(${target} PRIVATE ${NECTAR_BZ2_LIB})
+    endif()
+endfunction()
+nectar_image_codecs(pikmin_pc)
+
 add_executable(sha256_test
     pc_port/launcher/sha256_test.cpp)
 target_link_libraries(sha256_test PRIVATE pikmin_disc_image)
@@ -479,7 +541,8 @@ target_compile_options(pc_envelope_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
 add_test(NAME pc_envelope_test COMMAND pc_envelope_test)
 
 # Host-backed ARAM test (not linked into main game)
-add_executable(pc_aram_test pc_port/audio/pc_aram_test.cpp pc_port/audio/pc_aram.cpp)
+add_executable(pc_aram_test pc_port/audio/pc_aram_test.cpp pc_port/audio/pc_aram.cpp
+    pc_port/dolphin_stubs/dvd_image.cpp)
 target_compile_options(pc_aram_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
 add_test(NAME pc_aram_test COMMAND pc_aram_test)
 
@@ -487,7 +550,8 @@ add_test(NAME pc_aram_test COMMAND pc_aram_test)
 add_executable(pc_dsp_host_test
     pc_port/audio/pc_dsp_host_test.cpp
     pc_port/audio/pc_dsp_host.cpp
-    pc_port/audio/pc_aram.cpp)
+    pc_port/audio/pc_aram.cpp
+    pc_port/dolphin_stubs/dvd_image.cpp)
 target_compile_options(pc_dsp_host_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
 add_test(NAME pc_dsp_host_test COMMAND pc_dsp_host_test)
 
@@ -497,6 +561,7 @@ add_executable(pc_jam_test
     pc_port/audio/pc_instrument_bank.cpp
     pc_port/audio/pc_sequence_archive.cpp
     pc_port/audio/pc_wave_bank.cpp
+    pc_port/dolphin_stubs/dvd_image.cpp
     src/jaudio/pikiseq.c)
 target_compile_options(pc_jam_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
 if(EXISTS "${CMAKE_SOURCE_DIR}/assets/dataDir/SndData/Banks/pikibank.bx")
@@ -512,6 +577,7 @@ add_executable(pc_audio_mixer_test
     pc_port/audio/pc_instrument_bank.cpp
     pc_port/audio/pc_sequence_archive.cpp
     pc_port/audio/pc_wave_bank.cpp
+    pc_port/dolphin_stubs/dvd_image.cpp
     src/jaudio/pikiseq.c)
 target_link_libraries(pc_audio_mixer_test PRIVATE m ${SDL2_LIBRARIES})
 target_compile_options(pc_audio_mixer_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
@@ -566,13 +632,6 @@ add_executable(pc_render_packet_test
 target_compile_options(pc_render_packet_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
 add_test(NAME pc_render_packet_test COMMAND pc_render_packet_test)
 
-add_executable(pc_tick_profiler_test
-    pc_port/timing/pc_tick_profiler_test.cpp
-    pc_port/timing/pc_tick_profiler.cpp)
-target_include_directories(pc_tick_profiler_test PRIVATE pc_port/timing)
-target_compile_options(pc_tick_profiler_test PRIVATE ${NATIVE_COMPILE_OPTIONS})
-add_test(NAME pc_tick_profiler_test COMMAND pc_tick_profiler_test)
-
 message(STATUS "")
 message(STATUS "╔══════════════════════════════════════════╗")
 message(STATUS "║   Pikmin PC Port - Build Configuration   ║")
@@ -584,7 +643,7 @@ message(STATUS "║   Input:    Native SDL keyboard/gamepad ║")
 message(STATUS "╚══════════════════════════════════════════╝")
 message(STATUS "")
 
-if(BUILD_TESTING AND PIKMIN_NATIVE_JAUDIO)
+if(PIKMIN_NATIVE_JAUDIO)
     add_test(NAME pc_jaudio_integration_test COMMAND pikmin_pc --audio-self-test)
     set_tests_properties(pc_jaudio_integration_test PROPERTIES
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 30)

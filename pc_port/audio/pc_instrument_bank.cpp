@@ -1,4 +1,5 @@
 #include "audio/pc_instrument_bank.h"
+#include "dolphin_stubs/dvd_image.h"
 
 #include <cmath>
 #include <cstring>
@@ -38,20 +39,14 @@ bool PCInstrumentBank::load(const char* bxPath) {
         mError = "null BX path";
         return false;
     }
-    std::ifstream input(bxPath, std::ios::binary | std::ios::ate);
-    if (!input) {
+    // From the mounted disc image, or the extracted file.
+    std::vector<u8> file;
+    if (!pc_disc_read_whole_file(bxPath, file)) {
         mError = "could not open BX";
         return false;
     }
-    const std::streamsize fileSize = input.tellg();
-    if (fileSize < 16) {
+    if (file.size() < 16) {
         mError = "BX header is truncated";
-        return false;
-    }
-    input.seekg(0);
-    std::vector<u8> file(static_cast<size_t>(fileSize));
-    if (!input.read(reinterpret_cast<char*>(file.data()), fileSize)) {
-        mError = "could not read BX";
         return false;
     }
 

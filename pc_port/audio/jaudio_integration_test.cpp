@@ -55,6 +55,16 @@ int pc_jaudio_integration_test()
                     static_cast<unsigned long long>(frames), static_cast<unsigned long long>(nonzero), peak);
         if (!frames || !nonzero) ++failures;
     }
+    // Boss crossfade request on a stage with no boss layer.
+    Jac_EnterBossMode();
+    pump(2500);
+    seqp_* practiceMusic = Jaf_HandleToSeq(3);
+    if (practiceMusic->isMuted || !practiceMusic->outerParams
+        || practiceMusic->outerParams->volume <= 0.0f) ++failures;
+    Jac_ExitBossMode();
+    pump(150);
+    std::printf("[jaudio-test] practice boss request preserved normal music\n");
+
     // Exercise preloading through SceneExit, boss layers and every stage bank.
     for (u32 stage = 1; stage < 5; ++stage) {
         Jac_SceneSetup(SCENE_Course, stage);

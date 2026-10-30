@@ -270,7 +270,11 @@ void PelCreature::doRender(Graphics& gfx, Matrix4f& mtx)
 		}
 	}
 
+#if defined(__vita__)
+	gfx.setLightingNoPrev(true, nullptr);
+#else
 	gfx.setLighting(true, nullptr);
+#endif
 	gfx.useMatrix(Matrix4f::ident, 0);
 	mItemAnimator.updateContext();
 	mItemShape->mShape->updateAnim(gfx, mtx, nullptr, this);

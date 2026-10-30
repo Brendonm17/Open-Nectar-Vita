@@ -1,4 +1,7 @@
 #include "Colour.h"
+#ifdef __vita__
+#include "pc_window.h"
+#endif
 #include "DebugLog.h"
 #include "Dolphin/gx.h"
 #include "P2D/Font.h"
@@ -189,6 +192,32 @@ f32 P2DPrint::parse(const u8* textBuffer, int textLen, int maxWidth, u16* outXPo
 		}
 
 		if (!mSkipEscCtrlCodes && currChar < ASCII_PRINTABLE_MIN) {
+#ifdef __vita__
+			// ESC + button letter: PS Vita button glyph.
+			if (currChar == 0x1B && *textBuffer >= 'a' && *textBuffer <= 'z' && pc_window_button_glyph((char)*textBuffer) >= 0) {
+				const int cell = pc_window_button_glyph((char)*textBuffer);
+				textBuffer++;
+				mCurrCharWidth = f32(mCharHeight) / mFont->getHeight() * (mFont->getAscent() + mFont->getDescent());
+				if (mCursorX + mCurrCharWidth - startX > maxWidth && mCursorX > startX) {
+					textBuffer -= 2;
+					mCursorY += mCharLeading;
+					if (!doDraw && outXPosBuffer) {
+						outXPosBuffer[charNum] = (currLineWidth + 0.5f);
+					}
+					charNum++;
+					mCursorX       = startX;
+					currLineWidth  = 0.0f;
+					isDrawableChar = false;
+				} else {
+					if (doDraw) {
+						f32 x = mCursorX;
+						if (outXPosBuffer) x = ((s16*)outXPosBuffer)[charNum] + mCursorX;
+						mFont->drawButtonGlyph(x, mCursorY, cell, mCharHeight);
+					}
+					mCursorX += mCurrCharWidth;
+				}
+			} else
+#endif
 			if (currChar == 0x1B) { // escape character
 				u16 escCode = doEscapeCode(&textBuffer);
 				if (escCode == 'HM') {
@@ -236,6 +265,17 @@ f32 P2DPrint::parse(const u8* textBuffer, int textLen, int maxWidth, u16* outXPo
 				}
 			}
 
+#ifdef __vita__
+			// Button icon characters: PS Vita button glyph.
+			int vitaCell = -1;
+			if (isMultiByteChar) {
+				const int idx = mFont->charToIndex(currChar) - 0x126;
+				if (idx >= 0 && idx < 8) vitaCell = pc_window_button_glyph("abcxyzlr"[idx]);
+			}
+			if (vitaCell >= 0)
+				mCurrCharWidth = f32(mCharHeight) / mFont->getHeight() * (mFont->getAscent() + mFont->getDescent());
+			else
+#endif
 			mCurrCharWidth = mFont->getWidth(currChar, mCharWidth);
 
 			if (mCursorX + mCurrCharWidth - startX > maxWidth && mCursorX > startX) {
@@ -250,12 +290,16 @@ f32 P2DPrint::parse(const u8* textBuffer, int textLen, int maxWidth, u16* outXPo
 				isDrawableChar = false;
 			} else {
 				if (doDraw) {
+					f32 x = mCursorX;
 					if (outXPosBuffer) {
-						f32 x = ((s16*)outXPosBuffer)[charNum] + mCursorX;
-						mFont->drawChar(x, mCursorY, currChar, mCharWidth, mCharHeight);
-					} else {
-						mFont->drawChar(mCursorX, mCursorY, currChar, mCharWidth, mCharHeight);
+						x = ((s16*)outXPosBuffer)[charNum] + mCursorX;
 					}
+#ifdef __vita__
+					if (vitaCell >= 0)
+						mFont->drawButtonGlyph(x, mCursorY, vitaCell, mCharHeight);
+					else
+#endif
+					mFont->drawChar(x, mCursorY, currChar, mCharWidth, mCharHeight);
 				}
 
 				mCursorX += mCurrCharWidth;
@@ -511,7 +555,7 @@ s32 P2DPrint::getNumber(const u8** strPtr, s32 defaultValue, s32 invalidValue, i
 
 	(*strPtr)++;
 	value = 0;
-	char* endStr;
+	char* endStr = (char*)*strPtr;
 
 	if (base == 10) { // base 10, we're expecting a straight value
 		value = strtol((char*)*strPtr, &endStr, base);

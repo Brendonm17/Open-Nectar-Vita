@@ -28,6 +28,7 @@ enum {
 enum {
     PC_CONTROL_CLASSIC      = 0,  // Original GameCube behavior
     PC_CONTROL_MOUSE_CURSOR = 1,  // Mouse controls cursor, WASD moves Olimar
+    PC_CONTROL_CAMERA_STICK = 2,  // Vita: right stick orbits the camera
 };
 
 // Keyboard remapping actions (PC only).
@@ -101,6 +102,20 @@ bool pc_window_get_mouse_relative_mode(void);
 // Control mode selection
 void pc_window_set_control_mode(int mode);
 int pc_window_get_control_mode(void);
+enum PcStickRole { PC_ROLE_OFF = 0, PC_ROLE_SQUAD = 1, PC_ROLE_CAMERA = 2, PC_ROLE_CURSOR = 3 };
+void  pc_window_set_stick_roles(int rightStick, int dpad);
+int   pc_window_get_right_stick_role(void);
+int   pc_window_get_dpad_role(void);
+// Camera channel, -1..1, x right, y up
+float pc_window_get_camera_stick_x(void);
+float pc_window_get_camera_stick_y(void);
+int   pc_window_camera_stick_active(void);
+// The Vita glyph cell
+int   pc_window_button_glyph(char letter);
+// Controller rumble, 0..1
+void  pc_window_rumble(int chan, float intensity);
+void  pc_window_set_dpad_invert(int flags);      // bit 0 left/right
+void  pc_window_set_camera_speed(float speed);   // multiplies the Camera role's orbit rate
 void pc_window_set_mouse_sensitivity(float sensitivity);
 float pc_window_get_mouse_sensitivity(void);
 void pc_window_set_settings_menu_open(bool open);
@@ -126,5 +141,7 @@ extern "C" void pc_window_clear_mouse_cursor_delta(void);
  * before the tick that acts on it throws the first read away.
  */
 int pc_window_take_wheel_steps(void);
+
+s8 pc_pad_axis_from_sdl(int sdlAxisValue);
 
 #endif // PC_WINDOW_H

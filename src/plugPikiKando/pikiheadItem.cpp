@@ -11,6 +11,9 @@
 #include "PikiMgr.h"
 #include "PikiState.h"
 #include "SoundMgr.h"
+#if defined(__vita__)
+#include "gl/vita_drawrec.h"
+#endif
 
 /**
  * @todo: Documentation
@@ -201,13 +204,30 @@ void PikiHeadItem::setColor(int color)
  */
 void PikiHeadItem::refresh(Graphics& gfx)
 {
+#if defined(__vita__)
+	// drawrec pikihead lane.
+	const bool rec = g_pcDrRecObj == this && pcDrPikiHeadBegin(*this, gfx);
+#endif
 	f32 scale = 1.0f;
 	mSRT.s.set(scale, scale, scale);
 	f32 light = mapMgr->getLight(mSRT.t.x, mSRT.t.z);
+#if defined(PIKI_PC_PORT)
+	// Off-camera sprouts skip their shape draws.
+	const bool onCamera = gfx.mCamera->isPointVisible(mSRT.t, 48.0f);
+#else
+	const bool onCamera = true;
+#endif
 	if (mItemShapeObject) {
 		Matrix4f mtx;
 		mWorldMtx.makeSRT(mSRT.s, mSRT.r, mSRT.t);
+#if defined(__vita__)
+		if (!rec) {
+			pcDrStampCheck(mItemShapeObject->mShape, kDrStampSerial);
+			mItemShapeObject->mShape->mMaterialList->setColour(Piki::pikiColors[mSeedColor]);
+		}
+#else
 		mItemShapeObject->mShape->mMaterialList->setColour(Piki::pikiColors[mSeedColor]);
+#endif
 
 		if (!isCreatureFlag(CF_IsOnGround) && mVelocity.length() > 0.0f) {
 			Vector3f vel(mVelocity);
@@ -232,11 +252,23 @@ void PikiHeadItem::refresh(Graphics& gfx)
 
 		mItemAnimator.updateContext();
 		mItemShapeObject->mShape->updateAnim(gfx, mtx, nullptr, this);
-		gfx.useMatrix(Matrix4f::ident, 0);
-		mItemShapeObject->mShape->drawshape(gfx, *gfx.mCamera, nullptr);
+#if defined(__vita__)
+		if (onCamera && !rec) {
+#else
+		if (onCamera) {
+#endif
+			gfx.useMatrix(Matrix4f::ident, 0);
+			mItemShapeObject->mShape->drawshape(gfx, *gfx.mCamera, nullptr);
+		}
 	}
 
+#if defined(__vita__)
+	if (!rec) {
+		gfx.useMatrix(mItemShapeObject->mShape->getAnimMatrix(3), 0);
+	}
+#else
 	gfx.useMatrix(mItemShapeObject->mShape->getAnimMatrix(3), 0);
+#endif
 
 	Vector3f localPos;
 	if (mFlowerStage == Bud) {
@@ -250,7 +282,15 @@ void PikiHeadItem::refresh(Graphics& gfx)
 	mFreeLightEfx->setScale(0.84f * mItemShapeObject->mShape->calcJointWorldPos(gfx, 3, localPos));
 	mGlowEffectPos = localPos;
 
-	pikiMgr->mLeafModel[mFlowerStage]->drawshape(gfx, *gfx.mCamera, nullptr);
+#if defined(__vita__)
+	if (rec) {
+		pcDrPikiHeadPublish(*this, gfx, onCamera);
+		return;
+	}
+#endif
+	if (onCamera) {
+		pikiMgr->mLeafModel[mFlowerStage]->drawshape(gfx, *gfx.mCamera, nullptr);
+	}
 }
 
 /**

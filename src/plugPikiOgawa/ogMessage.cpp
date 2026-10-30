@@ -501,7 +501,8 @@ zen::ogScrMessageMgr::ogScrMessageMgr(immut char* path)
 #if defined(VERSION_PIKIDEMO) || defined(VERSION_GPIJ01)
 #else
 	sprintf(mButtonTagChars, "abcxyzlr");
-	sprintf(mButtonTagIconStrings, "日目時私未知星大地横名");
+	// Button tag icon characters, Shift-JIS.
+	sprintf(mButtonTagIconStrings, "\223\372\226\332\216\236\216\204\226\242\222\155\220\257\221\345\222\156\211\241\226\274");
 	mDefaultButtonMarkupColour = "b4ffff";
 	mButtonMarkupColours[0]    = "00ff00";
 	mButtonMarkupColours[1]    = "ff0000";

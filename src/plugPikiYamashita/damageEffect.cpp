@@ -17,13 +17,13 @@ zen::DamageEffect::DamageEffect()
 bool zen::DamageEffect::update()
 {
 	if (!gameflow.mIsUIOverlayActive) {
-		Navi* navi;
+		Navi* navi = nullptr;
 		if (naviMgr) {
 			navi = naviMgr->getNavi(0);
 		}
 
 		// hmm.
-		if (navi->orimaDamaged() && mDamageAlpha == 0.0f) {
+		if (navi && navi->orimaDamaged() && mDamageAlpha == 0.0f) {
 			mDamageAlpha = 2.0f;
 		}
 

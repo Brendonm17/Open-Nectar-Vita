@@ -125,7 +125,11 @@ void KusaItem::refresh(Graphics& gfx)
 	mWorldMtx.multiply(mat);
 
 	gfx.mCamera->mLookAtMtx.multiplyTo(mWorldMtx, camMat);
+#if defined(__vita__)
+	gfx.setLightingNoPrev(true, nullptr);
+#else
 	gfx.setLighting(true, nullptr);
+#endif
 	gfx.useMatrix(Matrix4f::ident, 0);
 
 	mItemShape->updateAnim(gfx, camMat, nullptr, this);
@@ -232,7 +236,11 @@ void BoBaseItem::refresh(Graphics& gfx)
 		mWorldMtx.makeSRT(mSRT.s, mSRT.r, mSRT.t);
 
 		gfx.mCamera->mLookAtMtx.multiplyTo(mWorldMtx, camMat);
+#if defined(__vita__)
+		gfx.setLightingNoPrev(true, nullptr);
+#else
 		gfx.setLighting(true, nullptr);
+#endif
 		gfx.useMatrix(Matrix4f::ident, 0);
 
 		mItemShape->updateAnim(gfx, camMat, nullptr, this);

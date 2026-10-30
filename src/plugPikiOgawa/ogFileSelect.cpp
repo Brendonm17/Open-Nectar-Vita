@@ -1,4 +1,7 @@
 #include "zen/ogFileSelect.h"
+#if defined(PIKI_PC_PORT)
+#include "gl/pc_gfx.h"
+#endif
 #include "DebugLog.h"
 #include "Graphics.h"
 #include "P2D/Graph.h"
@@ -1359,7 +1362,16 @@ void zen::ogScrFileSelectMgr::draw(Graphics& gfx)
 		mSlotScreensNoData[i]->draw(0, 0, &perspGraph);
 	}
 
+#if defined(PIKI_PC_PORT)
+	// Effects clipped to the 4:3 box.
+	{
+		int bx, bw;
+		pc_gfx_ui_box(&bx, &bw);
+		mFxMgr->draw(gfx, bx, bx + bw);
+	}
+#else
 	mFxMgr->draw(gfx);
+#endif
 	gfx.setFog(false);
 	GXSetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
 	mCopyCursorsScreen->draw(0, 0, &perspGraph);

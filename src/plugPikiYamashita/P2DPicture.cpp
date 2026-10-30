@@ -5,6 +5,11 @@
 #include "P2D/Util.h"
 #include "Texture.h"
 #include "zen/ogSub.h"
+#if defined(PIKI_PC_PORT)
+#include "gl/pc_gfx.h"
+#include "Dolphin/gx.h"
+#include <cstdio>
+#endif
 
 /**
  * @todo: Documentation
@@ -165,8 +170,30 @@ void P2DPicture::drawSelf(int x, int y)
 void P2DPicture::drawSelf(int x, int y, immut Matrix4f* mtx)
 {
 	if (mTextures[0]) {
+#if defined(PIKI_PC_PORT)
+		int px = mGlobalBounds.mMinX + x;
+		int pw = getWidth();
+		const int py = mGlobalBounds.mMinY + y;
+		const int ph = getHeight();
+		const int tw = (int)mTextures[0]->mWidth, th = (int)mTextures[0]->mHeight;
+		const bool fullWidth = px <= 0 && px + pw >= 640 && py <= 0 && py + ph >= 480;
+		const int panelExt = int(pc_gfx_ui_full_width_extent() + 0.5f);
+		const bool spansPanel = px <= -panelExt && px + pw >= 640 + panelExt;
+		const bool plate = (fullWidth && (tw <= 64 || th <= 64)) || spansPanel;
+		if (plate) {
+			if (pw < 700) {
+				const int ext = int(pc_gfx_ui_full_width_extent() + 0.5f);
+				px -= ext;
+				pw += 2 * ext;
+			}
+			pc_gfx_set_scissor_panel();
+		}
+		drawFullSet(px, py, pw, ph, mBinding, mMirror, mTumble, mWrapS, mWrapT, mtx);
+		if (plate) pc_gfx_set_scissor_ui_box();
+#else
 		drawFullSet(mGlobalBounds.mMinX + x, mGlobalBounds.mMinY + y, getWidth(), getHeight(), mBinding, mMirror, mTumble, mWrapS, mWrapT,
 		            mtx);
+#endif
 	}
 }
 

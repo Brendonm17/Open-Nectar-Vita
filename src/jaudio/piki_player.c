@@ -16,6 +16,7 @@ static u32 gaya_timer;
  */
 void Jac_Orima_Walk(s32 soundID, u32 unusedArg)
 {
+	PC_JAC_JOIN();
 	static seqp_* seqp = NULL;
 	static u8 status   = 0;
 	gaya_timer         = 0;
@@ -46,6 +47,7 @@ static seqp_* stick_seqp;
  */
 void Jac_Orima_Formation(s32 stickX, s32 stickY)
 {
+	PC_JAC_JOIN();
 	static int flag = 0;
 
 	if (stick_seqp == NULL) {
@@ -115,6 +117,7 @@ static seqp_* orima_seqp;
  */
 void Jac_PlayOrimaSe(u32 id)
 {
+	PC_JAC_JOIN();
 	static u8 status          = 0;
 	static int cmdqueue_reset = 0;
 	static CmdQueue player_se;
@@ -199,6 +202,7 @@ void Jac_PlayOrimaSe(u32 id)
  */
 void Jac_PauseOrimaSe()
 {
+	PC_JAC_JOIN();
 	if (orima_seqp) {
 		Jam_PauseTrack(orima_seqp, 1);
 	}
@@ -209,6 +213,7 @@ void Jac_PauseOrimaSe()
  */
 void Jac_UnPauseOrimaSe()
 {
+	PC_JAC_JOIN();
 	if (orima_seqp) {
 		Jam_UnPauseTrack(orima_seqp, 1);
 	}
@@ -219,6 +224,7 @@ void Jac_UnPauseOrimaSe()
  */
 void Jac_StopOrimaSe(s32 id)
 {
+	PC_JAC_JOIN();
 	static seqp_* seqp        = NULL;
 	static int cmdqueue_reset = 0;
 	static CmdQueue player_se_stop;
@@ -248,6 +254,7 @@ static u32 pikis;
  */
 void Jac_Piki_Number(u32 pikiNum)
 {
+	PC_JAC_JOIN();
 	if (pikiNum >= 100) {
 		pikis = 29;
 		return;
@@ -276,6 +283,7 @@ void Jac_Piki_Number(u32 pikiNum)
  */
 void Jac_UpdatePikiGaya()
 {
+	PC_JAC_JOIN();
 	static seqp_* seqp;
 	static int init   = 0;
 	static f32 volume = 0.0f;

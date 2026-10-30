@@ -270,6 +270,14 @@ void PikiHeadAI::BuryInit::act(AICreature* item)
  */
 void PikiHeadAI::BuryExec::act(AICreature* item)
 {
+#if defined(PIKI_PC_PORT)
+	CollTriInfo* tri = item->mGroundTriangle;
+	if (tri && tri->mTriangle.mNormal.y < 0.5f) {
+		item->mVelocity.set(tri->mTriangle.mNormal.x * 80.0f, 0.0f, tri->mTriangle.mNormal.z * 80.0f);
+		item->mSAICtx.mStateMachine->transit(item, PIKIHEAD_Flying);
+		return;
+	}
+#endif
 	// stupid but fixes a regswap
 	f32& health = item->mSAICtx.mCurrentItemHealth;
 	health -= gsys->getFrameTime();

@@ -309,6 +309,13 @@ void pc_dsp_host_render_frame(DSPchannel_* channels, u32 channelCount, s16* out,
 				}
 			}
 
+			// Subframe volume ramp deltas.
+			const s32 diffL = endL - startL;
+			const s32 diffR = endR - startR;
+			const s32 n = static_cast<s32>(subLength);
+			const bool rampL = (diffL != 0);
+			const bool rampR = (diffR != 0);
+
 			for (u32 i = 0; i < subLength; ++i) {
 				if (channel.endRequested || channel.done) {
 					break;
@@ -337,9 +344,8 @@ void pc_dsp_host_render_frame(DSPchannel_* channels, u32 channelCount, s16* out,
 
 				// Ramp both sides across the subframe.
 				const s32 t = static_cast<s32>(i);
-				const s32 n = static_cast<s32>(subLength);
-				const s32 volL = startL + ((endL - startL) * t) / n;
-				const s32 volR = startR + ((endR - startR) * t) / n;
+				const s32 volL = rampL ? startL + (diffL * t) / n : startL;
+				const s32 volR = rampR ? startR + (diffR * t) / n : startR;
 
 				const u32 slot = sub + i;
 				sBusLeft[slot] += (interpolated * volL) >> 15;

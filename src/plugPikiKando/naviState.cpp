@@ -2100,6 +2100,9 @@ void NaviThrowWaitState::exec(Navi* navi)
 			}
 			if (!mPendingThrowPiki->isAlive()) {
 				transit(navi, NAVISTATE_Walk);
+#if defined(PIKI_PC_PORT)
+				return;
+#endif
 			}
 			Vector3f diff = mPendingThrowPiki->mSRT.t - navi->mSRT.t;
 			f32 d         = diff.length();
@@ -2127,13 +2130,32 @@ void NaviThrowWaitState::exec(Navi* navi)
 
 	if (mHeldThrowPiki) {
 		int state = mHeldThrowPiki->getState();
+#if defined(PIKI_PC_PORT)
+		const bool awaitingGrab = !mIsHoldingThrowPiki && state == PIKISTATE_Normal;
+		if (!mHeldThrowPiki->isAlive() || (!awaitingGrab && state != PIKISTATE_Hanged && state != PIKISTATE_GoHang)) {
+#else
 		if (state != PIKISTATE_Hanged && state != PIKISTATE_GoHang) {
+#endif
 			transit(navi, NAVISTATE_Walk);
 			return;
 		}
 	}
 
-	if (navi->mKontroller->keyUp(KeyConfig::_instance->mThrowKey.mBind)) {
+#if defined(PIKI_PC_PORT)
+	// Complete a pending grab on release.
+	if (navi->mKontroller->keyUp(KeyConfig::_instance->mThrowKey.mBind) && !mIsHoldingThrowPiki && mHeldThrowPiki
+	    && mHeldThrowPiki->getState() == PIKISTATE_Normal) {
+		mIsHoldingThrowPiki = true;
+		mHeldThrowPiki->mFSM->transit(mHeldThrowPiki, PIKISTATE_Hanged);
+		lockHangPiki(navi);
+	}
+#endif
+	if (navi->mKontroller->keyUp(KeyConfig::_instance->mThrowKey.mBind)
+#if defined(PIKI_PC_PORT)
+	    // Far Pikmin stays pending until grabbed.
+	    && mIsHoldingThrowPiki
+#endif
+	) {
 		sortPikis(navi);
 		navi->mThrowHoldTime = mThrowChargeLevel / 3.0f * C_NAVI_PARM(navi, mThrowHoldMaxTime);
 		transit(navi, NAVISTATE_Throw);
@@ -2173,10 +2195,20 @@ void NaviThrowWaitState::sortPikis(Navi* navi)
 	navi->mPlateMgr->sortByColor(mHeldThrowPiki);
 	navi->mPlateMgr->setPos(navi->mSRT.t, navi->mFaceDirection + PI, navi->mVelocity);
 
+#if defined(__vita__)
+	// Plate slots, in Iterator order.
+	CPlate* plate = navi->mPlateMgr;
+	for (int slot = 0; slot < plate->mTotalSlotCount; slot++) {
+		Piki* piki = static_cast<Piki*>(plate->mSlotList[slot].mOccupant.getPtr());
+		if (!piki) {
+			break;
+		}
+#else
 	Iterator it(navi->mPlateMgr);
 	CI_LOOP(it)
 	{
 		Piki* piki = (Piki*)*it;
+#endif
 		if (piki->mMode == 1) {
 			ActCrowd* act = (ActCrowd*)piki->mActiveAction->getCurrAction();
 			if (act) {
@@ -2214,6 +2246,9 @@ void NaviThrowState::init(Navi* navi)
 	mHasThrownPiki = false;
 	seSystem->playPlayerSe(SE_THROW);
 	_11 = false;
+#if defined(PIKI_PC_PORT)
+	mQueuedThrowPress = false;
+#endif
 }
 
 /**
@@ -2268,7 +2303,17 @@ void NaviThrowState::exec(Navi* navi)
 
 	navi->findNextThrowPiki();
 
+#if defined(PIKI_PC_PORT)
+	// Buffered throw click.
+	const bool throwClick = navi->mKontroller->keyClick(KeyConfig::_instance->mThrowKey.mBind);
+	if (!mHasThrownPiki && throwClick) {
+		mQueuedThrowPress = true;
+	}
+	if (mHasThrownPiki && (throwClick || mQueuedThrowPress)) {
+		mQueuedThrowPress = false;
+#else
 	if (mHasThrownPiki && navi->mKontroller->keyClick(KeyConfig::_instance->mThrowKey.mBind)) {
+#endif
 		if (navi->procActionButton()) {
 			return;
 		}

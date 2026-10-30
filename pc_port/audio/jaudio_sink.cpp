@@ -30,7 +30,6 @@ int PikiAudioSinkTryOpen(int rate)
     spec.samples = 1024;
     device = SDL_OpenAudioDevice(nullptr, 0, &spec, nullptr, 0);
     if (!device) { PikiAudioSinkClose(); return 0; }
-    std::fprintf(stderr, "[jaudio] NextOS DSP, SDL2 S16 stereo %d Hz\n", rate);
     return 1;
 }
 int PikiAudioSinkOpen(int rate) { return PikiAudioSinkTryOpen(rate); }

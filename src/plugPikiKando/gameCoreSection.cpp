@@ -6,6 +6,9 @@
 #endif
 #if defined(PIKI_PC_PORT)
 #include "settings/pc_settings.h"
+#if defined(PIKI_PC_PORT)
+#include "pc_photo_mode.h"
+#endif
 #endif
 
 #include "AIConstant.h"
@@ -65,11 +68,25 @@
 #include "zen/DrawHurryUp.h"
 #include "zen/ogTutorial.h"
 #include <stddef.h>
+#if defined(__vita__)
+void pcNodeListTouched(CoreNode* root);
+extern "C" void vita_pikia_join(void);
+#endif
+
+#if defined(PIKI_PC_PORT) && defined(__vita__)
+#include "gl/vita_drawrec.h"
+#endif
 
 static bool lastDamage;
 static bool currDamage;
 static u32 damageParm;
 u16 GameCoreSection::pauseFlag;
+#if defined(PIKI_PC_PORT)
+// Pause state saved on photo mode entry.
+static BOOL sPhotoModeSavedPauseAll = FALSE;
+static BOOL sPhotoModeSavedOverlay  = FALSE;
+static f32 sPhotoModeSavedRoll      = 0.0f;
+#endif
 int GameCoreSection::textDemoState;
 u16 GameCoreSection::textDemoTimer;
 int GameCoreSection::textDemoIndex;
@@ -741,6 +758,9 @@ void GameCoreSection::cleanupDayEnd()
 	tekiMgr = nullptr;
 	bossMgr = nullptr;
 	mMapMgr->mCollShapeList->initCore("");
+#if defined(__vita__)
+	pcNodeListTouched(mMapMgr->mCollShapeList);
+#endif
 	if (!playerState->isChallengeMode()) {
 		playerState->update();
 	}
@@ -1420,6 +1440,11 @@ GameCoreSection::GameCoreSection(Controller* controller, MapMgr* mgr, Camera& ca
 	// writing it once here covers the spawn gates in pikiMgr and itemMgr as
 	// well as the HUD counter.
 	AICONST.mMaxPikisOnField(pc_settings_get_piki_limit());
+
+	// Day length: menu minutes over a 12-hour day.
+	if (pc_settings_get_day_minutes() != kNectarDefaultDayMinutes) {
+		gameflow.mParameters->mRealMinutesPerGameDay(f32(pc_settings_get_day_minutes()) * 2.0f);
+	}
 #endif
 	gameflow.addGenNode("AI定数", AIConstant::_instance); // 'AI Constants'
 
@@ -1526,21 +1551,15 @@ GameCoreSection::GameCoreSection(Controller* controller, MapMgr* mgr, Camera& ca
 /**
  * @todo: Documentation
  */
-#if defined(PIKI_PC_PORT)
+#if defined(PIKI_PC_PORT) && PIKI_DEBUG_KEYS
 /**
- * @brief Debug shortcut: F5 puts 20 more red Pikmin in the Onion.
- *
- * Purely a testing aid for the configurable field limit -- reaching 200 the
- * honest way takes far too long to iterate on. Adds them as leaf Pikmin
- * straight into the Onion's stock, updating both the stock and the running
- * total the HUD reads, which is what growing a seed does.
+ * @brief Debug shortcuts for the Mods settings.
  */
-static void pcDebugStockRedPikmin()
+static void pcDebugKeys()
 {
 	// Off unless asked for: a stray F5 would otherwise fill someone's Onion
 	// mid-game. Enable with PIKMIN_DEBUG_KEYS=1.
-	static const bool enabled = getenv("PIKMIN_DEBUG_KEYS") != nullptr;
-	if (!enabled) {
+	if (!pc_settings_get_debug_keys()) {
 		return;
 	}
 
@@ -1583,14 +1602,63 @@ static void pcDebugStockRedPikmin()
 		}
 	}
 	wasDown = isDown;
+
+	// F6: advance one in-game hour.
+	static bool hourWasDown = false;
+	const bool hourDown     = keys != nullptr && keys[SDL_SCANCODE_F6] != 0;
+	if (hourDown && !hourWasDown) {
+		WorldClock& clock = gameflow.mWorldClock;
+		const f32 next    = clock.mTimeOfDay + 1.0f;
+		clock.setTime(next >= clock.mHoursInDay ? clock.mHoursInDay - 0.01f : next);
+		fprintf(stderr, "[DEBUG] clock -> %02d:00 (day is %d min of play)\n",
+		        clock.mCurrentGameHour, pc_settings_get_day_minutes());
+		fflush(stderr);
+	}
+	hourWasDown = hourDown;
+
+	// F7: end the day with the Main Engine and 20 Pikmin.
+	static bool skipWasDown = false;
+	const bool skipDown     = keys != nullptr && keys[SDL_SCANCODE_F7] != 0;
+	if (skipDown && !skipWasDown) {
+		if (gameflow.mIsDayEndActive || gameflow.mIsDayEndTriggered) {
+			fprintf(stderr, "[DEBUG] the day is already ending\n");
+		} else {
+			if (!playerState->hasUfoParts(UFOID_MainEngine)) {
+				playerState->getUfoParts(UFOID_MainEngine, true);
+			}
+
+			GoalItem* onion = itemMgr ? itemMgr->getContainer(Red) : nullptr;
+			if (onion == nullptr) {
+				fprintf(stderr, "[DEBUG] no red Onion here; ending the day without stocking\n");
+			} else {
+				const int limit   = pc_settings_get_piki_limit();
+				const int already = int(GameStat::allPikis);
+				int added         = 20 - already;
+				if (already + added > limit) {
+					added = limit - already;
+				}
+				if (added > 0) {
+					pikiInfMgr.mPikiCounts[Red][Leaf] += added;
+					onion->mHeldPikis[Leaf] += added;
+					GameStat::containerPikis.add(Red, added);
+					GameStat::update();
+				}
+			}
+
+			gameflow.mIsDayEndTriggered = TRUE;
+			fprintf(stderr, "[DEBUG] tutorial skipped: Main Engine recovered, ending the day\n");
+		}
+		fflush(stderr);
+	}
+	skipWasDown = skipDown;
 }
 #endif
 
 void GameCoreSection::update()
 {
 	STACK_PAD_VAR(2);
-#if defined(PIKI_PC_PORT)
-	pcDebugStockRedPikmin();
+#if defined(PIKI_PC_PORT) && PIKI_DEBUG_KEYS
+	pcDebugKeys();
 #endif
 	if (!gameflow.mMoviePlayer->mIsActive && !mDoneSundownWarn && gameflow.mWorldClock.mTimeOfDay >= gameflow.mParameters->mNightWarning()
 	    && (flowCont.mGameEndFlag != GAMEEND_PikminExtinction || flowCont.mGameEndFlag != GAMEEND_NaviDown)) {
@@ -1629,6 +1697,7 @@ void GameCoreSection::update()
 	if (!gameflow.mMoviePlayer->mIsActive) {
 		cameraMgr->update();
 	}
+
 
 	Piki* nextThrowPiki = naviMgr->getNavi()->mNextThrowPiki;
 	int encodedNextThrowType;
@@ -1691,6 +1760,56 @@ void GameCoreSection::startSundownWarn()
 void GameCoreSection::updateAI()
 {
 	STACK_PAD_VAR(2);
+#if defined(PIKI_PC_PORT)
+	// Photo mode.
+	if (!gameflow.mMoviePlayer->mIsActive && pc_photo_mode_poll_toggle()) {
+		PcamCamera* pcam = cameraMgr->mCamera;
+		if (pc_photo_mode_active()) {
+			pc_photo_mode_exit();
+			gameflow.mPauseAll          = sPhotoModeSavedPauseAll;
+			gameflow.mIsUIOverlayActive = sPhotoModeSavedOverlay;
+			if (pcam) {
+				pcam->mRotationAngle = sPhotoModeSavedRoll;
+			}
+		} else if (pcam) {
+			sPhotoModeSavedPauseAll = gameflow.mPauseAll;
+			sPhotoModeSavedOverlay  = gameflow.mIsUIOverlayActive;
+			sPhotoModeSavedRoll     = pcam->mRotationAngle;
+			gameflow.mPauseAll          = TRUE;
+			gameflow.mIsUIOverlayActive = TRUE;
+
+			Vector3f eye, look;
+			pcam->getViewpoint().output(eye);
+			pcam->getWatchpoint().output(look);
+			Vector3f dir(look.x - eye.x, look.y - eye.y, look.z - eye.z);
+			f32 pitch = 0.0f, yaw = 0.0f;
+			pc_photo_mode_angles_from_forward(dir.x, dir.y, dir.z, &pitch, &yaw);
+			pc_photo_mode_enter(eye.x, eye.y, eye.z, pitch, yaw);
+		}
+	}
+
+	if (pc_photo_mode_active()) {
+		PcamCamera* pcam = cameraMgr->mCamera;
+		if (pcam) {
+			f32 px = 0.0f, py = 0.0f, pz = 0.0f, pitch = 0.0f, yaw = 0.0f, roll = 0.0f;
+			pc_photo_mode_update(gsys->getFrameTime(), &px, &py, &pz, &pitch, &yaw, &roll);
+
+			f32 fx = 0.0f, fy = 0.0f, fz = 0.0f;
+			pc_photo_mode_forward_vector(pitch, yaw, &fx, &fy, &fz);
+
+			const f32 kLookDistance = 100.0f;
+			Vector3f eye(px, py, pz);
+			Vector3f look(px + fx * kLookDistance, py + fy * kLookDistance, pz + fz * kLookDistance);
+
+			pcam->inputViewpoint(eye);
+			pcam->inputWatchpoint(look);
+			pcam->mRotationAngle = roll;
+			pcam->makeMatrix();
+			pcam->makeCamera();
+		}
+	}
+#endif
+
 	int pikis = GameStat::mapPikis;
 	if (pikis > 50) {
 		if (AIPerf::optLevel != 2)
@@ -1834,6 +1953,11 @@ void GameCoreSection::updateAI()
  */
 void GameCoreSection::draw(Graphics& gfx)
 {
+#if defined(PIKI_PC_PORT) && defined(__vita__)
+	struct PcPikiAJoinGuard {
+		~PcPikiAJoinGuard() { vita_pikia_join(); }
+	} pcPikiAJoinGuard;
+#endif
 	gfx.mCamera->mProjectionMatrix = gfx.mCamera->mPerspectiveMatrix;
 	gfx.mCamera->mProjectionMatrix.multiply(gfx.mCamera->mLookAtMtx);
 	bool advanceState = true;
@@ -1849,6 +1973,10 @@ void GameCoreSection::draw(Graphics& gfx)
 		seSystem->update(gfx, mNavi->mSRT.t);
 	}
 	gsys->mTimer->stop("se updt");
+#if defined(PIKI_PC_PORT) && defined(__vita__)
+	// Off-thread audio step during scene recording.
+	if (vita_audio_seq_fork) vita_audio_seq_fork();
+#endif
 
 	gfx.useMatrix(Matrix4f::ident, 0);
 	gfx.calcLighting(1.0f);
@@ -1858,13 +1986,26 @@ void GameCoreSection::draw(Graphics& gfx)
 	mMapMgr->mDayMgr->setFog(gfx, nullptr);
 
 	if (!AIPerf::generatorMode) {
+#if defined(__vita__)
+		// Teki drawrec lane.
+		const bool tekiPass = mDrawHideType != 2 && tekiMgr && !hideTeki();
+		pcTekiDrawrecBegin(gfx, tekiPass ? tekiMgr : nullptr, mDrawHideType);
+		if (tekiPass) {
+			tekiMgr->refresh(gfx);
+		}
+		g_pcDrTekiRec = 0;
+#else
 		if (mDrawHideType != 2 && tekiMgr && !hideTeki()) {
 			tekiMgr->refresh(gfx);
 		}
+#endif
 		gsys->mTimer->start("piki draw", true);
 		if (mDrawHideType != 1) {
 			pikiMgr->refresh(gfx);
 		}
+#if defined(__vita__)
+		pcDrawrecSeal();
+#endif
 		gsys->mTimer->stop("piki draw");
 	}
 
@@ -1875,6 +2016,10 @@ void GameCoreSection::draw(Graphics& gfx)
 		bossMgr->refresh(gfx);
 	}
 
+#if defined(__vita__)
+	// Item, work, pellet and plant drawrec lanes.
+	pcDrS2Begin(gfx, mDrawHideType);
+#endif
 	if (mDrawHideType != 3) {
 		itemMgr->refresh(gfx);
 	}
@@ -1887,11 +2032,17 @@ void GameCoreSection::draw(Graphics& gfx)
 		if (mDrawHideType != 5) {
 			pelletMgr->refresh(gfx);
 		}
-
+#if defined(__vita__)
+		pcDrS2PlantGate();
+#endif
 		if (mDrawHideType != 7) {
 			plantMgr->refresh(gfx);
 		}
 	}
+#if defined(__vita__)
+	// S2 seal.
+	pcDrS2End();
+#endif
 
 	// This code snippet is imitating a development feature that exists in the
 	// DLLs, but this might not be where the equivalent code from the DLL exists.
@@ -1916,7 +2067,11 @@ void GameCoreSection::draw(Graphics& gfx)
 	gfx.useMatrix(mtx, 0);
 	int blend = gfx.setCBlending(BLEND_Subtractive);
 	gfx.setDepth(false);
+#if defined(__vita__)
+	gfx.setLightingNoPrev(false, nullptr);
+#else
 	gfx.setLighting(false, nullptr);
+#endif
 	gfx.useTexture(mShadowTexture, GX_TEXMAP0);
 	gfx.setColour(Colour(255, 255, 255, 128), true);
 	if (AIPerf::optLevel <= 1) {

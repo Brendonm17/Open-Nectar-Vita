@@ -220,6 +220,8 @@ void test_uniform_names_are_a_subset_of_the_ubershader()
 		"uMaterialColor", "uMaterialColor1",
 		"uTevPrev", "uTevReg0", "uTevReg1", "uTevReg2",
 		"uTevKonst", "uAlphaRef0", "uAlphaRef1",
+		// Fog uniforms, not in the ubershader.
+		"uFogParams", "uFogColour",
 	};
 
 	PcTevShaderKey key = modulate_key();
@@ -258,6 +260,25 @@ void test_uniform_names_are_a_subset_of_the_ubershader()
 	check(checked >= 6, "the sample configuration declares several uniforms");
 }
 
+// Fog uses the GameCube depth range.
+void test_fog_uses_the_gamecube_depth_range()
+{
+	const std::string source = pc_tev_build_fragment_source(modulate_key());
+	check(contains(source, "uniform vec4 uFogParams;"), "fog declares its parameters");
+	check(contains(source, "uniform vec4 uFogColour;"), "fog declares its colour");
+	check(contains(source, "float fogDenom = uFogParams.z - fogNdc * (uFogParams.w - uFogParams.z);"),
+	      "fog linearises with the GameCube depth range");
+	check(contains(source, "(uFogParams.z * uFogParams.w) / fogDenom"),
+	      "fog distance is n*f / denom");
+	check(!contains(source, "uFogParams.w + uFogParams.z - fogNdc"),
+	      "fog does not use the OpenGL depth range");
+	check(!contains(source, "2.0 * uFogParams.z * uFogParams.w"),
+	      "fog does not use the OpenGL numerator");
+	// Colour only.
+	check(contains(source, "prev.rgb = mix(prev.rgb, uFogColour.rgb, fogAmount);"),
+	      "fog affects colour and leaves alpha alone");
+}
+
 } // namespace
 
 int main()
@@ -274,6 +295,7 @@ int main()
 	test_stage_count_is_honoured();
 	test_distinct_configurations_differ();
 	test_output_registers_are_independent();
+	test_fog_uses_the_gamecube_depth_range();
 
 	if (gFailures != 0) {
 		printf("pc_tev_shader_test: %d failure(s)\n", gFailures);

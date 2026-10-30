@@ -1,4 +1,8 @@
 #include "SearchSystem.h"
+#include "sysNew.h"
+#if defined(PIKI_PC_PORT)
+#include <vector>
+#endif
 #include "AIPerf.h"
 #include "Boss.h"
 #include "DebugLog.h"
@@ -28,10 +32,25 @@ SearchSystem::SearchSystem()
 {
 }
 
+#if defined(PIKI_PC_PORT)
+/** @brief The frame's search. */
+void SearchSystem::update()
+{
+#if defined(__vita__)
+	pcSearchUpdate(this);
+#else
+	legacyCalls();
+#endif
+}
+
+/** @brief update()'s original body. */
+void SearchSystem::legacyCalls()
+#else
 /**
  * @todo: Documentation
  */
 void SearchSystem::update()
+#endif
 {
 	if (AIPerf::loopOptimise) {
 		updateLoopOptimised();
@@ -113,6 +132,45 @@ void SearchSystem::update()
  */
 void SearchSystem::updateLoopOptimised()
 {
+    PikiPcPersistentAlloc pcKeep;   // port state outlives the level heaps (sysNew.cpp)
+#if defined(PIKI_PC_PORT)
+	// Per-manager candidates, gathered once per frame.
+	static std::vector<Creature*> navis, tekis, bosses, items;
+	navis.clear(); tekis.clear(); bosses.clear(); items.clear();
+	{ Iterator it(naviMgr); CI_LOOP(it) { navis.push_back(*it); } }
+	{ Iterator it(tekiMgr); CI_LOOP(it) { Creature* obj = *it; if (!obj->mGrid.aiCulling()) tekis.push_back(obj); } }
+	{ Iterator it(bossMgr); CI_LOOP(it) { Creature* obj = *it; if (!obj->mGrid.aiCulling()) bosses.push_back(obj); } }
+	{ Iterator it(itemMgr); CI_LOOP(it) { Creature* obj = *it; if (!obj->mGrid.aiCulling()) items.push_back(obj); } }
+	auto scan = [](Piki* piki, const std::vector<Creature*>& list) {
+		for (Creature* obj : list) {
+			if (AIPerf::useGrid) {
+				f32 sizeA = obj->getCentreSize();
+				f32 sizeB = piki->getCentreSize();
+				if (piki->mGrid.doCulling(obj->mGrid, sizeB + sizeA)) {
+					continue;
+				}
+			}
+			f32 dist = sphereDist(piki, obj);
+			if (dist <= 300.0f && piki->mSearchBuffer.available()) {
+				piki->mSearchBuffer.insert(obj, dist);
+			}
+			if (dist <= 300.0f && obj->mSearchBuffer.available()) {
+				obj->mSearchBuffer.insert(piki, dist);
+			}
+		}
+	};
+	for (int i = 0; i < pikiMgr->mMaxElements; i++) {
+		if (pikiMgr->mEntryStatus[i]) {
+			continue;
+		}
+
+		Piki* piki = (Piki*)pikiMgr->mObjectList[i];
+		scan(piki, navis);
+		scan(piki, tekis);
+		scan(piki, bosses);
+		scan(piki, items);
+
+#else
 	for (int i = 0; i < pikiMgr->mMaxElements; i++) {
 		if (pikiMgr->mEntryStatus[i]) {
 			continue;
@@ -206,6 +264,7 @@ void SearchSystem::updateLoopOptimised()
 			}
 		}
 
+#endif
 		for (int j = i + 1; j < pikiMgr->mMaxElements; j++) {
 			if (!pikiMgr->mEntryStatus[j]) {
 				Piki* piki2 = (Piki*)pikiMgr->mObjectList[j];
@@ -347,6 +406,39 @@ void SearchBuffer::insertQuick(Creature* obj, f32 dist)
 	if (!obj->isVisible() || !obj->isAlive()) {
 		return;
 	}
+#if defined(PIKI_PC_PORT)
+	insertQuickVisible(obj, dist);
+}
+
+/** @brief The rest of insertQuick; returns whether it stored anything. */
+bool SearchBuffer::insertQuickVisible(Creature* obj, f32 dist)
+{
+	if ((mCurrentEntries < mMaxEntries || !(mMaxDistance < dist)) && getIndex(obj) == -1) {
+
+		if (mCurrentEntries >= mMaxEntries) {
+			if (mLastEntry == -1) {
+				return false;
+			}
+			mDataList[mLastEntry].mTargetCreature.getPtr();
+			mDataList[mLastEntry].mTargetCreature.clear();
+			mDataList[mLastEntry].mTargetCreature.set(obj);
+			mMaxDistance = dist;
+			return true;
+		}
+
+		mDataList[mCurrentEntries].mTargetCreature.getPtr();
+		mDataList[mCurrentEntries].mTargetCreature.clear();
+		mDataList[mCurrentEntries].mTargetCreature.set(obj);
+		if (mMaxDistance < dist) {
+			mMaxDistance = dist;
+			mLastEntry   = mCurrentEntries;
+		}
+		mCurrentEntries++;
+		return true;
+	}
+	return false;
+}
+#else
 	if ((mCurrentEntries < mMaxEntries || !(mMaxDistance < dist)) && getIndex(obj) == -1) {
 
 		if (mCurrentEntries >= mMaxEntries) {
@@ -372,6 +464,7 @@ void SearchBuffer::insertQuick(Creature* obj, f32 dist)
 
 	STACK_PAD_VAR(8);
 }
+#endif
 
 /**
  * @todo: Documentation

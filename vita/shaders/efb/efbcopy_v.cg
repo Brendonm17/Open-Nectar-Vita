@@ -1,0 +1,8 @@
+// EFB copy (GXCopyTex): a full-target quad; four source taps per texel (vglEfbCopy).
+void main(float2 aPos : POSITION, float4 aUV01 : TEXCOORD0, float4 aUV23 : TEXCOORD1,
+          out float4 oPos : POSITION, out float4 vUV01 : TEXCOORD0, out float4 vUV23 : TEXCOORD1)
+{
+    oPos = float4(aPos, 0.5f, 1.0f);
+    vUV01 = aUV01;
+    vUV23 = aUV23;
+}

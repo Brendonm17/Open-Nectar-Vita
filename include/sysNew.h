@@ -9,6 +9,19 @@ void* piki_pc_alloc(size_t size);
 void piki_pc_free(void* ptr);
 void piki_pc_dump_alloc_stats(void);
 
+// GameCube heap lifetimes (sysNew.cpp).
+void piki_pc_mark_game_thread(void);
+// One bit per (heap, end).
+#define PIKI_HEAP_REL(heap, end) (1u << ((heap) * 2 + ((end) == 2 ? 1 : 0)))
+void piki_pc_release_game_heaps(unsigned heapEndMask);
+// Scope whose game-thread allocations are not tagged to a game heap.
+struct PikiPcPersistentAlloc {
+	PikiPcPersistentAlloc();
+	~PikiPcPersistentAlloc();
+	PikiPcPersistentAlloc(const PikiPcPersistentAlloc&) = delete;
+	PikiPcPersistentAlloc& operator=(const PikiPcPersistentAlloc&) = delete;
+};
+
 // These must be strong, program-wide replacements. Inline definitions only
 // affected translation units that happened to include this header, while the
 // final executable still imported the libstdc++ operators.

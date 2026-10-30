@@ -1,3 +1,6 @@
+#if defined(PIKI_PC_PORT)
+extern "C" void pc_settings_set_in_field(int on);   /* settings/pc_settings.cpp */
+#endif
 #include "CardSelectSection.h"
 
 #include "BaseInf.h"
@@ -14,6 +17,9 @@
 #include "jaudio/piki_scene.h"
 #include "sysNew.h"
 #include "zen/ogFileChkSel.h"
+#if defined(PIKI_PC_PORT)
+#include "gl/pc_gfx.h"
+#endif
 
 // Macros for packing and unpacking the section compression flag.
 // (this packing is a holdover from TitlesSection where there's also section transitions, not just OnePlayerSection).
@@ -170,6 +176,10 @@ struct CardSelectSetupSection : public Node {
 	 */
 	virtual void draw(Graphics& gfx) // _14 (weak)
 	{
+#if defined(PIKI_PC_PORT)
+		pc_gfx_set_section_clip_43(0);
+		pc_settings_set_in_field(0);
+#endif
 		gfx.setViewport(AREA_FULL_SCREEN(gfx));
 		gfx.setScissor(AREA_FULL_SCREEN(gfx));
 		gfx.setClearColour(COLOUR_TRANSPARENT);

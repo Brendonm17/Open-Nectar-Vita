@@ -1,5 +1,8 @@
 #include "Dolphin/pad.h"
 #include "RumbleMgr.h"
+#if defined(PIKI_PC_PORT)
+#include "pc_window.h"
+#endif
 
 /**
  * @todo: Documentation
@@ -26,7 +29,11 @@ void RumbleSample::init()
  */
 void RumbleSample::simpleStop()
 {
+#if defined(PIKI_PC_PORT)
+	pc_window_rumble(mChannel, 0.0f);
+#else
 	PADStopMotorHard(mChannel);
+#endif
 }
 
 /**
@@ -36,6 +43,12 @@ void RumbleSample::simpleStart(f32 intensity)
 {
 	mCurrentIntensity = intensity;
 	mTotalIntensity += mCurrentIntensity;
+#if defined(PIKI_PC_PORT)
+	// Controller motor: level, not pulse train.
+	pc_window_rumble(mChannel, mCurrentIntensity);
+	if (mTotalIntensity >= 1.0f) mTotalIntensity -= 1.0f;
+	return;
+#endif
 	if (mCurrentIntensity <= 0.0f) {
 		PADStopMotorHard(mChannel);
 

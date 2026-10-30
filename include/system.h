@@ -231,6 +231,9 @@ public:
 	bool resetPending() { return mSoftResetPending; }
 	void setFrameClamp(int frameRate)
 	{
+#ifdef __vita__
+		if (frameRate < 2) frameRate = 2;
+#endif
 		mFrameRate = frameRate;
 	}
 	int getHeapNum() { return mActiveHeapIdx; }

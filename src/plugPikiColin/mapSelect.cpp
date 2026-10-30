@@ -1,3 +1,6 @@
+#if defined(PIKI_PC_PORT)
+extern "C" void pc_settings_set_in_field(int on);   /* settings/pc_settings.cpp */
+#endif
 #include "MapSelect.h"
 
 #include "Camera.h"
@@ -16,6 +19,9 @@
 #include "system.h"
 #include "zen/DrawCM.h"
 #include "zen/DrawWorldMap.h"
+#if defined(PIKI_PC_PORT)
+#include "gl/pc_gfx.h"
+#endif
 
 /// Size of the message heap (102 kb).
 #define MESSAGE_HEAP_SIZE (0x19800)
@@ -325,6 +331,11 @@ public:
 	 */
 	virtual void draw(Graphics& gfx) // _14 (weak)
 	{
+#if defined(PIKI_PC_PORT)
+		// Backdrop and effects unclipped.
+		pc_gfx_set_section_clip_43(0);
+		pc_settings_set_in_field(0);
+#endif
 		// full-screen
 		gfx.setViewport(AREA_FULL_SCREEN(gfx));
 		gfx.setScissor(AREA_FULL_SCREEN(gfx));

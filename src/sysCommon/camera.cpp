@@ -4,6 +4,10 @@
 #include "Graphics.h"
 #include "Texture.h"
 #include "sysNew.h"
+#if defined(__vita__)
+#include "pc_gfx.h"
+extern bool gPcEfbOffscreenPass;   // dgxGraphics.cpp
+#endif
 #if defined(PIKI_PC_PORT)
 #include "pc_gfx.h"
 #endif
@@ -313,6 +317,15 @@ void CullFrustum::createInvVecs()
  */
 void CullFrustum::update(f32 aspectRatio, f32 fov, f32 zNear, f32 zFar)
 {
+#if defined(PIKI_PC_PORT)
+	// Frustum widened to the window aspect.
+	{
+		const f32 windowAspect = pc_gfx_get_current_aspect_ratio();
+		if (windowAspect > aspectRatio) {
+			aspectRatio = windowAspect;
+		}
+	}
+#endif
 	mAspectRatio   = aspectRatio;
 	mVerticalScale = 1.0f;
 	mFov           = fov;
@@ -530,6 +543,11 @@ void LightCamera::calcProjection(Graphics& gfx, bool p2, Node* p3)
 
 		f32 width  = 2.0f * mLightMap->mWidth;
 		f32 height = 2.0f * mLightMap->mHeight;
+#if defined(__vita__)
+		// Own EFB in GX pixels.
+		pc_gfx_efb_target(1, int(width), int(height));
+		gPcEfbOffscreenPass = true;
+#endif
 		gfx.setPerspective(mPerspectiveMatrix.mMtx, mFov, mAspectRatio, 30.0f, mFar, 1.0f);
 
 		gfx.setViewport(RectArea(-(mProjectionX * width), -(height * mProjectionY), width + (int(width * mProjectionX)),
@@ -541,12 +559,20 @@ void LightCamera::calcProjection(Graphics& gfx, bool p2, Node* p3)
 
 		gfx.setScissor(RectArea(4, 4, int(width) - 4, int(height) - 4));
 		gfx.setFog(false);
+#if defined(__vita__)
+		gfx.setLightingNoPrev(false, nullptr);
+#else
 		gfx.setLighting(false, nullptr);
+#endif
 		gfx.setCamera(this);
 		gfx.useTexture(nullptr, GX_TEXMAP0);
 		p3->draw(gfx);
 
 		mLightMap->grabBuffer(mLightMap->mWidth, mLightMap->mHeight, true, true);
+#if defined(__vita__)
+		gPcEfbOffscreenPass = false;
+		pc_gfx_efb_target(0, 0, 0);
+#endif
 		gfx.setCamera(cam);
 	}
 }

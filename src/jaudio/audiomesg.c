@@ -5,6 +5,7 @@
  */
 void Jac_InitMessageQueue(Jac_MessageQueue* queue, OSMessage* msgArray, s32 count)
 {
+	PC_JAC_JOIN();
 	queue->msgArray   = msgArray;
 	queue->msgCount   = count;
 	queue->firstIndex = 0;
@@ -17,6 +18,7 @@ void Jac_InitMessageQueue(Jac_MessageQueue* queue, OSMessage* msgArray, s32 coun
  */
 BOOL Jac_SendMessageBlock(Jac_MessageQueue* queue, OSMessage mesg)
 {
+	PC_JAC_JOIN();
 	while (Jac_SendMessage(queue, mesg) != TRUE) { }
 	return TRUE;
 }
@@ -26,6 +28,7 @@ BOOL Jac_SendMessageBlock(Jac_MessageQueue* queue, OSMessage mesg)
  */
 BOOL Jac_SendMessage(Jac_MessageQueue* queue, OSMessage msg)
 {
+	PC_JAC_JOIN();
 	int mesgId;
 	BOOL enable = OSDisableInterrupts();
 
@@ -48,6 +51,7 @@ BOOL Jac_SendMessage(Jac_MessageQueue* queue, OSMessage msg)
  */
 BOOL Jac_ReceiveMessage(Jac_MessageQueue* queue, OSMessage* outMsg)
 {
+	PC_JAC_JOIN();
 	BOOL enable = OSDisableInterrupts();
 	BOOL res    = Jac_ReceiveMessage_Fast(queue, outMsg);
 	OSRestoreInterrupts(enable);
@@ -59,6 +63,7 @@ BOOL Jac_ReceiveMessage(Jac_MessageQueue* queue, OSMessage* outMsg)
  */
 BOOL Jac_ReceiveMessage_Fast(Jac_MessageQueue* queue, OSMessage* outMsg)
 {
+	PC_JAC_JOIN();
 	while (queue->usedCount == 0) {
 		return FALSE;
 	}
@@ -79,5 +84,6 @@ BOOL Jac_ReceiveMessage_Fast(Jac_MessageQueue* queue, OSMessage* outMsg)
  */
 void Jac_JamMessage(Jac_MessageQueue*, OSMessage)
 {
+	PC_JAC_JOIN();
 	TRAP_UNIMPLEMENTED;
 }

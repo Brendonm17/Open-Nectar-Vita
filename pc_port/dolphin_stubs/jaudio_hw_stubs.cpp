@@ -19,7 +19,6 @@
 #if PIKI_USE_JAUDIO
 
 #include "Dolphin/OS/OSInterrupt.h"
-#include "hvqm4.h"
 
 /**
  * DSP hardware register file. audiothread.c and dspboot.c poll and write these
@@ -44,61 +43,5 @@ OSInterruptMask __OSUnmaskInterrupts(OSInterruptMask mask)
 }
 
 } // extern "C"
-
-///////////////////////////////////////////////////////////////////////////////
-// HVQM4 video decoder.
-//
-// Referenced only by src/jaudio/hvqm_play.c, which drives video alongside the
-// audio stream. The port excludes src/hvqm4dec/ entirely and plays cinematics
-// through the .stx audio path instead, so these keep the engine linking
-// without pretending to decode anything.
-//
-// HVQM4BuffSize reports zero so a caller that sizes an allocation from it asks
-// for nothing rather than for an arbitrary block this file invented.
-
-void HVQM4InitDecoder() { }
-
-void HVQM4InitSeqObj(SeqObj* obj, VideoInfo* header)
-{
-	(void)obj;
-	(void)header;
-}
-
-u32 HVQM4BuffSize(SeqObj* obj)
-{
-	(void)obj;
-	return 0;
-}
-
-void HVQM4SetBuffer(SeqObj* obj, void* buf)
-{
-	(void)obj;
-	(void)buf;
-}
-
-void HVQM4DecodeIpic(SeqObj* obj, void* code, void* outbuf)
-{
-	(void)obj;
-	(void)code;
-	(void)outbuf;
-}
-
-void HVQM4DecodePpic(SeqObj* obj, void* code, void* outbuf, void* ref1)
-{
-	(void)obj;
-	(void)code;
-	(void)outbuf;
-	(void)ref1;
-}
-
-void HVQM4DecodeBpic(SeqObj* obj, void* code, void* outbuf, void* ref2,
-                     void* ref1)
-{
-	(void)obj;
-	(void)code;
-	(void)outbuf;
-	(void)ref2;
-	(void)ref1;
-}
 
 #endif // PIKI_USE_JAUDIO

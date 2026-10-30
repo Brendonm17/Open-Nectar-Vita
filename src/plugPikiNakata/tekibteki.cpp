@@ -24,6 +24,9 @@
 #include "nlib/System.h"
 #include "sysNew.h"
 #include "zen/particle.h"
+#if defined(__vita__)
+#include "gl/vita_drawrec.h"
+#endif
 
 const int BTeki::TEKI_OPTION_VISIBLE            = 1 << 0;
 const int BTeki::TEKI_OPTION_SHADOW_VISIBLE     = 1 << 1;
@@ -1937,6 +1940,27 @@ void BTeki::drawTekiShape(Graphics& gfx)
 
 	Matrix4f onCamMtx;
 	gfx.mCamera->mLookAtMtx.multiplyTo(mWorldMtx, onCamMtx);
+#if defined(__vita__)
+	// Teki drawrec lane.
+	if (__builtin_expect(g_pcDrTekiRec, 0)) {
+		mTekiAnimator->updateContext();
+		mTekiShape->mShape->updateAnim(gfx, onCamMtx, nullptr, this);
+		if (mCollInfo) {
+			mCollInfo->updateInfo(gfx, false);
+		}
+		mPlatMgr.update(gfx);
+		if (pcTekiDrawrecPublish(*this, gfx)) {
+			if (aiCullable()) {
+				setTekiOption(TEKIOPT_Drawed);
+			}
+			return;
+		}
+		// Not taken by the chain: B inline.
+		gfx.useMatrix(Matrix4f::ident, 0);
+		pcDrawTekiB(gfx);
+		return;
+	}
+#endif
 	gfx.useMatrix(Matrix4f::ident, 0);
 	mTekiAnimator->updateContext();
 	mTekiShape->mShape->updateAnim(gfx, onCamMtx, nullptr, this);
@@ -1947,6 +1971,16 @@ void BTeki::drawTekiShape(Graphics& gfx)
 
 	mPlatMgr.update(gfx);
 
+#if defined(__vita__)
+	pcDrawTekiB(gfx);
+}
+
+/**
+ * drawTekiShape's GX half.
+ */
+void BTeki::pcDrawTekiB(Graphics& gfx)
+{
+#endif
 	if (aiCullable()) {
 		int lightType = getParameterI(TPI_LightType);
 		if (lightType == 1) {

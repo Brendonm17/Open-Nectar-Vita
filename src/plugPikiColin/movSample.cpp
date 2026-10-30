@@ -1,3 +1,6 @@
+#if defined(PIKI_PC_PORT)
+extern "C" void pc_settings_set_in_field(int on);   /* settings/pc_settings.cpp */
+#endif
 #include "Controller.h"
 #include "DebugLog.h"
 #include "Dolphin/gx.h"
@@ -9,6 +12,13 @@
 #include "jaudio/piki_scene.h"
 #include "sysNew.h"
 #include "system.h"
+#if defined(PIKI_PC_PORT)
+#include "gl/pc_gfx.h"
+#include <string.h>
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#endif
+#endif
 
 u16 ImgH;
 u16 ImgW;
@@ -17,6 +27,9 @@ GXTexObj UVtexObj;
 OSThread playbackThread;
 u8 playbackThreadStack[0x1000];
 bool finishPlayback;
+#ifdef __vita__
+extern "C" void vita_audio_set_movie(int on);
+#endif
 
 /**
  * @todo: Documentation
@@ -83,36 +96,27 @@ void convHVQM4TexY8UV8(int stride, int height, u8* src, u8* dst)
 	u8* v2 = v1 + (stride / 2);
 	u8* v3 = v2 + (stride / 2);
 
-	out = (u32*)(dst + (stride * height));
+	u8* o = dst + (stride * height);
 
 	for (i = height / 2; i > 0; i -= 4) {
 		for (j = stride / 2; j > 0; j -= 4) {
-			// two packed pixels per line per iteration
-			// Line 0
-			out[0] = ((u32)u0[0] << 24) | ((u32)v0[0] << 16) | ((u32)u0[1] << 8) | ((u32)v0[1]);
-			out[1] = ((u32)u0[2] << 24) | ((u32)v0[2] << 16) | ((u32)u0[3] << 8) | ((u32)v0[3]);
-			u0 += 4;
-			v0 += 4;
+			for (int k = 0; k < 4; k++) {
+				o[0] = u0[k]; o[1] = v0[k]; o += 2;
+			}
+			u0 += 4; v0 += 4;
+			for (int k = 0; k < 4; k++) {
+				o[0] = u1[k]; o[1] = v1[k]; o += 2;
+			}
+			u1 += 4; v1 += 4;
+			for (int k = 0; k < 4; k++) {
+				o[0] = u2[k]; o[1] = v2[k]; o += 2;
+			}
+			u2 += 4; v2 += 4;
+			for (int k = 0; k < 4; k++) {
+				o[0] = u3[k]; o[1] = v3[k]; o += 2;
+			}
+			u3 += 4; v3 += 4;
 
-			// Line 1
-			out[2] = ((u32)u1[0] << 24) | ((u32)v1[0] << 16) | ((u32)u1[1] << 8) | ((u32)v1[1]);
-			out[3] = ((u32)u1[2] << 24) | ((u32)v1[2] << 16) | ((u32)u1[3] << 8) | ((u32)v1[3]);
-			u1 += 4;
-			v1 += 4;
-
-			// Line 2
-			out[4] = ((u32)u2[0] << 24) | ((u32)v2[0] << 16) | ((u32)u2[1] << 8) | ((u32)v2[1]);
-			out[5] = ((u32)u2[2] << 24) | ((u32)v2[2] << 16) | ((u32)u2[3] << 8) | ((u32)v2[3]);
-			u2 += 4;
-			v2 += 4;
-
-			// Line 3
-			out[6] = ((u32)u3[0] << 24) | ((u32)v3[0] << 16) | ((u32)u3[1] << 8) | ((u32)v3[1]);
-			out[7] = ((u32)u3[2] << 24) | ((u32)v3[2] << 16) | ((u32)u3[3] << 8) | ((u32)v3[3]);
-			u3 += 4;
-			v3 += 4;
-
-			out += 8;
 		}
 
 		// advance to next block of 4 UV lines
@@ -133,10 +137,42 @@ void convHVQM4TexY8UV8(int stride, int height, u8* src, u8* dst)
 /**
  * @todo: Documentation
  */
+#if defined(PIKI_PC_PORT)
+// Linear plane packer
+static void convHVQM4LinearY8UV8(int stride, int height, const u8* src, u8* dst)
+{
+	memcpy(dst, src, size_t(stride) * size_t(height));
+	const u8* u = src + stride * height;
+	const u8* v = u + (stride / 2) * (height / 2);
+	u8* o       = dst + stride * height;
+	const int count = (stride / 2) * (height / 2);
+	int k = 0;
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+	for (; k + 16 <= count; k += 16) {
+		uint8x16x2_t uv;
+		uv.val[0] = vld1q_u8(u + k);
+		uv.val[1] = vld1q_u8(v + k);
+		vst2q_u8(o + k * 2, uv);
+	}
+#endif
+	for (; k < count; ++k) {
+		o[k * 2]     = u[k];
+		o[k * 2 + 1] = v[k];
+	}
+}
+#endif
+
 static void* playbackFunc(void*)
 {
 	while (!finishPlayback) {
+#if defined(PIKI_PC_PORT)
+		for (int i = 0; i < 4 && !finishPlayback; i++) {
+			Jac_StreamMovieUpdate();
+		}
+		OSYieldThread();
+#else
 		Jac_StreamMovieUpdate();
+#endif
 	}
 	return nullptr;
 }
@@ -164,6 +200,12 @@ struct MovSampleSetupSection : public Node {
 		int movieBufferSize = 0xe00000;
 		u8* movieBuffer     = new (PIKI_ALIGNED(0x20)) u8[movieBufferSize];
 		Jac_StreamMovieInit(movieNames[gameflow.mCurrIntroMovieID], movieBuffer, movieBufferSize);
+#if defined(PIKI_PC_PORT)
+		pc_gfx_set_movie_planes_linear(1);
+#ifdef __vita__
+		vita_audio_set_movie(1);
+#endif
+#endif
 		ImgW                = 640;
 		ImgH                = 480;
 		int yuvBufferSize   = 0x70800;
@@ -184,6 +226,9 @@ struct MovSampleSetupSection : public Node {
 
 	virtual void update() // _10 (weak)
 	{
+#if defined(PIKI_PC_PORT)
+		OSYieldThread();
+#endif
 		mController->update();
 
 		int pictureStatus = 0;
@@ -194,12 +239,17 @@ struct MovSampleSetupSection : public Node {
 		}
 
 		if (pictureData && pictureStatus) {
-#if defined(VERSION_GPIJ01) || defined(VERSION_DPIJ01_PIKIDEMO)
+#if defined(PIKI_PC_PORT)
+			convHVQM4LinearY8UV8(pictureWidth, pictureHeight, pictureData, mYuvFrameBuffers[mFrameBufferIndex ^ 1]);
+#elif defined(VERSION_GPIJ01) || defined(VERSION_DPIJ01_PIKIDEMO)
 			convHVQM4TexY8UV8(pictureWidth, pictureHeight, pictureData, mYuvFrameBuffers[mFrameBufferIndex]);
 #else
 			convHVQM4TexY8UV8(pictureWidth, pictureHeight, pictureData, mYuvFrameBuffers[mFrameBufferIndex ^ 1]);
 #endif
 			mFrameBufferIndex ^= 1;
+#if defined(PIKI_PC_PORT)
+			OSYieldThread();
+#endif
 		}
 
 		bool shouldExit = false;
@@ -208,8 +258,14 @@ struct MovSampleSetupSection : public Node {
 		}
 
 		if (shouldExit || pictureStatus == -1) {
+#if defined(PIKI_PC_PORT)
+			finishPlayback = true;
+#endif
 			Jac_StreamMovieStop();
 			OSCancelThread(&playbackThread);
+#if defined(PIKI_PC_PORT)
+			OSJoinThread(&playbackThread, nullptr);
+#endif
 
 			if (flowCont.mEndingType != ENDING_None) {
 				Jac_SceneExit(SCENE_Exit, 0);
@@ -224,6 +280,26 @@ struct MovSampleSetupSection : public Node {
 	}
 	virtual void draw(Graphics& gfx) // _14 (weak)
 	{
+#if defined(PIKI_PC_PORT)
+		OSYieldThread();
+		pc_gfx_set_section_clip_43(0);
+		pc_settings_set_in_field(0);
+		if (finishPlayback) {
+			GXSetTevSwapModeTable(GX_TEV_SWAP1, GX_CH_RED, GX_CH_RED, GX_CH_RED, GX_CH_ALPHA);
+			GXSetTevSwapModeTable(GX_TEV_SWAP2, GX_CH_GREEN, GX_CH_GREEN, GX_CH_GREEN, GX_CH_ALPHA);
+			GXSetTevKColor(GX_KCOLOR0, (GXColor) { 255, 255, 255, 255 });
+			GXSetTevKColor(GX_KCOLOR1, (GXColor) { 255, 255, 255, 255 });
+			GXSetTevKColor(GX_KCOLOR2, (GXColor) { 255, 255, 255, 255 });
+			GXSetTevKColor(GX_KCOLOR3, (GXColor) { 255, 255, 255, 255 });
+			GXSetTevColorS10(GX_TEVREG0, (GXColorS10) { 0, 0, 0, 0 });
+			GXSetTevColor(GX_TEVREG0, (GXColor) { 255, 255, 255, 255 });
+			pc_gfx_set_movie_planes_linear(0);
+#ifdef __vita__
+			vita_audio_set_movie(0);
+#endif
+			return;
+		}
+#endif
 		gfx.setViewport(AREA_FULL_SCREEN(gfx));
 		gfx.setScissor(AREA_FULL_SCREEN(gfx));
 		gfx.setClearColour(COLOUR_TRANSPARENT);
@@ -284,6 +360,9 @@ struct MovSampleSetupSection : public Node {
 		GXInitTexObj(&YtexObj, data, ImgW, ImgH, GX_TF_I8, GX_CLAMP, GX_CLAMP, GX_FALSE);
 		GXInitTexObjLOD(&YtexObj, GX_NEAR, GX_NEAR, 0.0f, 0.0f, 0.0f, GX_FALSE, GX_FALSE, GX_ANISO_1);
 		GXLoadTexObj(&YtexObj, GX_TEXMAP1);
+#if defined(PIKI_PC_PORT)
+		OSYieldThread();   // between the two plane uploads
+#endif
 
 		GXInitTexObj(&UVtexObj, &data[ImgW * ImgH], ImgW / 2, ImgH / 2, GX_TF_IA8, GX_CLAMP, GX_CLAMP, GX_FALSE);
 		GXInitTexObjLOD(&UVtexObj, GX_NEAR, GX_NEAR, 0.0f, 0.0f, 0.0f, GX_FALSE, GX_FALSE, GX_ANISO_1);

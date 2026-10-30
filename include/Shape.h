@@ -126,6 +126,10 @@ public:
 
 	void animate(f32*);
 	void updateContext();
+#if defined(__vita__)
+	// animate's loop alone, for record B bodies.
+	void pcAnimateB(f32* data);
+#endif
 
 	ShapeDynMaterials* mNext; ///< _00, next `ShapeDynMaterials` in the (singly-linked) list, if any.
 	int mMatCount;            ///< _04, number of materials in container.
@@ -377,7 +381,23 @@ public:
 	int mAttrListMatCount;              // _2A4
 	char (*mTextureNameList)[32];       // _2A8
 	u8 _2AC;                            // _2AC
+#if defined(__vita__)
+	// Chain of the record that last wrote this shape's shared state.
+	u16 mPcSegChain;
+#endif
 };
+
+#if defined(__vita__)
+// drawrec ownership-stamp check.
+extern u16 g_pcDrChain;
+void pcDrStampJoin(const BaseShape* shape, int site);
+inline void pcDrStampCheck(const BaseShape* shape, int site)
+{
+	if (__builtin_expect(g_pcDrChain != 0 && shape->mPcSegChain == g_pcDrChain, 0)) {
+		pcDrStampJoin(shape, site);
+	}
+}
+#endif
 
 /**
  * @brief TODO

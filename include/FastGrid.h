@@ -31,6 +31,31 @@ public:
 
 	void setNeighbourSize(int size) { mNeighbourSize = size; }
 
+#if defined(PIKI_PC_PORT)
+	/** @brief doCulling's x and z tests on cell coordinates. */
+	static bool doCullingXZ(s16 ax, s16 az, s16 bx, s16 bz, f32 radius, int shift)
+	{
+		s16 cellLimit = s16(radius) >> shift;
+
+		// X axis
+		s16 dx     = ax - bx;
+		s16 absDx  = (dx > 0) ? dx : -(dx);
+		s16 excess = (absDx == 0) ? 0 : absDx - 1;
+		if (excess > cellLimit) {
+			return true;
+		}
+
+		// Z axis
+		s16 dz    = az - bz;
+		s16 absDz = (dz > 0) ? dz : -(dz);
+		excess    = (absDz == 0) ? 0 : absDz - 1;
+		if (excess > cellLimit) {
+			return true;
+		}
+		return false;
+	}
+#endif
+
 	static u16 aiGridShift;
 	static u8* aiGridMap;
 	static u16 aiGridSize;

@@ -1,14 +1,22 @@
+#include "AIConstant.h"
 #include "DebugLog.h"
+#include "FlowController.h"
 #include "Generator.h"
+#include "MapMgr.h"
 #include "OnePlayerSection.h"
 #include "Pellet.h"
 #include "PelletState.h"
 #include "PlayerState.h"
+#include "TekiParameters.h"
+#include "TekiPersonality.h"
 #include "bugprint.h"
 #include "gameflow.h"
 #include "save/pc_generator_cache_validation.h"
 #include "sysNew.h"
+#include "system.h"
+#include "teki.h"
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -632,6 +640,215 @@ void GeneratorCache::prepareUfoParts(GeneratorCache::Cache* cache)
 	STACK_PAD_VAR(2);
 }
 
+namespace {
+
+// One cached ship-part record.
+constexpr int kUfoPartPositionOffset = 4;
+constexpr int kUfoPartSpawnOffset    = kUfoPartPositionOffset + 3 * 4 + 1;
+constexpr int kUfoPartRecordSize     = kUfoPartSpawnOffset + 3 * 4;
+
+// Ship part created by a stage's init.gen.
+struct InitGenUfoPart {
+	u32 mPartID;        // model id
+	Vector3f mPosition; // generator position, or clamThrowLanding's point
+	u32 mCreator;       // 'pelt', 'teki' or 'boss'
+	bool mClamThrow;    // thrown by a Pearly Clamclamp
+};
+
+/* Landing point of a ship part thrown by a Pearly Clamclamp. */
+bool clamThrowLanding(Generator& gen, Vector3f& landing)
+{
+	TekiParameters* rocpe = tekiMgr ? tekiMgr->getTekiParameters(TEKI_Rocpe) : nullptr;
+	if (!rocpe || !AIConstant::_instance || !mapMgr) {
+		return false;
+	}
+	const f32 gravity = AICONST.mGravity();
+	if (!(gravity > 0.0f)) {
+		return false;
+	}
+	const f32 distance = 2.0f * rocpe->getF(TPF_SpawnPelletVelocityHoriz) * rocpe->getF(TPF_SpawnPelletVelocityVert) / gravity;
+	if (!(distance > 0.0f) || !(distance < 100000.0f)) {
+		return false;
+	}
+
+	// Clam facing (degrees).
+	f32 facing = 0.0f;
+	if (gen.mGenType && gen.mGenType->mID == '1one') {
+		facing = PI * (static_cast<GenTypeOne*>(gen.mGenType)->_48() / 180.0f);
+	}
+	immut Vector3f& centre = gen.getPos();
+	landing.set(centre.x + distance * std::sin(facing), centre.y, centre.z + distance * std::cos(facing));
+	return mapMgr->getCurrTri(landing.x, landing.z, true) != nullptr;
+}
+
+// Prints a host-order fourcc.
+struct FourCC {
+	explicit FourCC(u32 id)
+	{
+		mText[0] = static_cast<char>(id >> 24);
+		mText[1] = static_cast<char>(id >> 16);
+		mText[2] = static_cast<char>(id >> 8);
+		mText[3] = static_cast<char>(id);
+		mText[4] = '\0';
+	}
+	char mText[5];
+};
+
+/* Collects every ship part the current stage's init.gen creates. */
+bool readInitGenUfoParts(std::vector<InitGenUfoPart>& parts)
+{
+	// "stages/stage1.ini" to "stages/stage1/init.gen".
+	const char* stageFile = flowCont.mCurrStageFilePath;
+	const char* dot       = static_cast<const char*>(std::memchr(stageFile, '.', sizeof(flowCont.mCurrStageFilePath)));
+	if (!dot) {
+		return false;
+	}
+	char path[sizeof(flowCont.mCurrStageFilePath) + sizeof("/init.gen")];
+	const size_t dirLength = static_cast<size_t>(dot - stageFile);
+	std::memcpy(path, stageFile, dirLength);
+	std::strcpy(path + dirLength, "/init.gen");
+
+	RandomAccessStream* data = gsys->openFile(path);
+	if (!data) {
+		return false;
+	}
+
+	// GeneratorMgr::read's header, without side effects.
+	ID32 version;
+	version.read(*data);
+	version.mId = __builtin_bswap32(version.mId);
+	data->readFloat();
+	data->readFloat();
+	data->readFloat();
+	if (version.mId == 'v0.1') {
+		data->readFloat();
+	}
+	const int count = data->readInt();
+	if (count < 0 || count > 65536 || count > data->getPending()) {
+		data->close();
+		return false;
+	}
+
+	const bool oldRamMode = Generator::ramMode;
+	Generator::ramMode    = false; // the file layout, not the cache's
+	for (int i = 0; i < count && data->getPending() > 0; i++) {
+		Generator gen;
+		gen.read(*data);
+		if (!gen.mGenObject) {
+			continue;
+		}
+
+		u32 partID = 0;
+		switch (gen.mGenObject->mID) {
+		case 'pelt':
+			partID = static_cast<GenObjectPellet*>(gen.mGenObject)->mPelletId.mId;
+			break;
+		case 'teki':
+			partID = static_cast<GenObjectTeki*>(gen.mGenObject)->mPersonality->mID.mId;
+			break;
+		case 'boss':
+		{
+			PelletConfig* config = pelletMgr->getConfigFromIdx(static_cast<GenObjectBoss*>(gen.mGenObject)->mPelletConfigIdx);
+			partID               = config ? config->mModelId.mId : 0;
+			break;
+		}
+		default:
+			break;
+		}
+		if (partID != 0 && Pellet::isUfoPartsID(partID)) {
+			InitGenUfoPart part = { partID, gen.getPos(), gen.mGenObject->mID, false };
+			if (part.mCreator == 'teki' && static_cast<GenObjectTeki*>(gen.mGenObject)->mTekiType == TEKI_Shell) {
+				part.mClamThrow = clamThrowLanding(gen, part.mPosition);
+				if (!part.mClamThrow) {
+					part.mPosition.set(gen.getPos()); // no landing point
+				}
+			}
+			parts.push_back(part);
+		}
+	}
+	Generator::ramMode = oldRamMode;
+	data->close();
+	return true;
+}
+
+/* Repairs ship parts saved at the world origin. */
+void repairOriginParkedUfoParts(u32 stageID, u8* block, int blockSize, int recordCount)
+{
+	std::vector<InitGenUfoPart> initParts;
+	bool initRead   = false;
+	bool initUsable = false;
+	const bool sameStage = flowCont.mCurrentStage && flowCont.mCurrentStage->mStageIndex == stageID;
+
+	for (int i = 0; i < recordCount; i++) {
+		const int start = i * kUfoPartRecordSize;
+		if (start + kUfoPartRecordSize > blockSize) {
+			break;
+		}
+
+		CheckedRamStream in(block + start, kUfoPartRecordSize);
+		const u32 id = in.readInt();
+		Vector3f pos;
+		pos.x = in.readFloat();
+		pos.y = in.readFloat();
+		pos.z = in.readFloat();
+		in.readByte();
+		Vector3f spawn;
+		spawn.x = in.readFloat();
+		spawn.y = in.readFloat();
+		spawn.z = in.readFloat();
+		if (!in.isValid()) {
+			break;
+		}
+
+		if (pos.x != 0.0f || pos.z != 0.0f || spawn.x != 0.0f || spawn.z != 0.0f) {
+			continue;
+		}
+		if (playerState->hasUfoParts(id)) {
+			continue; // already on the ship
+		}
+
+		if (!initRead) {
+			initRead   = true;
+			initUsable = sameStage && readInitGenUfoParts(initParts);
+		}
+		// First placing generator, else the first dropping one.
+		const InitGenUfoPart* source = nullptr;
+		for (const InitGenUfoPart& candidate : initParts) {
+			if (candidate.mPartID == id && (!source || (source->mCreator != 'pelt' && candidate.mCreator == 'pelt'))) {
+				source = &candidate;
+			}
+		}
+
+		const FourCC name(id);
+		if (!source) {
+			fprintf(stderr, "[PC Generator] Corrupt saved ship part %s (stage %u) is at the world origin; %s, left in place\n",
+			        name.mText, stageID, initUsable ? "no init.gen generator creates it" : "stage init.gen unavailable");
+			continue;
+		}
+
+		CheckedWriteRamStream out(block + start, kUfoPartRecordSize);
+		out.setPosition(kUfoPartPositionOffset);
+		out.writeFloat(source->mPosition.x);
+		out.writeFloat(source->mPosition.y);
+		out.writeFloat(source->mPosition.z);
+		out.setPosition(kUfoPartSpawnOffset);
+		out.writeFloat(source->mPosition.x);
+		out.writeFloat(source->mPosition.y);
+		out.writeFloat(source->mPosition.z);
+
+		const char* where = source->mCreator == 'pelt' ? "its init.gen spawn"
+		                  : source->mClamThrow         ? "where the Pearly Clamclamp holding it throws it out"
+		                  : source->mCreator == 'boss' ? "the init.gen spawn of the boss that drops it"
+		                                               : "the init.gen spawn of the enemy that drops it";
+		fprintf(stderr,
+		        "[PC Generator] Corrupt saved ship part %s (stage %u) was parked at the world origin (old isNan bug); restored to %s "
+		        "(%.2f, %.2f, %.2f)\n",
+		        name.mText, stageID, where, source->mPosition.x, source->mPosition.y, source->mPosition.z);
+	}
+}
+
+} // namespace
+
 /**
  * @todo: Documentation
  */
@@ -639,6 +856,7 @@ void GeneratorCache::loadUfoParts(GeneratorCache::Cache* cache)
 {
 	void* heap = mCacheHeap + cache->mCacheHeapOffset + cache->mGenCacheSize + cache->mCreatureCacheSize;
 	PRINT("load from %x : %d ufo parts\n", (u32)heap, cache->mUfoPartsCount);
+	repairOriginParkedUfoParts(cache->mStageID, static_cast<u8*>(heap), cache->mUfoPartsCacheSize, cache->mUfoPartsCount);
 	CheckedRamStream stream(heap, cache->mUfoPartsCacheSize);
 	PRINT("********* LOAD UFO PARTS (%d)*************************\n", cache->mUfoPartsCount);
 

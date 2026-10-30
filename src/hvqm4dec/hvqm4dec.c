@@ -1,5 +1,10 @@
 #include "hvqm4.h"
+#include <string.h>
 #include <stddef.h>
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#define HVQM_NEON 1
+#endif
 
 /*
  * Initial code attempts + comments + function arguments/naming guides taken from
@@ -26,8 +31,17 @@ static u32 readTree_scale;
 #define CHROMA_IDX 1
 
 #define read8(buf, offset)  (*(u8*)((u8*)(buf) + (offset)))
-#define read16(buf, offset) (*(u16*)((u8*)(buf) + (offset)))
-#define read32(buf, offset) (*(u32*)((u8*)(buf) + (offset)))
+// The bitstream is big-endian
+static inline u16 hvqm_rd16(const void* p) {
+	const u8* b = (const u8*)p;
+	return (u16)(((u16)b[0] << 8) | b[1]);
+}
+static inline u32 hvqm_rd32(const void* p) {
+	const u8* b = (const u8*)p;
+	return ((u32)b[0] << 24) | ((u32)b[1] << 16) | ((u32)b[2] << 8) | b[3];
+}
+#define read16(buf, offset) hvqm_rd16((const u8*)(buf) + (offset))
+#define read32(buf, offset) hvqm_rd32((const u8*)(buf) + (offset))
 
 static inline u8 saturate(int x)
 {
@@ -135,7 +149,8 @@ static inline int getBit(BitBuffer* str)
 	int bit;
 
 	if ((bit = str->shift) < 0) {
-		value = str->word = *((u32*)str->ptr)++;
+		value = str->word = hvqm_rd32(str->ptr);
+		str->ptr = (u8*)str->ptr + 4;
 		bit               = 31;
 	} else {
 		value = str->word;
@@ -160,13 +175,62 @@ static inline s16 getByte(BitBuffer* str)
 	} else {
 		value = str->word;
 		value <<= 7 - bit;
-		str->word = *((u32*)str->ptr)++;
+		str->word = hvqm_rd32(str->ptr);
+		str->ptr  = (u8*)str->ptr + 4;
 		value |= str->word >> (bit + 25);
 		bit += 24;
 	}
 	str->shift = bit;
 	value &= 0xFF;
 	return value;
+}
+
+static inline u32 peekBits8(BitBuffer* str)
+{
+	int bit = str->shift;
+	u32 w;
+	if (bit < 0) {
+		w = str->word = hvqm_rd32(str->ptr);
+		str->ptr    = (u8*)str->ptr + 4;
+		bit = str->shift = 31;
+	} else {
+		w = str->word;
+	}
+	u32 v = w << (31 - bit);
+	if (bit < 7) {
+		v |= hvqm_rd32(str->ptr) >> (bit + 1);
+	}
+	return v >> 24;
+}
+
+static inline void skipBits(BitBuffer* str, int count)
+{
+	int bit = str->shift - count;
+	if (bit < -1) {
+		str->word = hvqm_rd32(str->ptr);
+		str->ptr  = (u8*)str->ptr + 4;
+		bit += 32;
+	}
+	str->shift = bit;
+}
+
+static void hvqm_build_table(Tree* tree)
+{
+	int root = tree->tree_root;
+	if (root < 0x100) return;
+	for (int prefix = 0; prefix < 256; prefix++) {
+		int point = root;
+		int len   = 0;
+		while (point >= 0x100 && len < 8) {
+			point = tree->leaf[(prefix >> (7 - len)) & 1][point];
+			len++;
+		}
+		if (point < 0x100) {
+			tree->leaf[1][prefix] = (int)(((u32)len << 16) | ((u32)tree->leaf[0][point] & 0xFFFFu));
+		} else {
+			tree->leaf[1][prefix] = point;
+		}
+	}
 }
 
 /**
@@ -217,6 +281,7 @@ static void readTree(BitBufferWithTree* const code, int is_signed, int scale)
 	} else {
 		tree->tree_root = 0;
 	}
+	hvqm_build_table(tree);
 }
 
 /**
@@ -228,6 +293,19 @@ static inline int decodeHuff(BitBufferWithTree* code)
 	BitBuffer* str = &code->str;
 	int point      = tree->tree_root;
 
+	if (point < 0x100) {
+		return tree->leaf[0][point];
+	}
+	{
+		const u32 entry = (u32)tree->leaf[1][peekBits8(str)];
+		const int len   = (int)(entry >> 16);
+		if (len) {
+			skipBits(str, len);
+			return (int)(s16)(entry & 0xFFFFu);
+		}
+		skipBits(str, 8);
+		point = (int)(entry & 0xFFFFu);
+	}
 	while (point >= 0x100) {
 		point = tree->leaf[getBit(str)][point];
 	}
@@ -591,21 +669,140 @@ static void OrgBlock(VideoState* ws, u8* block, int blockWidth, int p)
 
 	FORCE_DONT_INLINE;
 
-	buf                          = &ws->aotcd[p];
-	ptr                          = (u32*)buf->ptr;
-	temp1                        = ptr[1];
-	temp2                        = ptr[2];
-	temp3                        = ptr[3];
-	*(u32*)(block)               = ptr[0];
-	*(u32*)(block += blockWidth) = temp1;
-	*(u32*)(block += blockWidth) = temp2;
-	*(u32*)(block += blockWidth) = temp3;
-	buf->ptr                     = (u8*)ptr + 16;
+	buf = &ws->aotcd[p];
+	// A raw 4x4 pixel block
+	{
+		const u8* src = (const u8*)buf->ptr;
+		memcpy(block, src, 4);
+		memcpy(block += blockWidth, src + 4, 4);
+		memcpy(block += blockWidth, src + 8, 4);
+		memcpy(block += blockWidth, src + 12, 4);
+		buf->ptr = (u8*)src + 16;
+	}
+	(void)ptr; (void)temp1; (void)temp2; (void)temp3;
 }
 
 /**
  * @TODO: Documentation
  */
+#ifdef HVQM_NEON
+
+// NEON block reconstruction
+static inline u32 hvqm_ld32(const u8* p_) { u32 v; memcpy(&v, p_, 4); return v; }
+static inline u64 hvqm_ld64(const u8* p_) { u64 v; memcpy(&v, p_, 8); return v; }
+
+// The 16 nest samples of a basis
+static inline uint8x16_t hvqm_gather16(const u8* top, int step_x, int step_y)
+{
+	if (step_x == 1) {
+		const u64 r01 = (u64)hvqm_ld32(top) | ((u64)hvqm_ld32(top + step_y) << 32);
+		const u64 r23 = (u64)hvqm_ld32(top + 2 * step_y) | ((u64)hvqm_ld32(top + 3 * step_y) << 32);
+		return vcombine_u8(vcreate_u8(r01), vcreate_u8(r23));
+	} else {
+		const uint8x8_t r0 = vcreate_u8(hvqm_ld64(top));
+		const uint8x8_t r1 = vcreate_u8(hvqm_ld64(top + step_y));
+		const uint8x8_t r2 = vcreate_u8(hvqm_ld64(top + 2 * step_y));
+		const uint8x8_t r3 = vcreate_u8(hvqm_ld64(top + 3 * step_y));
+		return vcombine_u8(vuzp_u8(r0, r1).val[0], vuzp_u8(r2, r3).val[0]);
+	}
+}
+
+static inline int hvqm_max16(uint8x16_t v)
+{
+	uint8x8_t m = vmax_u8(vget_low_u8(v), vget_high_u8(v));
+	m = vpmax_u8(m, m); m = vpmax_u8(m, m); m = vpmax_u8(m, m);
+	return vget_lane_u8(m, 0);
+}
+static inline int hvqm_min16(uint8x16_t v)
+{
+	uint8x8_t m = vmin_u8(vget_low_u8(v), vget_high_u8(v));
+	m = vpmin_u8(m, m); m = vpmin_u8(m, m); m = vpmin_u8(m, m);
+	return vget_lane_u8(m, 0);
+}
+
+// One basis of an intra or inter block
+static inline s32 hvqm_basis(VideoState* ws, uint8x16_t* basisOut, s32* pscl, u8* nestTop, int nestWidth, int p, int mc)
+{
+	u16 code;
+	int step_x, step_y;
+
+	code = *ws->aotcd[p].ptr++ << 8;
+	code |= *ws->aotcd[p].ptr++;
+
+	if (ws->landscape) {
+		nestTop += ((code >> 6) & 0x1F) * nestWidth + (code & 0x3F);
+		step_x = 1 << ((code >> 11) & 1);
+		step_y = nestWidth << ((code >> 12) & 1);
+	} else {
+		nestTop += (code & 0x3F) * nestWidth + ((code >> 6) & 0x1F);
+		step_x = 1 << ((code >> 12) & 1);
+		step_y = nestWidth << ((code >> 11) & 1);
+	}
+
+	uint8x16_t b = hvqm_gather16(nestTop, step_x, step_y);
+	if (mc) b = vshrq_n_u8(b, 4);
+	*basisOut = b;
+	const int max = hvqm_max16(b);
+	const int min = hvqm_min16(b);
+
+	*pscl += decodeHuff(&ws->scale[p]);
+	if (code & 0x8000) {
+		return -divTable[max - min] * (*pscl + ((code >> 13) & 3));
+	} else {
+		return divTable[max - min] * (*pscl + ((code >> 13) & 3));
+	}
+}
+
+// Sum of the scaled bases
+static inline s32 hvqm_aot_sum(VideoState* ws, int32x4_t acc[4], u8 nbasis, u8* nestTop, int nestWidth, int p, int mc)
+{
+	s32 prev_scl = 0;
+	acc[0] = acc[1] = acc[2] = acc[3] = vdupq_n_s32(0);
+	while (nbasis--) {
+		uint8x16_t bas;
+		const s32 scl = hvqm_basis(ws, &bas, &prev_scl, nestTop, nestWidth, p, mc);
+		const uint16x8_t lo = vmovl_u8(vget_low_u8(bas));
+		const uint16x8_t hi = vmovl_u8(vget_high_u8(bas));
+		acc[0] = vmlaq_n_s32(acc[0], vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(lo))), scl);
+		acc[1] = vmlaq_n_s32(acc[1], vreinterpretq_s32_u32(vmovl_u16(vget_high_u16(lo))), scl);
+		acc[2] = vmlaq_n_s32(acc[2], vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(hi))), scl);
+		acc[3] = vmlaq_n_s32(acc[3], vreinterpretq_s32_u32(vmovl_u16(vget_high_u16(hi))), scl);
+	}
+	int32x4_t t = vaddq_s32(vaddq_s32(acc[0], acc[1]), vaddq_s32(acc[2], acc[3]));
+	int32x2_t h = vadd_s32(vget_low_s32(t), vget_high_s32(t));
+	h = vpadd_s32(h, h);
+	return vget_lane_s32(h, 0) >> 4;
+}
+
+static inline void hvqm_store4x4(u8* blk, int blkWidth, int32x4_t v0, int32x4_t v1, int32x4_t v2, int32x4_t v3)
+{
+	const uint8x8_t r01 = vqmovun_s16(vcombine_s16(vqmovn_s32(v0), vqmovn_s32(v1)));
+	const uint8x8_t r23 = vqmovun_s16(vcombine_s16(vqmovn_s32(v2), vqmovn_s32(v3)));
+	u32 w;
+	w = vget_lane_u32(vreinterpret_u32_u8(r01), 0); memcpy(blk, &w, 4); blk += blkWidth;
+	w = vget_lane_u32(vreinterpret_u32_u8(r01), 1); memcpy(blk, &w, 4); blk += blkWidth;
+	w = vget_lane_u32(vreinterpret_u32_u8(r23), 0); memcpy(blk, &w, 4); blk += blkWidth;
+	w = vget_lane_u32(vreinterpret_u32_u8(r23), 1); memcpy(blk, &w, 4);
+}
+
+static void IntraAotBlock(VideoState* ws, u8* blk, int blkWidth, u8 dcv, u8 nbasis, int p)
+{
+	if (nbasis == 6) {
+		OrgBlock(ws, blk, blkWidth, p);
+	} else {
+		int32x4_t acc[4];
+		const int mns = ws->aotscale_q;
+		const s32 avr = (dcv << mns) - hvqm_aot_sum(ws, acc, nbasis, ws->nestBuf, ws->nestsize_h, p, 0);
+		const int32x4_t va = vdupq_n_s32(avr);
+		const int32x4_t sh = vdupq_n_s32(-mns);
+		hvqm_store4x4(blk, blkWidth,
+		              vshlq_s32(vaddq_s32(acc[0], va), sh), vshlq_s32(vaddq_s32(acc[1], va), sh),
+		              vshlq_s32(vaddq_s32(acc[2], va), sh), vshlq_s32(vaddq_s32(acc[3], va), sh));
+	}
+}
+#endif /* HVQM_NEON */
+
+#ifndef HVQM_NEON   /* scalar GetAotBasis */
 static inline s32 GetAotBasis(VideoState* ws, u8 basisOut[16], s32* pscl, u8* nestTop, int nestWidth, int p)
 {
 	u16 code;
@@ -807,10 +1004,12 @@ static inline s32 GetAotBasis(VideoState* ws, u8 basisOut[16], s32* pscl, u8* ne
 		return divTable[max - min] * (*pscl + ((code >> 13) & 3));
 	}
 }
+#endif
 
 /**
  * @TODO: Documentation
  */
+#ifndef HVQM_NEON   /* scalar GetMCAotBasis */
 static inline s32 GetMCAotBasis(VideoState* ws, u8 basisOut[16], s32* pscl, u8* nestTop, int nestWidth, int p)
 {
 	// the only difference to GetAotBasis() seems to be the ">> 4 & 0xF"
@@ -1000,7 +1199,9 @@ static inline s32 GetMCAotBasis(VideoState* ws, u8 basisOut[16], s32* pscl, u8* 
 		return divTable[max - min] * (*pscl + ((code >> 13) & 3));
 	}
 }
+#endif
 
+#ifndef HVQM_NEON   /* scalar GetAotSum */
 static inline s32 GetAotSum(VideoState* ws, long sum[16], u8 nbasis, u8* nestTop, int nestWidth, int p)
 {
 	long prev_scl;
@@ -1033,7 +1234,9 @@ static inline s32 GetAotSum(VideoState* ws, long sum[16], u8 nbasis, u8* nestTop
 	        + sum[14] + sum[15])
 	    >> 4;
 }
+#endif
 
+#ifndef HVQM_NEON   /* scalar GetMCAotSum */
 static inline s32 GetMCAotSum(VideoState* ws, s32 sum[16], u8 nbasis, u8* nestTop, int nestWidth, int p)
 {
 	s32 prev_scl;
@@ -1066,10 +1269,12 @@ static inline s32 GetMCAotSum(VideoState* ws, s32 sum[16], u8 nbasis, u8* nestTo
 	        + sum[14] + sum[15])
 	    >> 4;
 }
+#endif
 
 /**
  * @note: AOT = Adaptive Orthogonal Transform, apparently
  */
+#ifndef HVQM_NEON   /* scalar IntraAotBlock */
 static void IntraAotBlock(VideoState* ws, u8* blk, int blkWidth, u8 dcv, u8 nbasis, int p)
 {
 	long sum[16];
@@ -1108,6 +1313,7 @@ static void IntraAotBlock(VideoState* ws, u8* blk, int blkWidth, u8 dcv, u8 nbas
 		blk += blkWidth;
 	}
 }
+#endif
 
 /**
  * @TODO: Documentation
@@ -1301,6 +1507,50 @@ static void setMCTarget(MCHandler* mch, int direct)
 /**
  * @note Copy 4x4 samples without interpolation.
  */
+#ifdef HVQM_NEON
+// 4x4 motion copies
+static inline uint8x8_t hvqm_rows2(const u8* p_, int stride)
+{
+	return vcreate_u8((u64)hvqm_ld32(p_) | ((u64)hvqm_ld32(p_ + stride) << 32));
+}
+static inline void hvqm_put2(u8* cP, int cWidth, uint8x8_t v)
+{
+	u32 w;
+	w = vget_lane_u32(vreinterpret_u32_u8(v), 0); memcpy(cP, &w, 4);
+	w = vget_lane_u32(vreinterpret_u32_u8(v), 1); memcpy(cP + cWidth, &w, 4);
+}
+static inline void _MotionComp_00(u8* cP, int cWidth, u8* tP, int tWidth)
+{
+	memcpy(cP, tP, 4); cP += cWidth; tP += tWidth;
+	memcpy(cP, tP, 4); cP += cWidth; tP += tWidth;
+	memcpy(cP, tP, 4); cP += cWidth; tP += tWidth;
+	memcpy(cP, tP, 4);
+}
+static inline void _MotionComp_01(u8* cP, int cWidth, u8* tP, int tWidth)
+{
+	hvqm_put2(cP, cWidth, vrhadd_u8(hvqm_rows2(tP, tWidth), hvqm_rows2(tP + tWidth, tWidth)));
+	tP += 2 * tWidth; cP += 2 * cWidth;
+	hvqm_put2(cP, cWidth, vrhadd_u8(hvqm_rows2(tP, tWidth), hvqm_rows2(tP + tWidth, tWidth)));
+}
+static inline void _MotionComp_10(u8* cP, int cWidth, u8* tP, int tWidth)
+{
+	hvqm_put2(cP, cWidth, vrhadd_u8(hvqm_rows2(tP, tWidth), hvqm_rows2(tP + 1, tWidth)));
+	tP += 2 * tWidth; cP += 2 * cWidth;
+	hvqm_put2(cP, cWidth, vrhadd_u8(hvqm_rows2(tP, tWidth), hvqm_rows2(tP + 1, tWidth)));
+}
+static inline void _MotionComp_11(u8* cP, int cWidth, u8* tP, int tWidth)
+{
+	uint16x8_t a = vaddl_u8(hvqm_rows2(tP, tWidth), hvqm_rows2(tP + 1, tWidth));
+	uint16x8_t b = vaddl_u8(hvqm_rows2(tP + tWidth, tWidth), hvqm_rows2(tP + tWidth + 1, tWidth));
+	hvqm_put2(cP, cWidth, vrshrn_n_u16(vaddq_u16(a, b), 2));
+	tP += 2 * tWidth; cP += 2 * cWidth;
+	a = vaddl_u8(hvqm_rows2(tP, tWidth), hvqm_rows2(tP + 1, tWidth));
+	b = vaddl_u8(hvqm_rows2(tP + tWidth, tWidth), hvqm_rows2(tP + tWidth + 1, tWidth));
+	hvqm_put2(cP, cWidth, vrshrn_n_u16(vaddq_u16(a, b), 2));
+}
+#endif /* HVQM_NEON */
+
+#ifndef HVQM_NEON   /* scalar MotionComp_00 */
 static inline void _MotionComp_00(u8* cP, int cWidth, u8* tP, int tWidth)
 {
 	cP[0] = tP[0];
@@ -1331,10 +1581,12 @@ static inline void _MotionComp_00(u8* cP, int cWidth, u8* tP, int tWidth)
 	tP += tWidth;
 	cP += cWidth;
 }
+#endif
 
 /**
  * @note Offset vertically by half a sample
  */
+#ifndef HVQM_NEON   /* scalar MotionComp_01 */
 static inline void _MotionComp_01(u8* cP, int cWidth, u8* tP, int tWidth)
 {
 	u8* up = (u8*)tP;
@@ -1372,10 +1624,12 @@ static inline void _MotionComp_01(u8* cP, int cWidth, u8* tP, int tWidth)
 	dn += tWidth;
 	cP += cWidth;
 }
+#endif
 
 /**
  * @note Offset vertically by half a sample
  */
+#ifndef HVQM_NEON   /* scalar MotionComp_10 */
 static inline void _MotionComp_10(u8* cP, int cWidth, u8* tP, int tWidth)
 {
 	cP[0] = (tP[0] + tP[1] + 1) >> 1;
@@ -1406,10 +1660,12 @@ static inline void _MotionComp_10(u8* cP, int cWidth, u8* tP, int tWidth)
 	tP += tWidth;
 	cP += cWidth;
 }
+#endif
 
 /**
  * @note Offset by half a sample in both directions
  */
+#ifndef HVQM_NEON   /* scalar MotionComp_11 */
 static inline void _MotionComp_11(u8* cP, int cWidth, u8* tP, int tWidth)
 {
 	u8* up = (u8*)tP;
@@ -1447,6 +1703,7 @@ static inline void _MotionComp_11(u8* cP, int cWidth, u8* tP, int tWidth)
 	cP += cWidth;
 	dn += tWidth;
 }
+#endif
 
 static void _MotionComp(u8* cP, int cWidth, u8* tP, int tWidth, int selector)
 {
@@ -1458,6 +1715,53 @@ static void _MotionComp(u8* cP, int cWidth, u8* tP, int tWidth, int selector)
  * @note hpel = half-pixel offset. DX = horizontal, DY = vertical.
  */
 
+#ifdef HVQM_NEON
+// A whole macroblock's motion copy
+static inline void hvqm_mc8x8(u8* cP, const u8* tP, int pw, int sel)
+{
+	int r;
+	switch (sel) {
+	case 0:
+		for (r = 0; r < 8; r++) memcpy(cP + r * pw, tP + r * pw, 8);
+		break;
+	case 1:
+		for (r = 0; r < 8; r++) vst1_u8(cP + r * pw, vrhadd_u8(vld1_u8(tP + r * pw), vld1_u8(tP + (r + 1) * pw)));
+		break;
+	case 2:
+		for (r = 0; r < 8; r++) vst1_u8(cP + r * pw, vrhadd_u8(vld1_u8(tP + r * pw), vld1_u8(tP + r * pw + 1)));
+		break;
+	default:
+		for (r = 0; r < 8; r++) {
+			const uint16x8_t a = vaddl_u8(vld1_u8(tP + r * pw), vld1_u8(tP + r * pw + 1));
+			const uint16x8_t b = vaddl_u8(vld1_u8(tP + (r + 1) * pw), vld1_u8(tP + (r + 1) * pw + 1));
+			vst1_u8(cP + r * pw, vrshrn_n_u16(vaddq_u16(a, b), 2));
+		}
+		break;
+	}
+}
+
+static void MotionCompR(VideoState* state, MCHandler* mch, int tx, int ty, int cBegin, int cEnd)
+{
+	const int sel = ((tx & 1) << 1) | (ty & 1);
+	int c, i;
+	for (c = cBegin; c < cEnd; c++) {
+		MCPlane* pmc      = &mch->pln[c];
+		HVQPlaneDesc* sip = &state->pln[c];
+		const int pw      = sip->plane_width;
+		u8* t_top         = pmc->targ + ((tx >> (sip->h_shift + 1)) + (ty >> (sip->v_shift + 1)) * pw);
+		u32* iofsP        = sip->imgUscan;
+		const int blocks  = sip->nblocks_mcb;
+		if (blocks == 4 && iofsP[0] == 0 && iofsP[1] == 4 && iofsP[2] == (u32)(4 * pw) && iofsP[3] == (u32)(4 * pw + 4)) {
+			hvqm_mc8x8(pmc->blk_top, t_top, pw, sel);
+			continue;
+		}
+		for (i = 0; i < blocks; i++) {
+			const int offset = (int)iofsP[i];
+			_MotionComp(pmc->blk_top + offset, pw, t_top + offset, pw, sel);
+		}
+	}
+}
+#else
 static void MotionComp(VideoState* state, MCHandler* mch, int tx, int ty)
 {
 	int c, i;
@@ -1528,6 +1832,7 @@ static void MotionComp(VideoState* state, MCHandler* mch, int tx, int ty)
 		}
 	}
 }
+#endif /* HVQM_NEON */
 
 static void decode_PB_dc(VideoState* ws, MCHandler* mch)
 {
@@ -1641,6 +1946,48 @@ static void decode_PB_cc(VideoState* ws, MCHandler* mc, int proctype, int mcbtyp
 /**
  * @TODO: Documentation
  */
+#ifdef HVQM_NEON
+static void PrediAotBlock(VideoState* ws, u8* blk, u8* mblk, int blkWidth, u8 nbasis, u8* nestPtr, int nestWidth, int p, int selector)
+{
+	int32x4_t acc[4];
+	u8 mvc[16];
+	s32 avr = hvqm_aot_sum(ws, acc, nbasis - 1, nestPtr, nestWidth, p, 1);
+	_MotionComp(mvc, 4, mblk, blkWidth, selector);
+	const uint8x16_t pv = vld1q_u8(mvc);
+
+	// mean of the prediction
+	const uint16x8_t s16_ = vpaddlq_u8(pv);
+	const uint32x4_t s32_ = vpaddlq_u16(s16_);
+	const uint64x2_t s64_ = vpaddlq_u32(s32_);
+	const s32 mean = (s32)((vgetq_lane_u64(s64_, 0) + vgetq_lane_u64(s64_, 1) + 8) >> 4);
+	const int max = hvqm_max16(pv) - mean;
+	const int min = hvqm_min16(pv) - mean;
+
+	const int mns = ws->aotscale_q;
+	avr = (decodeSOvfSym(&ws->dcval[p], ws->dc_min, ws->dc_max) >> ws->dc_scale_q << mns) - avr;
+	const s32 scl = (decodeSOvfSym(&ws->dcval[p], ws->dc_min, ws->dc_max) >> ws->dc_scale_q) * mcdivTable[max - min];
+
+	// sum += avr +
+	const uint16x8_t lo = vmovl_u8(vget_low_u8(pv));
+	const uint16x8_t hi = vmovl_u8(vget_high_u8(pv));
+	int32x4_t m0 = vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(lo)));
+	int32x4_t m1 = vreinterpretq_s32_u32(vmovl_u16(vget_high_u16(lo)));
+	int32x4_t m2 = vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(hi)));
+	int32x4_t m3 = vreinterpretq_s32_u32(vmovl_u16(vget_high_u16(hi)));
+	const int32x4_t vmean = vdupq_n_s32(mean);
+	const int32x4_t va    = vdupq_n_s32(avr);
+	const int32x4_t sh    = vdupq_n_s32(-mns);
+	acc[0] = vmlaq_n_s32(vaddq_s32(acc[0], va), vsubq_s32(m0, vmean), scl);
+	acc[1] = vmlaq_n_s32(vaddq_s32(acc[1], va), vsubq_s32(m1, vmean), scl);
+	acc[2] = vmlaq_n_s32(vaddq_s32(acc[2], va), vsubq_s32(m2, vmean), scl);
+	acc[3] = vmlaq_n_s32(vaddq_s32(acc[3], va), vsubq_s32(m3, vmean), scl);
+	hvqm_store4x4(blk, blkWidth,
+	              vaddq_s32(m0, vshlq_s32(acc[0], sh)), vaddq_s32(m1, vshlq_s32(acc[1], sh)),
+	              vaddq_s32(m2, vshlq_s32(acc[2], sh)), vaddq_s32(m3, vshlq_s32(acc[3], sh)));
+}
+#endif /* HVQM_NEON */
+
+#ifndef HVQM_NEON   /* scalar PrediAotBlock */
 static void PrediAotBlock(VideoState* ws, u8* blk, u8* mblk, int blkWidth, u8 nbasis, u8* nestPtr, int nestWidth, int p, int selector)
 {
 	s32 sum[16];
@@ -1814,15 +2161,16 @@ static void PrediAotBlock(VideoState* ws, u8* blk, u8* mblk, int blkWidth, u8 nb
 		blk += blkWidth;
 	}
 }
+#endif
 
 /**
  * @TODO: Documentation
  */
-static void MCBlockDecMCNest(VideoState* ws, MCHandler* mch, int tx, int ty)
+static void MCBlockDecMCNestR(VideoState* ws, MCHandler* mch, int tx, int ty, int cBegin, int cEnd)
 {
 	int c, i;
 	u8* nestP = mch->pln[Y_IDX].targ + ((tx >> 1) - 32) + ((ty >> 1) - 16) * ws->pln[Y_IDX].plane_width;
-	for (c = 0; c < HVQM_PLANE_COUNT; c++) {
+	for (c = cBegin; c < cEnd; c++) {
 		MCPlane* pmc      = &mch->pln[c];
 		HVQPlaneDesc* sip = &ws->pln[c];
 		int plane_dx      = (tx >> sip->h_shift + 1);
@@ -1855,10 +2203,10 @@ static void MCBlockDecMCNest(VideoState* ws, MCHandler* mch, int tx, int ty)
 /**
  * @TODO: Documentation
  */
-static void MCBlockDecDCNest(VideoState* ws, MCHandler* mch)
+static void MCBlockDecDCNestR(VideoState* ws, MCHandler* mch, int cBegin, int cEnd)
 {
 	int c;
-	for (c = 0; c < HVQM_PLANE_COUNT; c++) {
+	for (c = cBegin; c < cEnd; c++) {
 		MCPlane* pmc       = &mch->pln[c];
 		_tagHVQData* dataP = pmc->data;
 		int plane_width    = ws->pln[c].plane_width;
@@ -1981,11 +2329,95 @@ static int getMCBtype(BitBufferWithTree* code, RLDecoder* flag)
 /**
  * @TODO: Documentation
  */
+// Plane-ranged descriptor decode
+static void decode_PB_dc_range(VideoState* ws, MCHandler* mch, int cBegin, int cEnd)
+{
+	int c, i;
+	for (c = cBegin; c < cEnd; c++) {
+		MCPlane* pmc = &mch->pln[c];
+		u16* bofsP   = ws->pln[c].bibUscan;
+		int blocks   = ws->pln[c].nblocks_mcb;
+		for (i = 0; i < blocks; i++) {
+			int j            = *bofsP++;
+			pmc->data[j].dcv = pmc->prev_dcv = pmc->prev_dcv + decodeSOvfSym(&ws->dcval[c], ws->dc_min, ws->dc_max);
+		}
+	}
+}
+
+static void decode_PB_cc_range(VideoState* ws, MCHandler* mc, int proctype, int mcbtype, int cBegin, int cEnd)
+{
+	const u8 cc = (u8)((mcbtype << 5) | (proctype << 4));
+	int p, i, j, blocks;
+	u16* bofsP;
+	if (proctype == 1) {
+		for (p = cBegin; p < cEnd; p++) {
+			_tagHVQData* dataP = mc->pln[p].data;
+			bofsP  = ws->pln[p].bibUscan;
+			blocks = ws->pln[p].nblocks_mcb;
+			for (i = 0; i < blocks; i++) {
+				dataP[*bofsP++].bnm = cc;
+			}
+		}
+		return;
+	}
+	if (cBegin == Y_IDX) {
+		_tagHVQData* ydat          = mc->pln[Y_IDX].data;
+		HVQPlaneDesc* sip          = &ws->pln[LUMA_IDX];
+		BitBufferWithTree* symcode = &ws->bsnum[LUMA_IDX];
+		BitBufferWithTree* runcode = &ws->bsrun[LUMA_IDX];
+		bofsP  = sip->bibUscan;
+		blocks = sip->nblocks_mcb;
+		for (i = 0; i < blocks; i++) {
+			j = *bofsP++;
+			if (mc->pln[Y_IDX].bsrunleng == 0) {
+				s16 sym = decodeHuff(symcode);
+				if (sym == 0) {
+					ydat[j].bnm              = cc;
+					mc->pln[Y_IDX].bsrunleng = decodeHuff(runcode);
+				} else {
+					ydat[j].bnm = cc | sym;
+				}
+			} else {
+				ydat[j].bnm = cc;
+				mc->pln[Y_IDX].bsrunleng--;
+			}
+		}
+	}
+	if (cEnd > U_IDX) {
+		_tagHVQData* udat          = mc->pln[U_IDX].data;
+		_tagHVQData* vdat          = mc->pln[V_IDX].data;
+		HVQPlaneDesc* sip          = &ws->pln[CHROMA_IDX];
+		BitBufferWithTree* symcode = &ws->bsnum[CHROMA_IDX];
+		BitBufferWithTree* runcode = &ws->bsrun[CHROMA_IDX];
+		bofsP  = sip->bibUscan;
+		blocks = sip->nblocks_mcb;
+		for (i = 0; i < blocks; i++) {
+			j = *bofsP++;
+			if (mc->pln[U_IDX].bsrunleng == 0) {
+				s16 sym = decodeHuff(symcode);
+				if (sym == 0) {
+					udat[j].bnm              = cc;
+					vdat[j].bnm              = cc;
+					mc->pln[U_IDX].bsrunleng = decodeHuff(runcode);
+				} else {
+					udat[j].bnm = cc | ((sym >> 0) & 0xF);
+					vdat[j].bnm = cc | ((sym >> 4) & 0xF);
+				}
+			} else {
+				udat[j].bnm = cc;
+				vdat[j].bnm = cc;
+				mc->pln[U_IDX].bsrunleng--;
+			}
+		}
+	}
+}
+
 static void spread_PB_descMap(SeqObj* obj, MCHandler* mch)
 {
 	VideoState* ws = (VideoState*)obj->ws;
-	struct RLDecoder proc;
-	struct RLDecoder type;
+	// Zeroed
+	struct RLDecoder proc = { 0 };
+	struct RLDecoder type = { 0 };
 	int i, j;
 
 	initMCBproc(&ws->mcaot, &proc);
@@ -2010,6 +2442,13 @@ static void spread_PB_descMap(SeqObj* obj, MCHandler* mch)
 /**
  * @TODO: Documentation
  */
+static void MCBlockDecDCNest(VideoState* ws, MCHandler* mch) { MCBlockDecDCNestR(ws, mch, 0, HVQM_PLANE_COUNT); }
+static void MCBlockDecMCNest(VideoState* ws, MCHandler* mch, int tx, int ty) { MCBlockDecMCNestR(ws, mch, tx, ty, 0, HVQM_PLANE_COUNT); }
+#ifdef HVQM_NEON
+static void MotionComp(VideoState* state, MCHandler* mch, int tx, int ty) { MotionCompR(state, mch, tx, ty, 0, HVQM_PLANE_COUNT); }
+#endif
+
+#if !defined(__vita__)
 static void BpicPlaneDec(SeqObj* seqObj, u8* lin_top, u8* forw, u8* back)
 {
 	VideoState* ws;
@@ -2048,20 +2487,299 @@ static void BpicPlaneDec(SeqObj* seqObj, u8* lin_top, u8* forw, u8* back)
 				}
 				getMVector(&vx, &ws->mvecx, ws->fcode[0][dir]);
 				getMVector(&vy, &ws->mvecy, ws->fcode[1][dir]);
+				{
+					const int tx_ = (i << 1) + vx, ty_ = (j << 1) + vy;
+					int c_;
+					for (c_ = 0; c_ < HVQM_PLANE_COUNT; c_++) {
+						const HVQPlaneDesc* pd_ = &ws->pln[c_];
+						const u8* t_ = mch.pln[c_].targ + ((tx_ >> (pd_->h_shift + 1)) + (ty_ >> (pd_->v_shift + 1)) * pd_->plane_width);
+						const int rows_ = c_ == 0 ? 9 : 5;
+						int r_;
+						for (r_ = 0; r_ < rows_; r_++) __builtin_prefetch(t_ + r_ * pd_->plane_width);
+					}
+				}
 
 				// compute half-pixel position of reference macroblock
 				// see getMCBproc()
 				mtype = (cc >> 4) & 1;
-				if (mtype == 0)
+				if (mtype == 0) {
 					MCBlockDecMCNest(ws, &mch, (i << 1) + vx, (j << 1) + vy);
-				else
+				} else {
 					MotionComp(ws, &mch, (i << 1) + vx, (j << 1) + vy);
+				}
 			}
 			setMCNextBlk(&mch);
 		}
 		setMCDownBlk(&mch);
 	}
 }
+#else /* __vita__: the picture's planes are decoded on two threads */
+#include <psp2/kernel/threadmgr.h>
+#include <stdio.h>
+// Two-thread picture decode
+typedef struct { u8 cc; s8 dir; s16 vx, vy; } HvqmMbInfo;
+#define HVQM_MAX_MBS (128 * 96)
+static HvqmMbInfo sMbInfo[HVQM_MAX_MBS];
+static u8 sMbType[HVQM_MAX_MBS], sMbProc[HVQM_MAX_MBS];   // per macroblock
+typedef struct { int kind; VideoState* ws; SeqObj* obj; MCHandler mch; u8* outbuf; int jBegin, jEnd; } HvqmJob;   /* jBegin < 0 */
+static HvqmJob sJob;
+static SceUID sHelperThread = -1, sHelperWork = -1, sHelperDone = -1;
+static int sHelperState = 0;   // 0 not started, 1 running, -1 unavailable
+
+// Descriptor pass for a plane range
+static void hvqm_desc_planes(VideoState* ws, SeqObj* obj, MCHandler* mch, int cBegin, int cEnd)
+{
+	int mbi = 0;
+	int i, j;
+	for (j = 0; j < obj->frame_height; j += 8) {
+		setMCTop(mch);
+		for (i = 0; i < obj->frame_width; i += 8) {
+			const int t = sMbType[mbi], pr = sMbProc[mbi];
+			mbi++;
+			if (t == 0) {
+				decode_PB_dc_range(ws, mch, cBegin, cEnd);
+				decode_PB_cc_range(ws, mch, 0, 0, cBegin, cEnd);
+			} else {
+				int c;
+				for (c = cBegin; c < cEnd; c++) mch->pln[c].prev_dcv = 0x7F;
+				decode_PB_cc_range(ws, mch, pr, t, cBegin, cEnd);
+			}
+			setMCNextBlk(mch);
+		}
+		setMCDownBlk(mch);
+	}
+}
+
+// Plane range of a P/B picture
+static void hvqm_pb_planes(VideoState* ws, SeqObj* obj, MCHandler* mch, int cBegin, int cEnd, int jBegin, int jEnd)
+{
+	int dir = -1;
+	int mbi = (jBegin / 8) * (obj->frame_width / 8);
+	int i, j;
+	for (j = 0; j < jBegin; j += 8) setMCDownBlk(mch);
+	for (j = jBegin; j < jEnd; j += 8) {
+		setMCTop(mch);
+		for (i = 0; i < obj->frame_width; i += 8) {
+			const HvqmMbInfo* m = &sMbInfo[mbi++];
+			if (m->dir < 0) {
+				MCBlockDecDCNestR(ws, mch, cBegin, cEnd);
+			} else {
+				const int tx = (i << 1) + m->vx, ty = (j << 1) + m->vy;
+				if (m->dir != dir) {
+					dir = m->dir;
+					setMCTarget(mch, dir);
+				}
+				{
+					int c_;
+					for (c_ = cBegin; c_ < cEnd; c_++) {
+						const HVQPlaneDesc* pd_ = &ws->pln[c_];
+						const u8* t_ = mch->pln[c_].targ + ((tx >> (pd_->h_shift + 1)) + (ty >> (pd_->v_shift + 1)) * pd_->plane_width);
+						const int rows_ = c_ == 0 ? 9 : 5;
+						int r_;
+						for (r_ = 0; r_ < rows_; r_++) __builtin_prefetch(t_ + r_ * pd_->plane_width);
+					}
+				}
+				if (((m->cc >> 4) & 1) == 0) {
+					MCBlockDecMCNestR(ws, mch, tx, ty, cBegin, cEnd);
+				} else {
+					MotionCompR(ws, mch, tx, ty, cBegin, cEnd);
+				}
+			}
+			setMCNextBlk(mch);
+		}
+		setMCDownBlk(mch);
+	}
+}
+
+static void hvqm_pb_band_cursors(VideoState* ws, SeqObj* obj, const MCHandler* mch0, int jEnd, VideoState* wsH)
+{
+	MCHandler mch = *mch0;
+	int mbi = 0, i, j, c;
+	for (j = 0; j < jEnd; j += 8) {
+		setMCTop(&mch);
+		for (i = 0; i < obj->frame_width; i += 8) {
+			const HvqmMbInfo* m = &sMbInfo[mbi++];
+			const int pureMC = m->dir >= 0 && ((m->cc >> 4) & 1) != 0;
+			const int inter  = m->dir >= 0;
+			if (!pureMC) {
+				for (c = 0; c < HVQM_PLANE_COUNT; c++) {
+					const _tagHVQData* d = mch.pln[c].data;
+					const u16* bofsP = ws->pln[c].bibUscan;
+					const int blocks = ws->pln[c].nblocks_mcb;
+					int k;
+					for (k = 0; k < blocks; k++) {
+						const u8 nb = d[*bofsP++].bnm & 0xF;
+						if (nb == 0) continue;
+						if (nb == 6) { wsH->aotcd[c].ptr += 16; continue; }
+						if (inter) {
+							wsH->aotcd[c].ptr += 2 * (nb - 1);
+							(void)decodeSOvfSym(&wsH->dcval[c], ws->dc_min, ws->dc_max);
+							(void)decodeSOvfSym(&wsH->dcval[c], ws->dc_min, ws->dc_max);
+						} else {
+							wsH->aotcd[c].ptr += 2 * nb;
+						}
+					}
+				}
+			}
+			setMCNextBlk(&mch);
+		}
+		setMCDownBlk(&mch);
+	}
+}
+
+static VideoState sWsHelper;
+
+static int hvqm_helper_main(SceSize args, void* argp)
+{
+	(void)args; (void)argp;
+	for (;;) {
+		sceKernelWaitSema(sHelperWork, 1, NULL);
+		if (sJob.kind == 0) {
+			MCHandler h = sJob.mch;
+			if (sJob.jBegin < 0) {
+				hvqm_pb_planes(sJob.ws, sJob.obj, &h, U_IDX, HVQM_PLANE_COUNT, 0, sJob.obj->frame_height);   /* the chroma planes, whole frame */
+			} else {
+				hvqm_pb_planes(sJob.ws, sJob.obj, &h, Y_IDX, HVQM_PLANE_COUNT, sJob.jBegin, sJob.jEnd);      /* every plane, the lower band */
+			}
+		} else if (sJob.kind == 2) {
+			MCHandler h = sJob.mch;
+			hvqm_desc_planes(sJob.ws, sJob.obj, &h, U_IDX, HVQM_PLANE_COUNT);
+		} else {
+			u8* out = sJob.outbuf + sJob.ws->pln[Y_IDX].plane_size;
+			IpicPlaneDec(sJob.ws, U_IDX, out);
+			out += sJob.ws->pln[U_IDX].plane_size;
+			IpicPlaneDec(sJob.ws, V_IDX, out);
+		}
+		sceKernelSignalSema(sHelperDone, 1);
+	}
+	return 0;
+}
+
+static int hvqm_helper_start(void)
+{
+	if (sHelperState) return sHelperState > 0;
+	sHelperWork = sceKernelCreateSema("hvqm_work", 0, 0, 1, NULL);
+	sHelperDone = sceKernelCreateSema("hvqm_done", 0, 0, 1, NULL);
+	sHelperThread = sceKernelCreateThread("hvqm_chroma", hvqm_helper_main, sceKernelGetThreadCurrentPriority(), 128 * 1024, 0,
+	                                      SCE_KERNEL_CPU_MASK_USER_0 | SCE_KERNEL_CPU_MASK_USER_2, NULL);
+	if (sHelperWork < 0 || sHelperDone < 0 || sHelperThread < 0 || sceKernelStartThread(sHelperThread, 0, NULL) < 0) {
+		printf("[HVQM] chroma helper thread unavailable (0x%08X 0x%08X 0x%08X): single-threaded decode\n",
+		       (unsigned)sHelperWork, (unsigned)sHelperDone, (unsigned)sHelperThread);
+		sHelperState = -1;
+		return 0;
+	}
+	sHelperState = 1;
+	return 1;
+}
+
+static void BpicPlaneDec(SeqObj* seqObj, u8* lin_top, u8* forw, u8* back)
+{
+	VideoState* ws = (VideoState*)seqObj->ws;
+	MCHandler mch;
+	const int nmb = (seqObj->frame_width / 8) * (seqObj->frame_height / 8);
+	int i, j;
+
+	initMCHandler(ws, &mch, lin_top, forw, back);
+	if (nmb <= HVQM_MAX_MBS && hvqm_helper_start()) {
+		struct RLDecoder proc;
+		struct RLDecoder type;
+		int mbi = 0;
+		initMCBproc(&ws->mcaot, &proc);
+		initMCBtype(&ws->mstat, &type);
+		for (j = 0; j < seqObj->frame_height; j += 8) {
+			for (i = 0; i < seqObj->frame_width; i += 8) {
+				getMCBtype(&ws->mstat, &type);
+				sMbType[mbi] = (u8)type.status;
+				sMbProc[mbi] = type.status == 0 ? 0 : (u8)getMCBproc(&ws->mcaot, &proc);
+				mbi++;
+			}
+		}
+		sJob.kind = 2; sJob.ws = ws; sJob.obj = seqObj; sJob.mch = mch;
+		sceKernelSignalSema(sHelperWork, 1);
+		{
+			MCHandler l = mch;
+			hvqm_desc_planes(ws, seqObj, &l, Y_IDX, U_IDX);
+		}
+		sceKernelWaitSema(sHelperDone, 1, NULL);
+	} else {
+		spread_PB_descMap(seqObj, &mch);
+	}
+	resetMCHandler(ws, &mch, lin_top);
+
+	// Pass 1: kinds and motion vectors
+	{
+		MCHandler t = mch;
+		int dir = -1, vx = 0, vy = 0, mbi = 0;
+		for (j = 0; j < seqObj->frame_height; j += 8) {
+			setMCTop(&t);
+			for (i = 0; i < seqObj->frame_width; i += 8) {
+				const u8 cc = t.pln[Y_IDX].data->bnm;
+				int d = (cc >> 5) & 3;
+				HvqmMbInfo* m = &sMbInfo[mbi < HVQM_MAX_MBS ? mbi : HVQM_MAX_MBS - 1];
+				mbi++;
+				m->cc = cc;
+				if (d == 0) {
+					m->dir = -1; m->vx = 0; m->vy = 0;
+				} else {
+					if (--d != dir) {
+						dir = d;
+						vx = vy = 0;
+					}
+					getMVector(&vx, &ws->mvecx, ws->fcode[0][dir]);
+					getMVector(&vy, &ws->mvecy, ws->fcode[1][dir]);
+					m->dir = (s8)dir; m->vx = (s16)vx; m->vy = (s16)vy;
+				}
+				setMCNextBlk(&t);
+			}
+			setMCDownBlk(&t);
+		}
+	}
+
+	// Pass 2: reconstruction
+	if (nmb <= HVQM_MAX_MBS && hvqm_helper_start()) {
+		static int splitOn = 1;
+		const int H = seqObj->frame_height;
+		int splitRow, c;
+		u8* expAot[HVQM_PLANE_COUNT];
+		u8* expDcPtr[HVQM_PLANE_COUNT];
+		int expDcShift[HVQM_PLANE_COUNT];
+		splitRow = ((H / 8) * 50 / 100) * 8;
+		if (splitRow < 8) splitRow = 8;
+		if (splitRow > H - 8) splitRow = H - 8;
+		if (splitOn) {
+			sWsHelper = *ws;
+			hvqm_pb_band_cursors(ws, seqObj, &mch, splitRow, &sWsHelper);
+			for (c = 0; c < HVQM_PLANE_COUNT; c++) {
+				expAot[c]     = sWsHelper.aotcd[c].ptr;
+				expDcPtr[c]   = sWsHelper.dcval[c].str.ptr;
+				expDcShift[c] = sWsHelper.dcval[c].str.shift;
+			}
+			sJob.kind = 0; sJob.ws = &sWsHelper; sJob.obj = seqObj; sJob.mch = mch;
+			sJob.jBegin = splitRow; sJob.jEnd = H;
+		} else {
+			sJob.kind = 0; sJob.ws = ws; sJob.obj = seqObj; sJob.mch = mch;
+			sJob.jBegin = -1; sJob.jEnd = H;
+		}
+		sceKernelSignalSema(sHelperWork, 1);
+		{
+			MCHandler l = mch;
+			if (splitOn) hvqm_pb_planes(ws, seqObj, &l, Y_IDX, HVQM_PLANE_COUNT, 0, splitRow);
+			else         hvqm_pb_planes(ws, seqObj, &l, Y_IDX, U_IDX, 0, H);
+		}
+		sceKernelWaitSema(sHelperDone, 1, NULL);
+		if (splitOn) {
+			for (c = 0; c < HVQM_PLANE_COUNT; c++) {
+				if (ws->aotcd[c].ptr != expAot[c] || ws->dcval[c].str.ptr != expDcPtr[c]
+				    || ws->dcval[c].str.shift != expDcShift[c]) {
+					splitOn = 0;
+				}
+			}
+		}
+	} else {
+		hvqm_pb_planes(ws, seqObj, &mch, Y_IDX, HVQM_PLANE_COUNT, 0, seqObj->frame_height);
+	}
+}
+#endif /* __vita__ */
 
 /**
  * @TODO: Documentation
@@ -2213,6 +2931,14 @@ void HVQM4DecodeIpic(SeqObj* obj, void* code, void* outbuf)
 	// 70x38 nest copied from upper 4 bits of DC values somewhere in the luma plane
 	MakeNest(ws, read16(code, 4), read16(code, 6));
 
+#if defined(__vita__)
+	if (hvqm_helper_start()) {
+		sJob.kind = 1; sJob.ws = ws; sJob.outbuf = (u8*)outbuf;
+		sceKernelSignalSema(sHelperWork, 1);
+		IpicPlaneDec(ws, Y_IDX, outbuf);
+		sceKernelWaitSema(sHelperDone, 1, NULL);
+	} else
+#endif
 	for (i = 0; i < HVQM_PLANE_COUNT; i++) {
 		IpicPlaneDec(ws, i, outbuf);
 		outbuf = (u8*)outbuf + ws->pln[i].plane_size;

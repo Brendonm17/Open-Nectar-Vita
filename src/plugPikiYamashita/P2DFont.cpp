@@ -1,4 +1,11 @@
 #include "DebugLog.h"
+#ifdef __vita__
+#include <psp2/pvf.h>
+#include <malloc.h>
+#include <stdio.h>
+#include <string.h>
+#include "vita_button_glyphs.h"
+#endif
 #include "P2D/Font.h"
 #include "Texture.h"
 #include "sysNew.h"
@@ -182,3 +189,125 @@ f32 P2DFont::drawChar(f32 xPos, f32 yPos, int charCode, int drawWidth, int drawH
 
 	return x1 - x0;
 }
+
+#ifdef __vita__
+namespace {
+// PS Vita button glyphs, rasterised from sa0:data/font/pvf/psexchar.pvf.
+enum { kPvfCell = 48, kPvfCells = 11, kPvfInk = 40 };
+// Cells in pc_window_button_glyph order.
+// Square, Triangle, L, R, Start, Select, left stick, right stick, d-pad.
+const ScePvfCharCode kPvfChars[kPvfCells] = { '&', '%', '\'', '$', '0', '1', '5', '4', '2', '3', ',' };
+
+ScePvfPointer pvfAlloc(ScePvfPointer, ScePvfU32 size) { return memalign(sizeof(int), (size + 3u) & ~3u); }
+ScePvfPointer pvfRealloc(ScePvfPointer, ScePvfPointer p, ScePvfU32 size) { return realloc(p, (size + 3u) & ~3u); }
+void          pvfFree(ScePvfPointer, ScePvfPointer p) { free(p); }
+
+// One glyph's coverage centred in a cell-sized 8-bit buffer.
+bool pvfRasterCell(ScePvfFontId font, ScePvfCharCode code, u8* cov)
+{
+	ScePvfCharInfo ci;
+	if (scePvfGetCharInfo(font, code, &ci) < 0) return false;
+	const int bw = ci.bitmapWidth, bh = ci.bitmapHeight;
+	if (bw <= 0 || bh <= 0 || bw > kPvfCell || bh > kPvfCell) return false;
+	const int dx = (kPvfCell - bw) / 2, dy = (kPvfCell - bh) / 2;
+	ScePvfUserImageBufferRec img;
+	memset(&img, 0, sizeof(img));
+	img.pixelFormat  = SCE_PVF_USERIMAGE_DIRECT8;
+	img.xPos64       = (dx << 6) - ci.glyphMetrics.horizontalBearingX64;
+	img.yPos64       = (dy << 6) + ci.glyphMetrics.horizontalBearingY64;
+	img.rect.width   = kPvfCell;
+	img.rect.height  = kPvfCell;
+	img.bytesPerLine = kPvfCell;
+	img.buffer       = cov;
+	memset(cov, 0, kPvfCell * kPvfCell);
+	return scePvfGetCharGlyphImage(font, code, &img) == 0;
+}
+
+// The strip as GX RGBA8 (4x4 tiles: AR pairs then GB pairs), or null.
+u8* pvfBuildStrip()
+{
+	ScePvfError   err  = 0;
+	ScePvfInitRec init = { nullptr, 1, nullptr, nullptr, pvfAlloc, pvfRealloc, pvfFree };
+	ScePvfLibId   lib  = scePvfNewLib(&init, &err);
+	if (!lib || err) { printf("ERROR: ScePvf library failed (0x%08x); drawn button glyphs used\n", (unsigned)err); return nullptr; }
+	scePvfSetEM(lib, 72.0f / (10.125f * 128.0f));
+	scePvfSetResolution(lib, 128.0f, 128.0f);
+	ScePvfFontId font = scePvfOpenUserFile(lib, (ScePvfPointer) "sa0:data/font/pvf/psexchar.pvf", 1, &err);
+	if (!font || err) {
+		printf("ERROR: psexchar.pvf unavailable (0x%08x); drawn button glyphs used\n", (unsigned)err);
+		scePvfDoneLib(lib);
+		return nullptr;
+	}
+	f32 size = 10.125f;
+	scePvfSetCharSize(font, size, size);
+	ScePvfCharInfo ci;
+	bool ok = scePvfGetCharInfo(font, '%', &ci) == 0 && ci.bitmapHeight > 0;
+	if (ok) {
+		size = size * f32(kPvfInk) / f32(ci.bitmapHeight);
+		scePvfSetCharSize(font, size, size);
+	}
+	const int W = kPvfCell * kPvfCells, H = kPvfCell;
+	u8* strip = ok ? (u8*)memalign(32, W * H * 4) : nullptr;
+	if (strip) memset(strip, 0, W * H * 4);
+	static u8 cov[kPvfCell * kPvfCell];
+	for (int c = 0; strip && c < kPvfCells; c++) {
+		if (!pvfRasterCell(font, kPvfChars[c], cov)) { ok = false; break; }
+		for (int y = 0; y < kPvfCell; y++) {
+			for (int x = 0; x < kPvfCell; x++) {
+				const int ax = c * kPvfCell + x;
+				u8* tile     = strip + ((y / 4) * (W / 4) + (ax / 4)) * 64;
+				const int in = ((y & 3) * 4 + (ax & 3)) * 2;
+				tile[in]          = cov[y * kPvfCell + x]; // A
+				tile[in + 1]      = 255;                   // R
+				tile[32 + in]     = 255;                   // G
+				tile[32 + in + 1] = 255;                   // B
+			}
+		}
+	}
+	scePvfClose(font);
+	scePvfDoneLib(lib);
+	if (!ok) { printf("ERROR: psexchar.pvf glyph rasterisation failed; drawn button glyphs used\n"); free(strip); return nullptr; }
+	return strip;
+}
+
+Texture* sButtonGlyphs = nullptr;
+int      sGlyphCell    = 0;
+} // namespace
+
+f32 P2DFont::drawButtonGlyph(f32 xPos, f32 yPos, int cell, int drawHeight)
+{
+	PikiPcPersistentAlloc pcKeep;
+	if (!sButtonGlyphs) {
+		sButtonGlyphs = new Texture();
+		if (u8* strip = pvfBuildStrip()) {
+			sButtonGlyphs->createBuffer(kPvfCell * kPvfCells, kPvfCell, TEX_FMT_RGBA8, strip);
+			sGlyphCell = kPvfCell;
+		} else {
+			sButtonGlyphs->createBuffer(NECTAR_BUTTON_GLYPH_W, NECTAR_BUTTON_GLYPH_H, TEX_FMT_RGBA8, (void*)nectar_button_glyphs);
+			sGlyphCell = NECTAR_BUTTON_GLYPH_CELL;
+		}
+		sButtonGlyphs->mTexFlags = Texture::TEX_CLAMP_S | Texture::TEX_CLAMP_T;
+	}
+	if (sButtonGlyphs->mAttachName == -1) sButtonGlyphs->attach();
+	GXLoadTexObj(sButtonGlyphs->mTexObj, GX_TEXMAP0);
+	const f32 yScale = f32(drawHeight) / getHeight();
+	const f32 y0     = yPos - getAscent() * yScale;
+	const f32 y1     = yPos + getDescent() * yScale;
+	const f32 side   = y1 - y0;
+	const f32 x0 = xPos, x1 = xPos + side;
+	const f32 cw = f32(sGlyphCell) * sButtonGlyphs->mWidthFactor;
+	const u16 s0 = u16(cell * cw * 32768.0f), s1 = u16((cell + 1) * cw * 32768.0f);
+	const u16 t0 = 0, t1 = 32768;
+	GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
+	GXBegin(GX_QUADS, GX_VTXFMT0, 4);
+	const u32 top = packGXColor(Colour(255, 255, 255, mTLColour.a)), bottom = packGXColor(Colour(255, 255, 255, mBLColour.a));
+	GXPosition3f32(x0, y0, 0.0f); GXColor1u32(top);    GXTexCoord2u16(s0, t0);
+	GXPosition3f32(x1, y0, 0.0f); GXColor1u32(top);    GXTexCoord2u16(s1, t0);
+	GXPosition3f32(x1, y1, 0.0f); GXColor1u32(bottom); GXTexCoord2u16(s1, t1);
+	GXPosition3f32(x0, y1, 0.0f); GXColor1u32(bottom); GXTexCoord2u16(s0, t1);
+	GXEnd();
+	GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_S16, 0);
+	GXLoadTexObj(mFont->mTexture->mTexObj, GX_TEXMAP0);
+	return side;
+}
+#endif

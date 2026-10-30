@@ -10,6 +10,48 @@
 #include "zen/DrawMenu.h"
 #include "zen/ZenController.h"
 #include "zen/ogSub.h"
+#if defined(__vita__)
+#include "settings/pc_settings.h"
+
+// Options rows: Sound / Rumble / High Scores / More.
+static void vitaSetupMoreItem(zen::DrawMenu* menu)
+{
+	P2DScreen* scr = menu->getScreenPtr();
+	static char sMoreLabel[] = "More";
+	P2DTextBox* he[4];
+	P2DTextBox* hm[4];
+	P2DPane* il[4];
+	P2DPane* ir[4];
+	char tag[8];
+	for (int k = 0; k < 4; k++) {
+		sprintf(tag, "he%02d", k);
+		he[k] = static_cast<P2DTextBox*>(scr->search(zen::P2DPaneLibrary::makeTag(tag), true));
+		sprintf(tag, "hm%02d", k);
+		hm[k] = static_cast<P2DTextBox*>(scr->search(zen::P2DPaneLibrary::makeTag(tag), true));
+		sprintf(tag, "i%02dl", k);
+		il[k] = scr->search(zen::P2DPaneLibrary::makeTag(tag), true);
+		sprintf(tag, "i%02dr", k);
+		ir[k] = scr->search(zen::P2DPaneLibrary::makeTag(tag), true);
+	}
+	he[1]->setString(he[2]->getString());
+	hm[1]->setString(hm[2]->getString());
+	he[2]->setString(he[3]->getString());
+	hm[2]->setString(hm[3]->getString());
+	he[3]->setString(sMoreLabel);
+	hm[3]->setString(sMoreLabel);
+	he[1]->show();
+	hm[1]->show();
+	// Per-column row-0 reference.
+	P2DPane* cols[4][4] = { { he[0], he[1], he[2], he[3] }, { hm[0], hm[1], hm[2], hm[3] }, { il[0], il[1], il[2], il[3] }, { ir[0], ir[1], ir[2], ir[3] } };
+	for (int c = 0; c < 4; c++) {
+		const int x0 = cols[c][0]->getPosH();
+		const int y0 = cols[c][0]->getPosV() - 7;
+		for (int k = 0; k < 4; k++) {
+			cols[c][k]->add(x0 - cols[c][k]->getPosH(), (y0 + 30 * k) - cols[c][k]->getPosV());
+		}
+	}
+}
+#endif
 
 /**
  * @note UNUSED Size: 00009C
@@ -116,6 +158,8 @@ zen::ogScrTitleMgr::ogScrTitleMgr()
 	mRumbleMenu->setCancelSE(ogEnumFix(SYSSE_DECIDE1, JACSYS_Decide1));
 	mSoundMenu->setCancelSE(ogEnumFix(SYSSE_DECIDE1, JACSYS_Decide1));
 #if defined(VERSION_PIKIDEMO) || defined(VERSION_GPIJ01) || defined(VERSION_GPIP01)
+#elif defined(__vita__)
+	vitaSetupMoreItem(mOptionsMenu);
 #else
 	mOptionsMenu->setMenuItemActiveSw(1, false);
 #endif
@@ -184,10 +228,13 @@ zen::ogScrTitleMgr::TitleStatus zen::ogScrTitleMgr::update(Controller* input)
 	}
 
 	mNoInputTimer += gsys->getFrameTime();
+#if !defined(PIKI_PC_PORT)
+	// Menu stays open without input.
 	if (mNoInputTimer >= 60.0f) {
 		input->updateCont(KBBTN_B);
 		mMainMenu->update(input);
 	}
+#endif
 
 	switch (mCurrentMenuID) {
 	case MENU_MainMenu:
@@ -231,6 +278,17 @@ zen::ogScrTitleMgr::TitleStatus zen::ogScrTitleMgr::update(Controller* input)
 		if (flag1 != 0) {
 			break;
 		}
+#if defined(__vita__)
+		// Slots after Sound are shifted by one.
+		if (mCurrentSelection == 3) {
+			pc_settings_open();
+			mCurrentMenuID = MENU_More;
+			break;
+		}
+		if (mCurrentSelection > 0) {
+			mCurrentSelection += 1;
+		}
+#endif
 		if (mCurrentSelection == 0) {
 			// Sound
 			mCurrentMenuID = MENU_Sound;
@@ -455,6 +513,17 @@ zen::ogScrTitleMgr::TitleStatus zen::ogScrTitleMgr::update(Controller* input)
 		}
 		break;
 	}
+#if defined(__vita__)
+	case MENU_More:
+	{
+		// Port settings page owns the pad while open.
+		if (!pc_settings_is_open()) {
+			mOptionsMenu->start(-1);
+			mCurrentMenuID = MENU_Options;
+		}
+		break;
+	}
+#endif
 	case MENU_Language:
 	{
 		mLanguageMenu->update(input);
@@ -525,6 +594,13 @@ void zen::ogScrTitleMgr::draw(Graphics& gfx)
 			mLanguageMenu->draw(gfx);
 			break;
 		}
+#if defined(__vita__)
+		case MENU_More:
+		{
+			mOptionsMenu->draw(gfx); // hidden while the page is up
+			break;
+		}
+#endif
 		}
 	}
 }

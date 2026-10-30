@@ -30,12 +30,21 @@ int pc_jaudio_integration_test();
 #include <SDL.h>
 
 #include "pc_window.h"
+#ifdef __vita__
+#include "vita_platform.h"
+#endif
 #include "settings/pc_settings.h"
+#include "timing/pc_prof.h"
 
 int main(int argc, char* argv[])
 {
     // Disable stdout buffering so we see logs immediately before any crash
     setvbuf(stdout, NULL, _IONBF, 0);
+    piki_pc_mark_game_thread();   // Allocation heap tag
+#ifdef __vita__
+    vita_platform_early_init();
+    pc_prof_register(0);   // Game thread (NECTAR_PROF)
+#endif
 
     // SDL_MAIN_HANDLED is defined for this build, which means the application
     // owns main() and SDL2main is not linked. The other half of that contract
@@ -51,38 +60,16 @@ int main(int argc, char* argv[])
     (void)argc;
     (void)argv;
 
-    printf("╔══════════════════════════════════════════╗\n");
-    printf("║   Pikmin - Native Linux PC Port          ║\n");
-    printf("║   Stage 4: OpenGL Rendering Backend      ║\n");
-    printf("╚══════════════════════════════════════════╝\n\n");
-    fflush(stdout);
-
     // Initialize SDL2 Window and OpenGL Context FIRST
-    printf("[PC Port] Initializing SDL2 Window and OpenGL...\n");
-    fflush(stdout);
     if (!pc_window_init("Open Nectar", 1280, 720)) {
         printf("[PC Port Fatal Error] Could not initialize window/OpenGL!\n");
         fflush(stdout);
         return 1;
     }
 
-    printf("[PC Port] Loading persisted settings...\n");
-    fflush(stdout);
     pc_settings_init();
-
-    printf("[PC Port] Initializing game system...\n");
-    fflush(stdout);
     gsys->Initialise();
-
-    printf("[PC Port] Creating node manager...\n");
     nodeMgr = new NodeMgr();
-
-    printf("[PC Port] Starting game application...\n");
-    printf("[PC Port] Native GX/OpenGL, SDL input and persistent save backends active.\n");
-    printf("[PC Port] Audio and movie playback are still under development.\n\n");
-
     gsys->run(new PlugPikiApp());
-
-    printf("[PC Port] Game exited normally.\n");
     return 0;
 }

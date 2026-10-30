@@ -182,6 +182,23 @@ bool FastGrid::aiCullingLarge(int max)
  */
 bool FastGrid::doCulling(const FastGrid& other, f32 radius)
 {
+#if defined(PIKI_PC_PORT)
+	// The x and z tests
+	if (doCullingXZ(mGridPositionX, mGridPositionZ, other.mGridPositionX, other.mGridPositionZ, radius, AIPerf::gridShift)) {
+		return true;
+	}
+	if (AIPerf::useGrid != 1) {
+		return false;
+	}
+	s16 cellLimit = s16(radius) >> AIPerf::gridShift;
+	s16 dy        = mGridPositionY - other.mGridPositionY;
+	s16 absDy     = (dy > 0) ? dy : -(dy);
+	s16 excess    = (absDy == 0) ? 0 : absDy - 1;
+	if (excess > cellLimit) {
+		return true;
+	}
+	return false;
+#else
 	s16 cellLimit = s16(radius) >> AIPerf::gridShift;
 
 	// X axis
@@ -214,6 +231,7 @@ bool FastGrid::doCulling(const FastGrid& other, f32 radius)
 	}
 
 	return false;
+#endif
 }
 
 /**

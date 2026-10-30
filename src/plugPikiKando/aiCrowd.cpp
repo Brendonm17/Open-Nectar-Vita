@@ -332,10 +332,20 @@ int ActCrowd::exec()
 			Piki* minPiki   = nullptr;
 			int minSlotPrio = 256;
 			int minSlotID;
+#if defined(__vita__)
+			// Direct plate slot scan.
+			CPlate* plate = mPiki->mNavi->mPlateMgr;
+			for (int slot = 0; slot < plate->mTotalSlotCount; slot++) {
+				Piki* piki = static_cast<Piki*>(plate->mSlotList[slot].mOccupant.getPtr());
+				if (!piki) {
+					break;
+				}
+#else
 			Iterator iter(mPiki->mNavi->mPlateMgr);
 			CI_LOOP(iter)
 			{
 				Piki* piki = static_cast<Piki*>(*iter);
+#endif
 				if (piki->mMode != PikiMode::FormationMode) {
 					piki->changeMode(PikiMode::FreeMode, piki->mNavi);
 				} else {

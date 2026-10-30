@@ -1,4 +1,7 @@
 #include "MoviePlayer.h"
+#ifdef __vita__
+#include "gl/vita_drawrec.h"
+#endif
 #include <cstdio>
 #include "DebugLog.h"
 #include "EffectMgr.h"
@@ -417,6 +420,10 @@ int MoviePlayer::translateIndex(int idx, int stage)
 void MoviePlayer::startMovie(int movieIdx, int, Creature* target, immut Vector3f* pos, immut Vector3f* rot, u32 actorVisMask,
                              bool isPlaying)
 {
+#ifdef __vita__
+	// Finish any open drawrec segment.
+	vita_drawrec_join(kDrJoinMovie);
+#endif
 	MovieInfo* info;
 	if (movieIdx < 0) {
 		skipScene(SCENESKIP_Invalid);
@@ -813,7 +820,11 @@ void MoviePlayer::addLights(Graphics& gfx)
  */
 void MoviePlayer::refresh(Graphics& gfx)
 {
+#if defined(__vita__)
+	gfx.setLightingNoPrev(true, nullptr);
+#else
 	gfx.setLighting(true, nullptr);
+#endif
 	MovieInfo* info = static_cast<MovieInfo*>(mPlayInfoList.mChild);
 	while (info) {
 		MovieInfo* next = static_cast<MovieInfo*>(info->mNext);

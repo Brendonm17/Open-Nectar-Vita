@@ -4,6 +4,7 @@
  */
 
 #include "pc_aram.h"
+#include "dolphin_stubs/dvd_image.h"
 
 #include <cstdio>
 #include <cstring>
@@ -57,27 +58,14 @@ size_t pc_aram_load_file(const char* path, u32 dst, u32 src, u32 length)
 		return 0;
 	}
 
-	FILE* file = std::fopen(path, "rb");
-	if (file == nullptr) {
+	uint32_t fileSize = 0;
+	if (!pc_disc_file_size(path, &fileSize)) {
 		sError = std::string("cannot open ") + path;
 		return 0;
 	}
 
-	if (std::fseek(file, 0, SEEK_END) != 0) {
-		sError = std::string("cannot size ") + path;
-		std::fclose(file);
-		return 0;
-	}
-	const long fileSize = std::ftell(file);
-	if (fileSize < 0) {
-		sError = std::string("cannot size ") + path;
-		std::fclose(file);
-		return 0;
-	}
-
-	if (src > static_cast<u32>(fileSize)) {
+	if (src > fileSize) {
 		sError = std::string("offset past end of ") + path;
-		std::fclose(file);
 		return 0;
 	}
 
@@ -94,21 +82,18 @@ size_t pc_aram_load_file(const char* path, u32 dst, u32 src, u32 length)
 		const size_t room = (dst < sAram.size()) ? sAram.size() - dst : 0;
 		if (room == 0) {
 			sError = "destination outside ARAM";
-			std::fclose(file);
 			return 0;
 		}
 		sError = std::string("truncated load of ") + path;
 		want   = room;
 	}
 
-	if (std::fseek(file, static_cast<long>(src), SEEK_SET) != 0) {
-		sError = std::string("cannot seek ") + path;
-		std::fclose(file);
+	const int64_t read = pc_disc_read_range(path, sAram.data() + dst, src, static_cast<u32>(want));
+	if (read < 0) {
+		sError = std::string("cannot read ") + path;
 		return 0;
 	}
-
-	const size_t got = std::fread(sAram.data() + dst, 1, want, file);
-	std::fclose(file);
+	const size_t got = static_cast<size_t>(read);
 
 	if (got != want) {
 		sError = std::string("short read of ") + path;

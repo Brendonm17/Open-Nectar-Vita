@@ -77,24 +77,6 @@ struct Span {
 	}
 };
 
-struct LoadStats {
-	u32 bankChunks       = 0;
-	u32 waveChunks       = 0;
-	u32 instruments      = 0;
-	u32 percussionSets   = 0;
-	u32 percussionMaps   = 0;
-	u32 voices           = 0;
-	u32 oscillators      = 0;
-	u32 envelopes        = 0;
-	u32 vmaps            = 0;
-	u32 waveArchives     = 0;
-	u32 waves            = 0;
-	u32 scenes           = 0;
-	u32 controls         = 0;
-	u32 waveIDs          = 0;
-	u32 opaqueVoiceItems = 0;
-};
-
 bool checkedRuntimeSize(size_t prefix, u32 count, size_t elementSize, size_t minimum, size_t* result)
 {
 	if (count > kMaxRuntimeCount) {
@@ -113,11 +95,10 @@ bool checkedRuntimeSize(size_t prefix, u32 count, size_t elementSize, size_t min
 
 class ChunkConverter {
 public:
-	ChunkConverter(Span source, const char* kind, u32 index, LoadStats* stats)
+	ChunkConverter(Span source, const char* kind, u32 index)
 	    : mSource(source)
 	    , mKind(kind)
 	    , mIndex(index)
-	    , mStats(stats)
 	{
 	}
 
@@ -313,7 +294,6 @@ private:
 		for (u32 i = 0; i < pointCount * 3; ++i) {
 			output[i] = static_cast<s16>(mSource.read16(offset + i * 2));
 		}
-		++mStats->envelopes;
 		return output;
 	}
 
@@ -349,7 +329,6 @@ private:
 			}
 		}
 
-		++mStats->oscillators;
 		return output;
 	}
 
@@ -400,7 +379,6 @@ private:
 		output->mWaveID       = static_cast<s16>(mSource.read16(offset + 0x06));
 		output->mVolume       = mSource.readFloat(offset + 0x08);
 		output->mPitch        = mSource.readFloat(offset + 0x0c);
-		++mStats->vmaps;
 		return output;
 	}
 
@@ -507,7 +485,6 @@ private:
 				return nullptr;
 			}
 		}
-		++mStats->instruments;
 		return output;
 	}
 
@@ -543,10 +520,8 @@ private:
 				 * retain a pointer into the OSAlloc2-backed BX image.
 				 */
 				output->_0C[i] = const_cast<u8*>(mSource.data + itemOffset);
-				++mStats->opaqueVoiceItems;
 			}
 		}
-		++mStats->voices;
 		return output;
 	}
 
@@ -600,7 +575,6 @@ private:
 				return nullptr;
 			}
 		}
-		++mStats->percussionMaps;
 		return output;
 	}
 
@@ -631,7 +605,6 @@ private:
 			output->panTable[i]     = static_cast<s8>(mSource.read8(offset + 0x288 + i));
 			output->releaseTable[i] = mSource.read16(offset + 0x308 + i * 2);
 		}
-		++mStats->percussionSets;
 		return output;
 	}
 
@@ -669,7 +642,6 @@ private:
 			}
 			*output->fileLoadStatus = mSource.read32(statusOffset);
 		}
-		++mStats->waves;
 		return output;
 	}
 
@@ -710,7 +682,6 @@ private:
 				return nullptr;
 			}
 		}
-		++mStats->waveArchives;
 		return output;
 	}
 
@@ -776,7 +747,6 @@ private:
 				return nullptr;
 			}
 		}
-		++mStats->waveIDs;
 		return output;
 	}
 
@@ -816,7 +786,6 @@ private:
 				return nullptr;
 			}
 		}
-		++mStats->controls;
 		return output;
 	}
 
@@ -871,7 +840,6 @@ private:
 		for (u32 i = 0; i < dependencyCount; ++i) {
 			output->dependencyIds[i] = static_cast<int>(mSource.read32(offset + 0x18 + i * 4));
 		}
-		++mStats->scenes;
 		return output;
 	}
 
@@ -918,7 +886,6 @@ private:
 	Span mSource;
 	const char* mKind;
 	u32 mIndex;
-	LoadStats* mStats;
 	bool mFailed = false;
 };
 
@@ -961,7 +928,6 @@ extern "C" BOOL JAudioHost_LoadBX(const void* data, u32 size)
 		return FALSE;
 	}
 
-	LoadStats stats;
 	for (u32 i = 0; i < wsysCount; ++i) {
 		u32 address;
 		u32 chunkSize;
@@ -985,13 +951,12 @@ extern "C" BOOL JAudioHost_LoadBX(const void* data, u32 size)
 			             i, declaredSize);
 			return FALSE;
 		}
-		ChunkConverter converter(chunk, "WSYS", i, &stats);
+		ChunkConverter converter(chunk, "WSYS", i);
 		Wsys_* wsys = converter.convertWSYS();
 		if (!wsys || converter.failed() || !Wavegroup_Regist_Host(wsys, i)) {
 			std::fprintf(stderr, "[jaudio-bank] BX: WSYS[%u] conversion/registration failed\n", i);
 			return FALSE;
 		}
-		++stats.waveChunks;
 	}
 
 	for (u32 i = 0; i < ibnkCount; ++i) {
@@ -1017,25 +982,12 @@ extern "C" BOOL JAudioHost_LoadBX(const void* data, u32 size)
 			             i, declaredSize);
 			return FALSE;
 		}
-		ChunkConverter converter(chunk, "IBNK", i, &stats);
+		ChunkConverter converter(chunk, "IBNK", i);
 		Ibnk_* ibnk = converter.convertIBNK();
 		if (!ibnk || converter.failed() || !Bank_Regist_Host(ibnk, i)) {
 			std::fprintf(stderr, "[jaudio-bank] BX: IBNK[%u] conversion/registration failed\n", i);
 			return FALSE;
 		}
-		++stats.bankChunks;
-	}
-
-	std::fprintf(stderr,
-	             "[jaudio-bank] BX ready: %u/%u WSYS, %u/%u IBNK; "
-	             "%u waves/%u archives/%u ids, %u inst/%u perc/%u vmaps/%u osc\n",
-	             stats.waveChunks, wsysCount, stats.bankChunks, ibnkCount,
-	             stats.waves, stats.waveArchives, stats.waveIDs,
-	             stats.instruments, stats.percussionSets, stats.vmaps, stats.oscillators);
-	if (stats.voices != 0) {
-		std::fprintf(stderr,
-		             "[jaudio-bank] note: %u legacy Voice entries retained with %u opaque payload pointers\n",
-		             stats.voices, stats.opaqueVoiceItems);
 	}
 	return TRUE;
 }

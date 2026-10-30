@@ -25,7 +25,6 @@ BOOL PADInit(void) {
         sPadInitDone = true;
     }
 
-    printf("[PC Port] PADInit() - SDL2 window & input initialized\n");
     return TRUE;
 }
 
@@ -39,8 +38,8 @@ u32 PADRead(PADStatus* status) {
 void PADSetSamplingRate(u32 msec)             { (void)msec; }
 void PADClamp(PADStatus* status)              { (void)status; }
 void PADClampCircle(PADStatus* status)        { (void)status; }
-void PADControlAllMotors(const u32* cmdArray) { (void)cmdArray; }
-void PADControlMotor(s32 chan, u32 command)    { (void)chan; (void)command; }
+void PADControlMotor(s32 chan, u32 command)    { pc_window_rumble(chan, command == PAD_MOTOR_RUMBLE ? 1.0f : 0.0f); }
+void PADControlAllMotors(const u32* cmdArray) { if (cmdArray) for (int i = 0; i < PAD_MAX_CONTROLLERS; i++) PADControlMotor(i, cmdArray[i]); }
 BOOL PADRecalibrate(u32 mask)                 { (void)mask; return TRUE; }
 BOOL PADSync(void)                            { return TRUE; }
 void PADSetAnalogMode(u32 mode)               { (void)mode; }

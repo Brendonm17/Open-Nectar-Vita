@@ -47,6 +47,59 @@ struct GColor {
 
 extern GColor GColors[];
 
+#if defined(__vita__)
+// PS Vita drawrec: DGX fields an open segment can leave unknown.
+enum {
+	kPcFieldHasTexGen = 0,
+	kPcFieldLighting,
+	kPcFieldActiveTexture,
+	kPcFieldMtxDepIdx,
+	kPcFieldCullMode,
+	kPcFieldTexMtxBase,
+	kPcFieldCount
+};
+void pcDrawrecUnknownRead(void);
+template <typename T, int Field>
+struct PcTracked {
+	T mV;
+	u8 mUnk; // 1: may have been moved by an open segment
+
+	operator T() const
+	{
+		if (__builtin_expect(mUnk != 0, 0)) {
+			pcDrawrecUnknownRead();
+		}
+		return mV;
+	}
+	T operator->() const { return T(*this); }
+	PcTracked& operator=(T v)
+	{
+		mV   = v;
+		mUnk = 0;
+		return *this;
+	}
+	PcTracked& operator=(const PcTracked& o)
+	{
+		mV   = T(o);
+		mUnk = 0;
+		return *this;
+	}
+	T pcPeek() const { return mV; }
+	bool pcUnknown() const { return mUnk != 0; }
+	void pcMarkUnknown() { mUnk = 1; }
+	void pcAdopt(T v)
+	{
+		mV   = v;
+		mUnk = 0;
+	}
+};
+#define PC_TRACKED(type, field) PcTracked<type, field>
+// Clone constructor tag.
+struct PcCloneTag { };
+#else
+#define PC_TRACKED(type, field) type
+#endif
+
 /**
  * @brief TODO
  *
@@ -61,6 +114,21 @@ public:
 		Both  = Color | Depth,
 	} END_ENUM_TYPE;
 	Graphics();
+#if defined(__vita__)
+	// Segment clone (gW).
+	Graphics(PcCloneTag);
+	// setLighting without reading the previous value.
+	void setLightingNoPrev(bool set, PVWLightingInfo* info)
+	{
+		mPcNoPrev = 1;
+		setLighting(set, info);
+		mPcNoPrev = 0;
+	}
+	// Debug-info switch as drawshape reads it.
+	bool pcDebugInfo() const;
+	// Sets the lighting fields a calcLighting pair leaves.
+	void pcLightingModel();
+#endif
 
 	void resetMatrixBuffer();
 	Matrix4f* getMatrices(int);
@@ -90,19 +158,19 @@ public:
 	immut Matrix4f* mActiveMatrix;            // _0C
 	Light mLight;                             // _10
 	Camera* mCamera;                          // _2E4
-	Texture* mActiveTexture[8];               // _2E8
+	PC_TRACKED(Texture*, kPcFieldActiveTexture) mActiveTexture[8]; // _2E8
 	u32 _308;                                 // _308
 	int mScreenWidth;                         // _30C
 	int mScreenHeight;                        // _310
 	Colour mBufferClearColour;                // _314
 	Colour mPrimaryColour;                    // _318
 	Colour mAuxiliaryColour;                  // _31C
-	bool mIsLightingEnabled;                  // _320
+	PC_TRACKED(bool, kPcFieldLighting) mIsLightingEnabled; // _320
 	bool mIsDepthEnabled;                     // _321
-	BOOL mHasTexGen;                          // _324
-	u32 mMtxDepIdx;                           // _328
+	PC_TRACKED(BOOL, kPcFieldHasTexGen) mHasTexGen; // _324
+	PC_TRACKED(u32, kPcFieldMtxDepIdx) mMtxDepIdx; // _328
 	int mBlendMode;                           // _32C, 0 is normal, 1 is additive, 2 is subtractive, 3 is alpha additive, 4 is no blend
-	int mCullMode;                            // _330, 0 is back, 1 is front, 2 is none
+	PC_TRACKED(int, kPcFieldCullMode) mCullMode; // _330, 0 is back, 1 is front, 2 is none
 	u32 mCullFlip;                            // _334
 	LightCamera* mLightCam;                   // _338
 	Vector3f mSunPosition;                    // _33C
@@ -128,6 +196,20 @@ public:
 	CachedShape* mCachedShapes;               // _3A8
 	int mCachedShapeMax;                      // _3AC
 	int mCachedShapeCount;                    // _3B0
+#if defined(PIKI_PC_PORT)
+	// Pose override for the shared Pikmin shape.
+	Matrix4f* mPcPose;
+	BaseShape* mPcPoseShape;
+	// Frozen animation-context flags for the pose override.
+	u8 mPcPoseAnimCtx;
+	u8 mPcPoseAnimData;
+#endif
+#if defined(__vita__)
+	u8 mPcNoPrev;     // inside setLightingNoPrev
+	u8 mPcIsClone;    // this is the segment clone
+	u8 mPcDebugSnap;  // gW copy of mToggleDebugInfo
+	u8 mPcCacheHoisted; // cacheShape hoisted to the game thread
+#endif
 
 	virtual void videoReset() { }                                                                                         // _08
 	virtual void setVerticalFilter(u8*) { }                                                                               // _0C
@@ -204,8 +286,15 @@ public:
 /**
  * @brief TODO
  */
+#if defined(__vita__)
+struct GxqCtx;
+struct PcDgxCtx;
+#endif
 struct DGXGraphics : public Graphics {
 	DGXGraphics(bool);
+#if defined(__vita__)
+	DGXGraphics(PcCloneTag); // segment clone
+#endif
 
 	virtual void videoReset();                                                                                        // _08
 	virtual void setVerticalFilter(u8*);                                                                              // _0C
@@ -296,7 +385,7 @@ struct DGXGraphics : public Graphics {
 	u32 _3D0;                            // _3D0
 	bool mIsEnvMapActive;                // _3D4
 	int mCurrentMatrixId;                // _3D8
-	int mTexMtxBaseID;                   // _3DC
+	PC_TRACKED(int, kPcFieldTexMtxBase) mTexMtxBaseID; // _3DC
 	Mtx mProjectionTextureMatrix;        // _3E0, Mtx (3x4) not Matrix4f (4x4)
 	GXLightObj mGXLights[8];             // _410
 	u8* mDisplayBuffer;                  // _610
@@ -306,6 +395,11 @@ struct DGXGraphics : public Graphics {
 	VIRetraceCallback mRetraceCallback;  // _620
 	OSMessageQueue mPostRetraceMsgQueue; // _624
 	OSMessage mPostRetraceMsgBuffer;     // _644
+#if defined(__vita__)
+	// Recorder context.
+	GxqCtx* mPcRec;
+	PcDgxCtx* mPcDgx;
+#endif
 };
 
 extern DGXGraphics* gfx;

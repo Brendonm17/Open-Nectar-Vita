@@ -844,7 +844,11 @@ void SeSystem::draw3d(Graphics& gfx)
 
 	gfx.setColour(Colour(255, 0, 0, 255), true);
 	gfx.useTexture(nullptr, GX_TEXMAP0);
+#if defined(__vita__)
+	gfx.setLightingNoPrev(false, nullptr);
+#else
 	gfx.setLighting(false, nullptr);
+#endif
 	gfx.useMatrix(Matrix4f::ident, 0);
 
 	for (int i = 0; i < mMaxEventCount; i++) {
@@ -1026,6 +1030,7 @@ void SeSystem::calcCameraPos(immut Vector3f& objectPos, Vector3f& normalisedCamD
  */
 static const SoundTableInfo* pc_sound_row(int soundID)
 {
+	PikiPcPersistentAlloc pcKeep;
 	static const std::vector<const SoundTableInfo*> index = [] {
 		const size_t rows = sizeof(soundTable) / sizeof(soundTable[0]);
 		int highest = -1;

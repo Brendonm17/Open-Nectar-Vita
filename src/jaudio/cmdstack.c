@@ -100,6 +100,7 @@ void Cancel_PortcmdStay(void)
  */
 int Jac_Portcmd_Proc_Once(JPorthead_* port)
 {
+	PC_JAC_JOIN();
 	Portcmd_* p;
 	while (1) {
 		p = Get_Portcmd(port);
@@ -116,6 +117,7 @@ int Jac_Portcmd_Proc_Once(JPorthead_* port)
  */
 int Jac_Portcmd_Proc_Stay(JPorthead_* port)
 {
+	PC_JAC_JOIN();
 	Portcmd_* p = port->mHeadCmd;
 	while (1) {
 		if (!p) {
@@ -143,6 +145,7 @@ static s32 Portcmd_Main(void* a)
  */
 void Jac_Porthead_Init(JPorthead_* port)
 {
+	PC_JAC_JOIN();
 	port->mHeadCmd = NULL;
 	port->mTailCmd = NULL;
 }
@@ -152,9 +155,13 @@ void Jac_Porthead_Init(JPorthead_* port)
  */
 void Jac_Portcmd_Init(void)
 {
+	PC_JAC_JOIN();
 	Jac_Porthead_Init(&cmd_once);
 	Jac_Porthead_Init(&cmd_stay);
 	Jac_RegisterPlayerCallback(Portcmd_Main, 0);
+#if defined(PIKI_PC_PORT)
+	PlayerCallbackMarkSeqSafe(Portcmd_Main);
+#endif
 }
 
 /**

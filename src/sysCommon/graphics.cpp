@@ -1,4 +1,8 @@
 #include "Graphics.h"
+#if defined(PIKI_PC_PORT)
+#include "gl/pc_gfx.h"
+#include <cstring>
+#endif
 
 #include "Collision.h"
 #include "Colour.h"
@@ -14,6 +18,12 @@
 #include <math.h>
 #if defined(PIKI_PC_PORT)
 #include "timing/pc_render_phase.h"
+#include "GlobalGameOptions.h"
+#include "settings/pc_settings.h"
+#endif
+#if defined(__vita__)
+#include "gl/vita_drawrec.h"
+#include "../sysDolphin/pcDgxCtx.h"
 #endif
 
 /**
@@ -702,21 +712,22 @@ static u16 sjis_convert_table[0x258] = {
 	0x10D, 0x10E, 0x10F, 0x110, 0x111, 0x112, 0x113, 0x114, 0x115, 0x116, 0x0,
 };
 
+// Shift-JIS bytes of the kanji named by two-byte message codes.
 static char kanji_convert_table[] ATTRIBUTE_ALIGN(32) = {
 #if defined(VERSION_GPIP01)
-	"日目時私未知星大地\x85\x20名前宇宙旅途中流墜落愛機号多失無残姿動一重迎教気猛毒酸素含生命維持装置限度修復考船探検奇妙物体待立上何械観察"
-	"芽光放"
+	"\223\372\226\332\216\236\216\204\226\242\222\155\220\257\221\345\222\156\x85\x20\226\274\221\117\211\106\222\210\227\267\223\162\222\206\227\254\222\304\227\216\210\244\213\100\215\206\221\275\216\270\226\263\216\143\216\160\223\256\210\352\217\144\214\175\213\263\213\103\226\322\223\305\216\137\221\146\212\334\220\266\226\275\210\333\216\235\221\225\222\165\214\300\223\170\217\103\225\234\215\154\221\104\222\124\214\237\212\357\226\255\225\250\221\314\221\322\227\247\217\343\211\275\212\102\212\317\216\100"
+	"\211\350\214\365\225\372"
 #else
-	"日目時私未知星大地横名前宇宙旅途中流墜落愛機号多失無残姿動一重迎教気猛毒酸素含生命維持装置限度修復考船探検奇妙物体待立上何械観察芽光放"
+	"\223\372\226\332\216\236\216\204\226\242\222\155\220\257\221\345\222\156\211\241\226\274\221\117\211\106\222\210\227\267\223\162\222\206\227\254\222\304\227\216\210\244\213\100\215\206\221\275\216\270\226\263\216\143\216\160\223\256\210\352\217\144\214\175\213\263\213\103\226\322\223\305\216\137\221\146\212\334\220\266\226\275\210\333\216\235\221\225\222\165\214\300\223\170\217\103\225\234\215\154\221\104\222\124\214\237\212\357\226\255\225\250\221\314\221\322\227\247\217\343\211\275\212\102\212\317\216\100\211\350\214\365\225\372"
 #endif
-	"思試引抜植見害好野菜呼投反応操作回転今来倒取増殖母彼態不議少能力調必要興味集団合行習性利用繰希望灯近押解散隊列記録画面安心幸運事離陸可"
-	"飛明捜索後入森昨出下全滅種掴切色同赤注意深口部分他違黄帰特穴掘石割内高収個範囲没太陽仕暗去食発荷伝質超科学結晶除汚移永久燃料電済位確認"
-	"間叩当最激本妻子供顔浮射線遠外音鳴役息座娘元空欠嵐強噴脱速加費良家計衝撃吸亜複通雑場所父親人美咲別感続金属品買理遊泳腰晩庫以状実組異常"
-	"聞快配乗約束尾現念故終巻頭土製値打夜楽身向算果焼便成功驚緒暮付借戻昇窓広満帯始惑遭難協者郷長眠油断服界達非送闘左表示族存在徴耳奥開洞窟"
-	"青会視手足小水自助消原周辺映十字効率眼定降樹海備早就湿源朝進完練寝指正直勇初恐景員険話情報数変化与方整奮新道恵単判葉花仲然獲冒破壊敵圏"
-	"平歩炎天卵軟接触至死攻駆繁栄巨丸呑弾半折胞吐連錯乱振払堅夢追昼怖揺丈先止胴弱点簡甲羅岩量込捕透核法怒奴等構厄介橋苦労系貝真珠価罠禁巣風"
-	"造勢戦襲言遮和厳密頂着休年昔想像響返白敏再還我懸草誰工月司髪毛細番予殊影過関係誇育腹次矢窒寸覚覗屋忘血航誌亡泉夕使期敗容制挿読扱説書閉"
-	"績匹累替角更包獰吹遇悪似謎守有軽様告武器危崩順形養境届両衛貫渦砕淵裂凡義務貴毎賊突測庭円翔魅夫秩低爆住笑"
+	"\216\166\216\216\210\370\224\262\220\101\214\251\212\121\215\104\226\354\215\330\214\304\223\212\224\275\211\236\221\200\215\354\211\361\223\135\215\241\227\210\223\174\216\346\221\235\220\102\225\352\224\336\221\324\225\163\213\143\217\255\224\134\227\315\222\262\225\113\227\166\213\273\226\241\217\127\222\143\215\207\215\163\217\113\220\253\227\230\227\160\214\112\212\363\226\135\223\224\213\337\211\237\211\360\216\125\221\340\227\361\213\114\230\136\211\346\226\312\210\300\220\123\215\113\211\136\216\226\227\243\227\244\211\302"
+	"\224\362\226\276\221\173\215\365\214\343\223\374\220\130\215\360\217\157\211\272\221\123\226\305\216\355\222\315\220\330\220\106\223\257\220\324\222\215\210\323\220\133\214\373\225\224\225\252\221\274\210\341\211\251\213\101\223\301\214\212\214\100\220\316\212\204\223\340\215\202\216\373\214\302\224\315\210\315\226\166\221\276\227\172\216\144\210\303\213\216\220\110\224\255\211\327\223\140\216\277\222\264\211\310\212\167\214\213\217\273\217\234\211\230\210\332\211\151\213\166\224\122\227\277\223\144\215\317\210\312\212\155\224\106"
+	"\212\324\222\100\223\226\215\305\214\203\226\173\215\310\216\161\213\237\212\347\225\202\216\313\220\374\211\223\212\117\211\271\226\302\226\360\221\247\215\300\226\272\214\263\213\363\214\207\227\222\213\255\225\254\222\105\221\254\211\301\224\357\227\307\211\306\214\166\217\325\214\202\213\172\210\237\225\241\222\312\216\107\217\352\217\212\225\203\220\145\220\154\224\374\215\347\225\312\212\264\221\261\213\340\221\256\225\151\224\203\227\235\227\126\211\152\215\230\224\323\214\311\210\310\217\363\216\300\221\147\210\331\217\355"
+	"\225\267\211\365\224\172\217\346\226\361\221\251\224\366\214\273\224\117\214\314\217\111\212\252\223\252\223\171\220\273\222\154\221\305\226\351\212\171\220\147\214\374\216\132\211\312\217\304\225\326\220\254\214\367\213\301\217\217\225\351\225\164\216\330\226\337\217\270\221\213\215\114\226\236\221\321\216\156\230\146\221\230\223\357\213\246\216\322\213\275\222\267\226\260\226\373\222\146\225\236\212\105\222\102\224\361\221\227\223\254\215\266\225\134\216\246\221\260\221\266\215\335\222\245\216\250\211\234\212\112\223\264\214\101"
+	"\220\302\211\357\216\213\216\350\221\253\217\254\220\205\216\251\217\225\217\301\214\264\216\374\225\323\211\146\217\134\216\232\214\370\227\246\212\341\222\350\215\176\216\367\212\103\224\365\221\201\217\101\216\274\214\271\222\251\220\151\212\256\227\373\220\121\216\167\220\263\222\274\227\105\217\211\213\260\214\151\210\365\214\257\230\142\217\356\225\361\220\224\225\317\211\273\227\136\225\373\220\256\225\261\220\126\223\271\214\142\222\120\224\273\227\164\211\324\222\207\221\122\212\154\226\140\224\152\211\363\223\107\214\227"
+	"\225\275\225\340\211\212\223\126\227\221\223\356\220\332\220\107\216\212\216\200\215\125\213\354\224\311\211\150\213\220\212\333\223\333\222\145\224\274\220\334\226\105\223\146\230\101\215\366\227\220\220\125\225\245\214\230\226\262\222\307\222\213\225\174\227\150\217\344\220\346\216\176\223\267\216\343\223\137\212\310\215\142\227\205\212\342\227\312\215\236\225\337\223\247\212\152\226\100\223\173\223\172\223\231\215\134\226\357\211\356\213\264\213\352\230\112\214\156\212\114\220\136\216\354\211\277\343\251\213\326\221\203\225\227"
+	"\221\242\220\250\220\355\217\120\214\276\216\325\230\141\214\265\226\247\222\270\222\205\213\170\224\116\220\314\221\172\221\234\213\277\225\324\224\222\225\161\215\304\212\322\211\344\214\234\221\220\222\116\215\110\214\216\216\151\224\257\226\321\215\327\224\324\227\134\216\352\211\145\211\337\212\326\214\127\214\326\210\347\225\240\216\237\226\356\222\202\220\241\212\157\224\140\211\256\226\131\214\214\215\161\216\217\226\123\220\362\227\133\216\147\212\372\224\163\227\145\220\247\221\175\223\307\210\265\220\340\217\221\225\302"
+	"\220\321\225\103\227\335\221\326\212\160\215\130\225\357\340\326\220\201\213\366\210\253\216\227\223\344\216\347\227\114\214\171\227\154\215\220\225\220\212\355\212\353\225\366\217\207\214\140\227\173\213\253\223\315\227\274\211\161\212\321\211\121\215\323\225\243\227\364\226\175\213\140\226\261\213\115\226\210\221\257\223\313\221\252\222\353\211\176\343\304\226\243\225\166\222\201\222\341\224\232\217\132\217\316"
 };
 
 /**
@@ -740,7 +751,7 @@ static s16 searchKanjiCode(u16 code)
 	s16 res = -1;
 
 	for (s16 i = 0; i < len; i++) {
-		if (kanji_convert_table[2 * i] == codeBytes[0] && kanji_convert_table[2 * i + 1] == codeBytes[1]) {
+		if ((u8)kanji_convert_table[2 * i] == codeBytes[0] && (u8)kanji_convert_table[2 * i + 1] == codeBytes[1]) {
 			res = i;
 			break;
 		}
@@ -865,11 +876,112 @@ Graphics::Graphics()
 	mMatrixBuffer   = gsys->mMatrices;
 
 	mCachedShapeMax = 1000;
+#if defined(PIKI_PC_PORT)
+	{
+		const int limit = pc_settings_get_piki_limit();
+		if (limit > MAX_PIKI_ON_FIELD) {
+			const int scaled = int((long long)mCachedShapeMax * limit / MAX_PIKI_ON_FIELD);
+			if (scaled > mCachedShapeMax) {
+				mCachedShapeMax = scaled;
+			}
+		}
+	}
+#endif
 	mCachedShapes   = new CachedShape[mCachedShapeMax];
+#if defined(PIKI_PC_PORT)
+	mPcPose         = nullptr;
+	mPcPoseShape    = nullptr;
+	mPcPoseAnimCtx  = 0;
+	mPcPoseAnimData = 0;
+#endif
 
 	mAmbientColour.set(0, 0, 48, 255);
 	mLightIntensity = 1.0f;
+#if defined(__vita__)
+	mPcNoPrev       = 0;
+	mPcIsClone      = 0;
+	mPcDebugSnap    = 0;
+	mPcCacheHoisted = 0;
+#endif
 }
+
+#if defined(__vita__)
+// drawrec: gW, the Pikmin B segment's Graphics.
+Graphics::Graphics(PcCloneTag)
+{
+	mRenderMode         = 0;
+	mMatRenderMask      = 0;
+	mLastModelMatrix    = nullptr;
+	mActiveMatrix       = nullptr;
+	mCamera             = nullptr;
+	for (int i = 0; i < 8; i++) {
+		mActiveTexture[i] = nullptr;
+	}
+	_308                = 0;
+	mScreenWidth        = 0;
+	mScreenHeight       = 0;
+	mIsLightingEnabled  = false;
+	mIsDepthEnabled     = true;
+	mHasTexGen          = FALSE;
+	mMtxDepIdx          = 0;
+	mBlendMode          = 0;
+	mCullMode           = 0;
+	mCullFlip           = 0;
+	mLightCam           = nullptr;
+	_348                = 0;
+	mDefaultMaterialHandler = nullptr;
+	mCurrentMaterialHandler = nullptr;
+	mCurrentMaterial    = nullptr;
+	mFogStart = mFogEnd = mFogDensity = 0.0f;
+	mLightDistance      = 0.0f;
+	mLightIntensity     = 1.0f;
+	mActiveLightMask    = 0;
+	mLineWidth          = 1.0f;
+	mCustomScale        = nullptr;
+	mMatrixBuffer       = nullptr;
+	mMaxMatrixCount     = 0;
+	mNextFreeMatrixIdx  = 0;
+	mCachedShapes       = nullptr;
+	mCachedShapeMax     = 0;
+	mCachedShapeCount   = 0;
+	mPcPose             = nullptr;
+	mPcPoseShape        = nullptr;
+	mPcPoseAnimCtx      = 0;
+	mPcPoseAnimData     = 0;
+	mPcNoPrev           = 0;
+	mPcIsClone          = 1;
+	mPcDebugSnap        = 0;
+	mPcCacheHoisted     = 0;
+}
+
+bool Graphics::pcDebugInfo() const
+{
+	return mPcIsClone ? mPcDebugSnap != 0 : gsys->mToggleDebugInfo != 0;
+}
+
+// drawrec: the fields calcLighting(1.0f) leaves, without the GX loads.
+void Graphics::pcLightingModel()
+{
+	mLightIntensity  = 1.0f;
+	s32 lightIndex   = 0;
+	mActiveLightMask = 0;
+	FOREACH_NODE(Light, mLight.mChild, l)
+	{
+		mActiveLightMask |= 1 << lightIndex;
+		if (++lightIndex == 7u) {
+			break;
+		}
+	}
+	if (mLight.mChild) {
+		mLightDistance = 50.0f;
+	}
+	GColor& c    = static_cast<DGXGraphics*>(this)->mPcDgx->colors[0];
+	c.mAmbColor.r = mAmbientColour.r;
+	c.mAmbColor.g = mAmbientColour.g;
+	c.mAmbColor.b = mAmbientColour.b;
+	c.mAmbColor.a = f32(mAmbientColour.a) * mLightIntensity;
+}
+#endif
 
 /**
  * @todo: Documentation
@@ -896,7 +1008,7 @@ void Graphics::resetMatrixBuffer()
 Matrix4f* Graphics::getMatrices(int requestedMatrixCount)
 {
 	if (mNextFreeMatrixIdx + requestedMatrixCount > mMaxMatrixCount) {
-		ERROR("using too many matrices!!\n");
+		ERROR("using too many matrices!! (%d + %d > %d)\n", mNextFreeMatrixIdx, requestedMatrixCount, mMaxMatrixCount);
 	}
 
 	Matrix4f* mtx = &mMatrixBuffer[mNextFreeMatrixIdx];
@@ -921,11 +1033,17 @@ void Graphics::resetCacheBuffer()
 void Graphics::cacheShape(BaseShape* shape, ShapeDynMaterials* mats)
 {
 	if (mCachedShapeCount >= mCachedShapeMax) {
-		ERROR("using too many shapes!!\n");
+		ERROR("using too many shapes!! (%d >= %d)\n", mCachedShapeCount, mCachedShapeMax);
 	}
 
 	CachedShape* cache = &mCachedShapes[mCachedShapeCount];
+#if defined(PIKI_PC_PORT)
+	// The pose being drawn.
+	Matrix4f* const anim = (shape == mPcPoseShape) ? mPcPose : shape->mAnimMatrices;
+	Vector3f pos(anim[0].mMtx[0][3], anim[0].mMtx[1][3], anim[0].mMtx[2][3]);
+#else
 	Vector3f pos(shape->getAnimMatrix(0).mMtx[0][3], shape->getAnimMatrix(0).mMtx[1][3], shape->getAnimMatrix(0).mMtx[2][3]);
+#endif
 	cache->mDistanceFromOrigin = pos.length();
 
 	bool insertHappened = false;
@@ -943,7 +1061,11 @@ void Graphics::cacheShape(BaseShape* shape, ShapeDynMaterials* mats)
 
 	cache->mAnimatedMaterials = mats;
 	cache->mParentShape       = (Shape*)shape;
-	cache->mAnimMatrices      = shape->mAnimMatrices;
+#if defined(PIKI_PC_PORT)
+	cache->mAnimMatrices = anim;
+#else
+	cache->mAnimMatrices = shape->mAnimMatrices;
+#endif
 	mCachedShapeCount++;
 }
 
@@ -952,6 +1074,21 @@ void Graphics::cacheShape(BaseShape* shape, ShapeDynMaterials* mats)
  */
 void Graphics::flushCachedShapes()
 {
+#if defined(__vita__)
+	// drawrec: join the chain before the flush.
+	if (!mPcIsClone && g_pcDrChain != 0) {
+		bool own = g_pcDrChainHoisted != 0;
+		for (CachedShape* i = mShapeCache.mPrev; !own && i != &mShapeCache; i = i->mPrev) {
+			own = i->mParentShape->mPcSegChain == g_pcDrChain;
+			for (ShapeDynMaterials* j = i->mAnimatedMaterials; !own && j; j = j->mNext) {
+				own = j->mModel && j->mModel->mPcSegChain == g_pcDrChain;
+			}
+		}
+		if (own) {
+			vita_drawrec_join(kDrJoinFlush);
+		}
+	}
+#endif
 	u32 oldRenderState = mMatRenderMask;
 
 	mMatRenderMask = MATFLAG_AlphaBlend;
@@ -1422,11 +1559,22 @@ int Graphics::calcLighting(f32 intensity)
 		setLight((Light*)mLight.mChild, 7);
 	}
 
+#if defined(__vita__)
+	s32& alc = mPcIsClone ? *reinterpret_cast<s32*>(&gPcDgxSub.local[5]) : gsys->mActiveLightCount;
+	if (lightIndex > alc) {
+		alc = lightIndex;
+	}
+#else
 	if (lightIndex > gsys->mActiveLightCount) {
 		gsys->mActiveLightCount = lightIndex;
 	}
+#endif
 
+#if defined(__vita__)
+	setLightingNoPrev(true, nullptr);
+#else
 	setLighting(true, nullptr);
+#endif
 	return lightIndex;
 
 	STACK_PAD_VAR(2);

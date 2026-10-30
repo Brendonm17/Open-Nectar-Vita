@@ -15,6 +15,12 @@
 #include "gameflow.h"
 #include "jaudio/pikiinter.h"
 #include "sysNew.h"
+#if defined(__vita__)
+// node.cpp: watched lists, indexed access.
+void pcNodeListWatch(CoreNode* root);
+CoreNode* pcNodeListAt(CoreNode* root, int idx);
+int pcNodeListCount(CoreNode* root);
+#endif
 
 WorkObjectMgr* workObjectMgr;
 
@@ -168,6 +174,9 @@ immut char* WorkObjectMgr::getShapeName(int type)
  */
 WorkObjectMgr::WorkObjectMgr()
 {
+#if defined(__vita__)
+	pcNodeListWatch(&mRootNode);
+#endif
 	mItemShapes          = new Shape*[5];
 	mShouldThisShapeLoad = new bool[5];
 
@@ -252,10 +261,14 @@ Creature* WorkObjectMgr::birth(int wObjType, int p2)
  */
 Creature* WorkObjectMgr::getCreature(int index)
 {
+#if defined(__vita__)
+	WorkObjectNode* node = static_cast<WorkObjectNode*>(pcNodeListAt(&mRootNode, index));
+#else
 	WorkObjectNode* node = static_cast<WorkObjectNode*>(mRootNode.mChild);
 	for (int i = 0; i < index; i++) {
 		node = static_cast<WorkObjectNode*>(node->mNext);
 	}
+#endif
 
 	if (!node)
 		return nullptr;
@@ -284,7 +297,11 @@ int WorkObjectMgr::getNext(int idx)
  */
 bool WorkObjectMgr::isDone(int id)
 {
+#if defined(__vita__)
+	if (id >= pcNodeListCount(&mRootNode)) {
+#else
 	if (id >= mRootNode.getChildCount()) {
+#endif
 		return true;
 	}
 	return false;
@@ -295,7 +312,11 @@ bool WorkObjectMgr::isDone(int id)
  */
 int WorkObjectMgr::getSize()
 {
+#if defined(__vita__)
+	return pcNodeListCount(&mRootNode);
+#else
 	return mRootNode.getChildCount();
+#endif
 }
 
 /**

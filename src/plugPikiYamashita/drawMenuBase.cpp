@@ -168,6 +168,7 @@ bool zen::DrawMenuBase::modeOperation(Controller* controller)
 	}
 
 	if (startSel != mCurrentHover) {
+		newItem = &mMenuItems[mCurrentHover];
 		SeSystem::playSysSe(SYSSE_MOVE1);
 		mLeftCursorMgr.move(newItem->getIconLPosH(), newItem->getIconLPosV(), 0.5f);
 		mRightCursorMgr.move(newItem->getIconRPosH(), newItem->getIconRPosV(), 0.5f);

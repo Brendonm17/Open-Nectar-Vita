@@ -52,6 +52,7 @@ void ARAMStartDMA(u32, u32, u32, u32, s32, u32*, void (*)())
  */
 void Jac_SetAudioARAMSize(u32 size)
 {
+	PC_JAC_JOIN();
 	SELECTED_ARAM_SIZE = size;
 }
 
@@ -81,6 +82,7 @@ void* ARAllocFull(u32* outSize)
  */
 void Jac_InitARAM(u32 loadAudiorom)
 {
+	PC_JAC_JOIN();
 	volatile u32 audiorom_size;
 	u32 aram_size;
 

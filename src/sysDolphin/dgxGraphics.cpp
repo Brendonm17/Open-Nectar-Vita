@@ -22,6 +22,22 @@ DEFINE_ERROR(24)
  */
 DEFINE_PRINT("DGXGraphics")
 
+#if defined(__vita__)
+// Vertex-state images and generation-on-emit.
+#include "vita_gxq.h"
+// DGXGraphics recorder context (pcR, pcD); vita_gxq_bind.h is the last include.
+#include "pcDgxCtx.h"
+#include "vita_drawrec.h"
+#include "vita_gxq_bind.h"
+extern bool gPcEfbOffscreenPass;   // boss shadow pass draws into the offscreen EFB
+PcDgxCtx gPcDgxMain;
+PcDgxCtx gPcDgxSub; // gW's DGX state
+// Grouped pos/nrm matrix loads (gxr_load_posnrm_group).
+static const int kPcMtxGroupMax = 16; // larger groups keep the per-slot loads
+// initMesh's vertex state as one image, built by pcDgxWarmUp.
+static GxqVtxImage sPcMeshImg;
+#endif
+
 GXRenderModeObj progressiveRenderMode = {
 	VI_TVMODE_NTSC_PROG, // viTVmode
 	640,                 // fbWidth
@@ -128,26 +144,137 @@ static int sFirstFrame = 4;
 static int kDefaultFifoSize = 0x60000;
 static int kTempFifoSize    = 0x10000;
 static int kDefaultDLSize   = 0x20000;
+#if !defined(__vita__)
 static bool sendMtxIndx     = true;
 static bool sendTxUVIndx[8] = { true, false, false, false, false, false, false, false };
+#endif
 
 static u32 sFrameSize;
 static int oldVerts;
 static int oldNorms;
 static int oldCols;
+#if !defined(__vita__)
 static int oldCull;
 static int oldTevGroup;
+#endif
 static int frameNum;
 
 static int oldTexs[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
 
+// Per-recorder state on the Vita, file statics elsewhere.
+#if defined(__vita__)
+#define PC_OLD_CULL      (pcD.cullPrev)
+#define PC_OLD_TEV_GROUP (pcD.tevGroup)
+#define PC_GCOLORS       (pcD.colors)
+#define PC_SEND_MTX      (pcD.sendMtx)
+#define PC_SEND_TX       (pcD.sendTx)
+#define PC_SEND_COL      (pcD.sendCol)
+#define PC_SEND_NBT      (pcD.sendNbt)
+#define PC_SEND_TXUV     (pcD.sendTxUV)
+#else
+#define PC_OLD_CULL      oldCull
+#define PC_OLD_TEV_GROUP oldTevGroup
+#define PC_GCOLORS       GColors
+#define PC_SEND_MTX      sendMtxIndx
+#define PC_SEND_TX       sendTxIndx
+#define PC_SEND_COL      sendColIndx
+#define PC_SEND_NBT      sendNbtIndx
+#define PC_SEND_TXUV     sendTxUVIndx
+#endif
+#if !defined(__vita__)
 GColor GColors[1];
+#else
+// PcDgxCtx defaults.
+static void pcDgxBindSinks(PcDgxCtx& d)
+{
+	if (gsys) {
+		d.materialCount    = &gsys->mMaterialCount;
+		d.lightingSets     = &gsys->mLightingSets;
+		d.polygonCount     = &gsys->mPolygonCount;
+		d.dispCount        = &gsys->mDispCount;
+		d.lightSetNum      = &gsys->mLightSetNum;
+		d.activeLightCount = &gsys->mActiveLightCount;
+	} else {
+		d.materialCount    = &d.local[0];
+		d.lightingSets     = &d.local[1];
+		d.polygonCount     = reinterpret_cast<int*>(&d.local[2]);
+		d.dispCount        = &d.local[3];
+		d.lightSetNum      = &d.local[4];
+		d.activeLightCount = reinterpret_cast<s32*>(&d.local[5]);
+	}
+}
+static const GXVtxDescList* pcMeshVCD();
+static const GXVtxAttrFmtList* pcMeshVAT();
+// The constructor's warm-up.
+static void pcDgxWarmUp(PcDgxCtx& d, GxqCtx& rec)
+{
+	d.rec         = &rec;
+	d.sendMtx     = true;
+	d.sendTxUV[0] = true;
+	pcDgxBindSinks(d);
+	pc_gx_vtx_image_init(sPcMeshImg);
+	pc_gx_vtx_image_add_fmt_list(sPcMeshImg, GX_VTXFMT0, pcMeshVAT());
+	pc_gx_vtx_image_add_desc_list(sPcMeshImg, pcMeshVCD());
+}
+
+// drawrec: fork, fence and join of the DGX state (pcDgxCtx.h)
+void pcDgxForkCopy(const PcDgxCtx& from, PcDgxCtx& to)
+{
+	to.cullPrev = from.cullPrev;
+	to.tevGroup = from.tevGroup;
+	to.sendMtx  = from.sendMtx;
+	to.sendTx   = from.sendTx;
+	to.sendCol  = from.sendCol;
+	to.sendNbt  = from.sendNbt;
+	memcpy(to.sendTxUV, from.sendTxUV, sizeof(to.sendTxUV));
+	to.pe       = from.pe;
+	to.kcol     = from.kcol;
+	to.tev      = from.tev;
+	to.chan     = from.chan;
+	to.tevReg   = from.tevReg;
+	to.matCache = from.matCache;
+	to.vtxCache = from.vtxCache;
+	to.meshPass = from.meshPass;
+	memcpy(to.colors, from.colors, sizeof(to.colors));
+}
+void pcDgxFence(PcDgxCtx& d)
+{
+	d.cullPrev     = -1; // no mode: the next setCullFront sends
+	d.pe.valid     = false;
+	d.kcol.valid   = false;
+	d.tev.valid    = false;
+	d.chan.valid   = false;
+	d.tevReg.valid = false;
+	d.matCache.held  = false;
+	d.vtxCache.valid = false;
+	++d.meshPass;
+}
+void pcDgxRetire(PcDgxCtx& sub, PcDgxCtx& main)
+{
+	*main.materialCount += sub.local[0];
+	*main.lightingSets += sub.local[1];
+	*main.polygonCount += int(sub.local[2]);
+	*main.dispCount += sub.local[3];
+	*main.lightSetNum += sub.local[4];
+	if (s32(sub.local[5]) > *main.activeLightCount) {
+		*main.activeLightCount = s32(sub.local[5]);
+	}
+	memset(sub.local, 0, sizeof(sub.local));
+}
+#endif
 
 /**
  * @todo: Documentation
  */
 DGXGraphics::DGXGraphics(bool flag)
 {
+#if defined(__vita__)
+	// The game thread's recorder and DGX state.
+	mPcRec = &gGxqMain;
+	mPcDgx = &gPcDgxMain;
+	pcDgxWarmUp(gPcDgxMain, gGxqMain);
+	PC_DGX_CTX();
+#endif
 	mDefaultFifoBuffer = new (PIKI_ALIGNED(0x20)) u8[kDefaultFifoSize];
 	mTempFifoBuffer    = new (PIKI_ALIGNED(0x20)) u8[kTempFifoSize];
 	mDefaultDLBuffer   = new (PIKI_ALIGNED(0x20)) u8[kDefaultDLSize];
@@ -244,6 +371,41 @@ DGXGraphics::DGXGraphics(bool flag)
 #endif
 }
 
+#if defined(__vita__)
+// drawrec: gW's DGXGraphics.
+DGXGraphics::DGXGraphics(PcCloneTag tag)
+    : Graphics(tag)
+{
+	mPcRec = &gGxqSub;
+	mPcDgx = &gPcDgxSub;
+	gPcDgxSub.rec         = &gGxqSub;
+	gPcDgxSub.sendMtx     = true;
+	gPcDgxSub.sendTxUV[0] = true;
+	gPcDgxSub.materialCount    = &gPcDgxSub.local[0];
+	gPcDgxSub.lightingSets     = &gPcDgxSub.local[1];
+	gPcDgxSub.polygonCount     = reinterpret_cast<int*>(&gPcDgxSub.local[2]);
+	gPcDgxSub.dispCount        = &gPcDgxSub.local[3];
+	gPcDgxSub.lightSetNum      = &gPcDgxSub.local[4];
+	gPcDgxSub.activeLightCount = reinterpret_cast<s32*>(&gPcDgxSub.local[5]);
+	mGpFifo               = nullptr;
+	mDefaultFifoBuffer    = nullptr;
+	mTempFifoBuffer       = nullptr;
+	mDefaultDLBuffer      = nullptr;
+	mDisplayListPtr       = nullptr;
+	mDisplayListSize      = 0;
+	_3D0                  = 0;
+	mIsEnvMapActive       = false;
+	mCurrentMatrixId      = 0;
+	mTexMtxBaseID         = 30;
+	memset(mProjectionTextureMatrix, 0, sizeof(mProjectionTextureMatrix));
+	mDisplayBuffer        = nullptr;
+	mPostRetraceWaitCount = 0;
+	mRetraceCount         = 0;
+	mSystemFrameRate      = 0;
+	mRetraceCallback      = nullptr;
+}
+#endif
+
 /**
  * @todo: Documentation
  */
@@ -306,14 +468,19 @@ void DGXGraphics::videoReset()
  */
 void DGXGraphics::resetCopyFilter()
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	GXSetCopyFilter(sScreenMode[mRenderMode]->aa, sScreenMode[mRenderMode]->sample_pattern, GX_TRUE, sScreenMode[mRenderMode]->vfilter);
 }
 
 DGXGraphics* DGXGraphics::gfx;
 
+#if !defined(__vita__)
 static bool sendTxIndx;  // type unsure
 static bool sendColIndx; // type unsure
 static bool sendNbtIndx; // type unsure
+#endif
 
 /**
  * @todo: Documentation
@@ -358,6 +525,9 @@ void DGXGraphics::useDList(u32 num)
  */
 u32 DGXGraphics::compileMaterial(Material* mat)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	if (!(mat->mFlags & MATFLAG_PVW)) {
 		return 0;
 	}
@@ -471,10 +641,14 @@ u32 DGXGraphics::compileMaterial(Material* mat)
  */
 void DGXGraphics::initRender(int a1, int a2)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+	pcDgxBindSinks(pcD);
+#endif
 	frameNum++;
 	Graphics::initRender(a1, a2);
 	mLightIntensity = 1.0f;
-	oldCull         = 0;
+	PC_OLD_CULL     = 0;
 	GXSetCullMode(GX_CULL_BACK);
 	GXSetCoPlanar(GX_FALSE);
 	GXSetColorUpdate(GX_TRUE);
@@ -523,6 +697,9 @@ void DGXGraphics::initRender(int a1, int a2)
  */
 void DGXGraphics::beginRender()
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	if (gsys->mIsRendering) {
 		ERROR("still busy with GP!\n");
 	}
@@ -545,6 +722,9 @@ void DGXGraphics::GXReInit()
  */
 void DGXGraphics::doneRender()
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	GXFlush();
 	GXDrawDone();
 	gsys->mIsRendering = 0;
@@ -555,6 +735,9 @@ void DGXGraphics::doneRender()
  */
 void DGXGraphics::waitRetrace()
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	waitPostRetrace();
 	if (sFirstFrame) {
 		sFirstFrame--;
@@ -644,6 +827,9 @@ void DGXGraphics::calcViewMatrix(immut Matrix4f& modelMtx, Matrix4f& viewMtx)
  */
 f32 DGXGraphics::setLineWidth(f32 width)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	f32 old    = mLineWidth;
 	mLineWidth = width;
 	GXSetLineWidth(mLineWidth * 6.0f, GX_TO_ZERO);
@@ -655,6 +841,9 @@ f32 DGXGraphics::setLineWidth(f32 width)
  */
 bool DGXGraphics::setDepth(bool enabled)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	bool old        = mIsDepthEnabled;
 	mIsDepthEnabled = enabled;
 	if (!enabled) {
@@ -670,8 +859,11 @@ bool DGXGraphics::setDepth(bool enabled)
  */
 int DGXGraphics::setCullFront(int cull)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	mCullMode = cull;
-	if (oldCull != mCullMode) {
+	if (PC_OLD_CULL != mCullMode) {
 		if (mCullMode == 1) {
 			GXSetCullMode(GX_CULL_FRONT);
 		} else if (mCullMode == 0) {
@@ -680,8 +872,8 @@ int DGXGraphics::setCullFront(int cull)
 			GXSetCullMode(GX_CULL_NONE);
 		}
 	}
-	oldCull = mCullMode;
-	return oldCull;
+	PC_OLD_CULL = mCullMode;
+	return PC_OLD_CULL;
 }
 
 /**
@@ -689,22 +881,158 @@ int DGXGraphics::setCullFront(int cull)
  */
 void DGXGraphics::setAmbient()
 {
-	GColors[0].mAmbColor.r = mAmbientColour.r;
-	GColors[0].mAmbColor.g = mAmbientColour.g;
-	GColors[0].mAmbColor.b = mAmbientColour.b;
-	GColors[0].mAmbColor.a = f32(mAmbientColour.a) * mLightIntensity;
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
+	PC_GCOLORS[0].mAmbColor.r = mAmbientColour.r;
+	PC_GCOLORS[0].mAmbColor.g = mAmbientColour.g;
+	PC_GCOLORS[0].mAmbColor.b = mAmbientColour.b;
+	PC_GCOLORS[0].mAmbColor.a = f32(mAmbientColour.a) * mLightIntensity;
 
-	GXSetChanAmbColor(GX_COLOR0A0, GColors[0].mAmbColor);
-	GXSetChanMatColor(GX_COLOR1A1, GColors[0].mMatColor);
+	GXSetChanAmbColor(GX_COLOR0A0, PC_GCOLORS[0].mAmbColor);
+	GXSetChanMatColor(GX_COLOR1A1, PC_GCOLORS[0].mMatColor);
 }
+
+#if defined(PIKI_PC_PORT) && defined(__vita__)
+#define PC_VITA_MATBLOCKS 1
+namespace {
+// Material state blocks: skipped when unchanged since last sent.
+
+// pcBlockSame's verdict: send the block, or skip it.
+enum { kPcBlockSend = 0, kPcBlockSkip = 1 };
+
+// Block keys compared a word at a time.
+static_assert(sizeof(PVWTevStage) == 30, "a TEV stage is 30 bytes: the key's word loop ends in a 2-byte tail for an odd count");
+inline u32 pcLd32(const void* p)
+{
+	u32 v;
+	memcpy(&v, p, sizeof(v));
+	return v;
+}
+inline bool pcKeyEq(const u8* stored, const void* key, u32 size)
+{
+	const u8* k = static_cast<const u8*>(key);
+	if (size == 16) {
+		return ((pcLd32(stored) ^ pcLd32(k)) | (pcLd32(stored + 4) ^ pcLd32(k + 4)) | (pcLd32(stored + 8) ^ pcLd32(k + 8))
+		        | (pcLd32(stored + 12) ^ pcLd32(k + 12)))
+		    == 0;
+	}
+	if (size == 24) {
+		return ((pcLd32(stored) ^ pcLd32(k)) | (pcLd32(stored + 4) ^ pcLd32(k + 4)) | (pcLd32(stored + 8) ^ pcLd32(k + 8))
+		        | (pcLd32(stored + 12) ^ pcLd32(k + 12)) | (pcLd32(stored + 16) ^ pcLd32(k + 16)) | (pcLd32(stored + 20) ^ pcLd32(k + 20)))
+		    == 0;
+	}
+	return memcmp(stored, key, size) == 0;
+}
+// The TEV block's key size for a material (0: not keyed).
+inline u32 pcTevKeySize(Material* mat)
+{
+	const u32 count = mat->mTevInfo->mTevStageCount;
+	return count > 16 ? 0 : u32(sizeof(count)) + count * u32(sizeof(PVWTevStage));
+}
+// The stored TEV key against the material, in place (the sizes already agree).
+inline bool pcTevKeyEq(const u8* stored, Material* mat)
+{
+	const u32 count = mat->mTevInfo->mTevStageCount;
+	if (pcLd32(stored) != count) {
+		return false;
+	}
+	const u8* s = stored + sizeof(count);
+	const u8* t = reinterpret_cast<const u8*>(mat->mTevInfo->mTevStages);
+	u32 n       = count * u32(sizeof(PVWTevStage));
+	for (; n >= 4; n -= 4, s += 4, t += 4) {
+		if (pcLd32(s) != pcLd32(t)) {
+			return false;
+		}
+	}
+	if (n) { // odd count's last two bytes
+		u16 a, c;
+		memcpy(&a, s, 2);
+		memcpy(&c, t, 2);
+		return a == c;
+	}
+	return true;
+}
+
+// The verdict, given the key compare.
+template <class Eq>
+__attribute__((no_instrument_function)) inline int pcBlockVerdict(GxqCtx& pcR, immut PcStateBlock& b, int cat, u32 size, Eq eq)
+{
+	if (!b.valid || b.size != size) {
+		return kPcBlockSend;
+	}
+	if (b.gen == pcR.d.stateGen[cat]) {
+		// Nothing of the category called since.
+		return eq() ? kPcBlockSkip : kPcBlockSend;
+	}
+	if (!pcR.d.genOnEmit || b.genEmit != pcR.d.stateGenEmit[cat] || !eq()) {
+		return kPcBlockSend;
+	}
+	return kPcBlockSkip;
+}
+
+inline int pcBlockSame(GxqCtx& pcR, immut PcStateBlock& b, int cat, const void* key, u32 size)
+{
+	auto eq = [&]() __attribute__((no_instrument_function)) { return pcKeyEq(b.key, key, size); };
+	return pcBlockVerdict(pcR, b, cat, size, eq);
+}
+// The TEV block, compared in place (its key is the material's stages).
+inline int pcBlockSameTev(GxqCtx& pcR, immut PcStateBlock& b, Material* mat, u32 size)
+{
+	auto eq = [&]() __attribute__((no_instrument_function)) { return pcTevKeyEq(b.key, mat); };
+	return pcBlockVerdict(pcR, b, PCGX_GEN_TEV, size, eq);
+}
+
+inline void pcBlockStore(GxqCtx& pcR, PcStateBlock& b, int cat, const void* key, u32 size)
+{
+	b.valid = size <= sizeof(b.key);
+	if (b.valid) {
+		memcpy(b.key, key, size);
+		b.size    = size;
+		b.gen     = pcR.d.stateGen[cat];
+		b.genEmit = pcR.d.stateGenEmit[cat];
+	}
+}
+// The TEV block's store: the count word and the stages, copied now.
+inline void pcBlockStoreTev(GxqCtx& pcR, PcStateBlock& b, Material* mat, u32 size)
+{
+	b.valid = size <= sizeof(b.key);
+	if (b.valid) {
+		const u32 count = mat->mTevInfo->mTevStageCount;
+		memcpy(b.key, &count, sizeof(count));
+		if (count) {
+			memcpy(b.key + sizeof(count), mat->mTevInfo->mTevStages, count * sizeof(PVWTevStage));
+		}
+		b.size    = size;
+		b.gen     = pcR.d.stateGen[PCGX_GEN_TEV];
+		b.genEmit = pcR.d.stateGenEmit[PCGX_GEN_TEV];
+	}
+}
+
+
+} // namespace
+#endif
 
 /**
  * @todo: Documentation
  */
 bool DGXGraphics::setLighting(bool set, PVWLightingInfo* lightInfo)
 {
-	bool prevSetting   = mIsLightingEnabled;
+#if defined(__vita__)
+	PC_DGX_CTX();
+	// drawrec: no previous value read.
+	bool prevSetting = mPcNoPrev ? false : bool(mIsLightingEnabled);
+#else
+	bool prevSetting = mIsLightingEnabled;
+#endif
 	mIsLightingEnabled = set;
+#if defined(PC_VITA_MATBLOCKS)
+	// The lighting channels are a function of these four and nothing else.
+	const u32 chanKey[4] = { u32(set), lightInfo ? 1u : 0u, lightInfo ? lightInfo->mCtrlFlag : 0u, u32(mActiveLightMask) };
+	if (pcBlockSame(pcR, pcD.chan, PCGX_GEN_CHAN, chanKey, sizeof(chanKey)) != kPcBlockSend) {
+		return prevSetting;
+	}
+#endif
 	if (lightInfo) {
 		bool doEnableColor0 = (lightInfo->mCtrlFlag & LightingControlFlags::EnableColor0);
 		u32 diffFnColor0    = (lightInfo->mCtrlFlag >> LightingControlFlags::DiffFnColor0Shift) & 0x3;
@@ -736,6 +1064,9 @@ bool DGXGraphics::setLighting(bool set, PVWLightingInfo* lightInfo)
 	}
 
 	GXSetNumChans(numChans);
+#if defined(PC_VITA_MATBLOCKS)
+	pcBlockStore(pcR, pcD.chan, PCGX_GEN_CHAN, chanKey, sizeof(chanKey));
+#endif
 	return prevSetting;
 }
 
@@ -744,7 +1075,12 @@ bool DGXGraphics::setLighting(bool set, PVWLightingInfo* lightInfo)
  */
 void DGXGraphics::setLight(Light* light, int idx)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+	++*pcD.lightSetNum;
+#else
 	gsys->mLightSetNum++;
+#endif
 	GXLightObj* gxLight = &mGXLights[idx];
 	GXInitLightAttn(gxLight, light->mSpotConstTerm, light->mSpotLinearTerm, light->mSpotQuadTerm, light->mConstantAttn, light->mLinearAttn,
 	                light->mQuadAttn);
@@ -779,15 +1115,29 @@ void DGXGraphics::setLight(Light* light, int idx)
 	GXLoadLightObjImm(gxLight, GXLightID(1 << idx));
 }
 
+#if defined(PIKI_PC_PORT)
+// The console's 2D scissor, restored for 3D.
+static bool sPcUiScissor = false;
+static u32 sPcUiBox[4];      // the narrowed 2D scissor
+static u32 sPcGcScissor[4];  // the console's 2D bounds
+#endif
+
 /**
  * @todo: Documentation
  */
 void DGXGraphics::setPerspective(Mtx44 mtx, f32 fovY, f32 aspect, f32 zNear, f32 zFar, f32 scale)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 #if defined(PIKI_PC_PORT)
 	// Override aspect ratio with configured value from pc_gfx
 	f32 actualAspect = pc_gfx_get_current_aspect_ratio();
 	if (actualAspect <= 0.0f) actualAspect = aspect;
+#if defined(__vita__)
+	// The offscreen EFB keeps the game's projection.
+	if (gPcEfbOffscreenPass) actualAspect = aspect;
+#endif
 
 	// Adjust FOV for wider aspect ratios to show more horizontally
 	// Keep vertical FOV, extend horizontal view
@@ -798,6 +1148,21 @@ void DGXGraphics::setPerspective(Mtx44 mtx, f32 fovY, f32 aspect, f32 zNear, f32
 	MTXPerspective(mtx, fovY, aspect, zNear, zFar);
 #endif
 	GXSetProjection(mtx, GX_PERSPECTIVE);
+#if defined(PIKI_PC_PORT)
+	// Restore the console's scissor after a 2D pass.
+#if defined(__vita__)
+	if (sPcUiScissor && pcR.isMain && !gPcEfbOffscreenPass) {
+#else
+	if (sPcUiScissor) {
+#endif
+		sPcUiScissor = false;
+		u32 cur[4];
+		GXGetScissor(&cur[0], &cur[1], &cur[2], &cur[3]);
+		if (cur[0] == sPcUiBox[0] && cur[1] == sPcUiBox[1] && cur[2] == sPcUiBox[2] && cur[3] == sPcUiBox[3]) {
+			GXSetScissor(sPcGcScissor[0], sPcGcScissor[1], sPcGcScissor[2], sPcGcScissor[3]);
+		}
+	}
+#endif
 	f32 screenSpaceDepth = 1.0f / (zFar - zNear);
 
 	mtx[2][2] = screenSpaceDepth * -(zFar + zNear);
@@ -813,16 +1178,53 @@ void DGXGraphics::setPerspective(Mtx44 mtx, f32 fovY, f32 aspect, f32 zNear, f32
  * @param orthoMtx Output orthogonal matrix in device coordinates.
  * @param bounds Bounds to use when constructing the orthogonal matrix.
  */
+#if defined(PIKI_PC_PORT)
+bool gPcUiPlatesEnabled = true;
+#if defined(__vita__)
+bool gPcEfbOffscreenPass = false;   // LightCamera::calcProjection draws into the offscreen EFB
+#endif   // see fillRectangle
+#endif
+
 void DGXGraphics::setOrthogonal(Mtx44 orthoMtx, immut RectArea& bounds)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	MTXOrtho(orthoMtx, bounds.mMinY, bounds.mMaxY, bounds.mMinX, bounds.mMaxX, 0.0f, -1.0f);
+#if defined(PIKI_PC_PORT)
+	// Interface at 4:3, centred.
+	{
+		const f32 sx = pc_gfx_ui_projection_scale_x();
+		for (int c = 0; c < 4; c++) orthoMtx[0][c] *= sx;
+	}
+#endif
 	GXSetProjection(orthoMtx, GX_ORTHOGRAPHIC);
 	GXLoadPosMtxImm(Matrix4f::ident.mMtx, 0);
 	GXSetCurrentMtx(0);
 	GXSetChanCtrl(GX_COLOR0A0, GX_FALSE, GX_SRC_VTX, GX_SRC_VTX, 1, GX_DF_NONE, GX_AF_NONE);
 	GXSetNumChans(1);
 	GXSetZMode(GX_FALSE, GX_LEQUAL, GX_TRUE);
+#if defined(PIKI_PC_PORT)
+	// Scissor to the 4:3 box.
+	{
+		if (pc_gfx_get_section_clip_43()) {
+			GXSetScissor(bounds.mMinX, bounds.mMinY, bounds.width(), bounds.height());
+		} else {
+			int bx, bw;
+			pc_gfx_ui_box(&bx, &bw);
+			const f32 sx = f32(bw) / 640.0f;
+			GXSetScissor(u32(bx + bounds.mMinX * sx), bounds.mMinY, u32(bounds.width() * sx), bounds.height());
+		}
+		sPcGcScissor[0] = u32(bounds.mMinX);
+		sPcGcScissor[1] = u32(bounds.mMinY);
+		sPcGcScissor[2] = u32(bounds.width());
+		sPcGcScissor[3] = u32(bounds.height());
+		GXGetScissor(&sPcUiBox[0], &sPcUiBox[1], &sPcUiBox[2], &sPcUiBox[3]);
+		sPcUiScissor = true;
+	}
+#else
 	setScissor(bounds);
+#endif
 	setViewport(bounds);
 	GXSetNumTexGens(1);
 	GXSetTexCoordGen2(GX_TEXCOORD0, GX_TG_MTX3X4, GX_TG_TEX0, 0x3c, 0, 0x7d);
@@ -835,6 +1237,9 @@ void DGXGraphics::setOrthogonal(Mtx44 orthoMtx, immut RectArea& bounds)
  */
 void DGXGraphics::setScissor(immut RectArea& bounds)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	GXSetScissor(bounds.mMinX, bounds.mMinY, bounds.width(), bounds.height());
 }
 
@@ -843,6 +1248,9 @@ void DGXGraphics::setScissor(immut RectArea& bounds)
  */
 void DGXGraphics::setViewport(immut RectArea& bounds)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	GXSetViewport(bounds.mMinX, bounds.mMinY, bounds.width(), bounds.height(), 0.0f, 1.0f);
 }
 
@@ -851,6 +1259,9 @@ void DGXGraphics::setViewport(immut RectArea& bounds)
  */
 void DGXGraphics::setViewportOffset(immut RectArea& bounds)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	GXSetScissorBoxOffset(-bounds.mMinX, -bounds.mMinY);
 }
 
@@ -866,6 +1277,9 @@ void DGXGraphics::initReflectTex(bool enable)
  */
 void DGXGraphics::initProjTex(bool enableProj, LightCamera* projCamera)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	STACK_PAD_VAR(0x40);
 	Mtx finalProjTexMtx;
 	if (enableProj) {
@@ -884,8 +1298,54 @@ void DGXGraphics::initProjTex(bool enableProj, LightCamera* projCamera)
 /**
  * @todo: Documentation
  */
+#if defined(__vita__)
+// drawrec: deferred texgen matrix load (GXQ_LOAD_TEX_MTX_SPLICE).
+static __attribute__((noinline)) void pcUseMatrixSplice(DGXGraphics& g, GxqCtx& pcR, immut Matrix4f& mtx, int gxID)
+{
+	Mtx texMtx;
+	f32 mag      = 0.5f / VECMag((Vec*)mtx.mMtx);
+	texMtx[0][0] = mag * mtx.mMtx[0][0];
+	texMtx[0][1] = mag * mtx.mMtx[0][1];
+	texMtx[0][2] = mag * mtx.mMtx[0][2];
+	texMtx[0][3] = 0.5f;
+	texMtx[1][0] = mag * mtx.mMtx[1][0];
+	texMtx[1][1] = mag * mtx.mMtx[1][1];
+	texMtx[1][2] = mag * mtx.mMtx[1][2];
+	texMtx[1][3] = 0.5f;
+	texMtx[2][0] = texMtx[2][1] = texMtx[2][2] = texMtx[2][3] = 0.0f;
+	u32 known = 0, has = 0, base = 0;
+	if (!g.mHasTexGen.pcUnknown()) {
+		known |= 1u;
+		has = g.mHasTexGen.pcPeek() ? 1u : 0u;
+	}
+	if (!g.mTexMtxBaseID.pcUnknown()) {
+		known |= 2u;
+		base = u32(g.mTexMtxBaseID.pcPeek());
+	}
+	u32 poison[8];
+	int npoison = 0;
+	if (known & 2u) {
+		poison[npoison++] = base + u32(gxID);
+	} else {
+		unsigned bases[8];
+		const int nb = pcDrawrecSpliceBases(bases, 8);
+		if (nb < 0) {
+			npoison = -1;
+		} else {
+			for (int i = 0; i < nb; i++) {
+				poison[npoison++] = bases[i] + u32(gxID);
+			}
+		}
+	}
+	gxr_load_tex_mtx_splice(pcR, texMtx, u32(gxID), known, has, base, poison, npoison);
+}
+#endif
+
 void DGXGraphics::useMatrixQuick(immut Matrix4f& mtx, int id)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	int gxID      = id * 3;
 	mActiveMatrix = &mtx;
 	GXLoadPosMtxImm(mtx.mMtx, gxID);
@@ -912,6 +1372,13 @@ void DGXGraphics::useMatrixQuick(immut Matrix4f& mtx, int id)
 		return;
 	}
 
+#if defined(__vita__)
+	// drawrec: texgen flag or base unknown.
+	if (__builtin_expect(mHasTexGen.pcUnknown() || (mHasTexGen.pcPeek() && mTexMtxBaseID.pcUnknown()), 0)) {
+		pcUseMatrixSplice(*this, pcR, mtx, gxID);
+		return;
+	}
+#endif
 	if (mHasTexGen) {
 		Mtx texMtx;
 		f32 mag      = 0.5f / VECMag((Vec*)mtx.mMtx);
@@ -923,6 +1390,10 @@ void DGXGraphics::useMatrixQuick(immut Matrix4f& mtx, int id)
 		texMtx[1][1] = mag * mtx.mMtx[1][1];
 		texMtx[1][2] = mag * mtx.mMtx[1][2];
 		texMtx[1][3] = 0.5f;
+#if defined(PIKI_PC_PORT)
+		// Row 2 zeroed.
+		texMtx[2][0] = texMtx[2][1] = texMtx[2][2] = texMtx[2][3] = 0.0f;
+#endif
 
 		GXLoadTexMtxImm(texMtx, mTexMtxBaseID + gxID, GX_MTX2x4);
 	}
@@ -935,7 +1406,20 @@ void DGXGraphics::useMatrixQuick(immut Matrix4f& mtx, int id)
  */
 void DGXGraphics::useMatrix(immut Matrix4f& mtx, int a)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+	// Plain useMatrixQuick case as a single queued op.
+	if (!mCustomScale && !mLightCam && !mHasTexGen.pcUnknown() && !mHasTexGen.pcPeek()) {
+		mActiveMatrix         = &mtx;
+		const u32 id          = a * 3;
+		const f32(*matrix)[4] = mtx.mMtx;
+		gxr_load_posnrm_group(pcR, 1, &id, &matrix);
+	} else {
+		useMatrixQuick(mtx, a);
+	}
+#else
 	useMatrixQuick(mtx, a);
+#endif
 	mCurrentMatrixId = a * 3;
 	GXSetCurrentMtx(mCurrentMatrixId);
 }
@@ -945,6 +1429,9 @@ void DGXGraphics::useMatrix(immut Matrix4f& mtx, int a)
  */
 void DGXGraphics::useTexture(Texture* texture, int id)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	mHasTexGen = FALSE;
 	if (!texture || texture != mActiveTexture[id]) {
 		if (texture) {
@@ -969,6 +1456,9 @@ void DGXGraphics::useTexture(Texture* texture, int id)
  */
 void DGXGraphics::setMatMatrices(Material* mat, int p2)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	mHasTexGen = (mat->mTextureInfo.mTevStageCount) ? true : false;
 	GXSetNumTexGens(mat->mTextureInfo.mTexGenDataCount);
 
@@ -1010,16 +1500,49 @@ void DGXGraphics::setMatMatrices(Material* mat, int p2)
 /**
  * @todo: Documentation
  */
+
 void DGXGraphics::setMaterial(Material* mat, bool p2)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	if (mat) {
+#if defined(__vita__)
+		++*pcD.materialCount;
+#else
 		gsys->mMaterialCount++;
+#endif
 
 		if (mat->mFlags & MATFLAG_PVW) {
+#if defined(PC_VITA_MATBLOCKS)
+			u32 tevKeySize = 0; // TEV block key size (0: not keyed)
+			bool tevSkip   = false;
+#endif
 			if (mat->mDisplayListPtr) {
+#if defined(__vita__)
+				// Register display list: channel shadow rule off.
+				gxr_note_register_list(pcR);
+#endif
 				GXCallDisplayList(mat->mDisplayListPtr, mat->mDisplayListSize);
 				GXSetNumChans(mat->mLightingInfo.mNumChans);
+#if defined(PC_VITA_MATBLOCKS)
+				// Register display list: forget every block.
+				pcD.pe.valid = pcD.kcol.valid = pcD.tev.valid = pcD.chan.valid = pcD.tevReg.valid = false;
+#endif
 			} else {
+#if defined(PC_VITA_MATBLOCKS)
+				// Blend, alpha test and depth: from the PE flags, or from the class.
+				const u32 peKey[4] = { (mat->mPeInfo.mControlFlags & 1) ? 1u : 2u,
+					                   (mat->mPeInfo.mControlFlags & 1) ? mat->mPeInfo.mBlendModeFlags
+					                                                     : u32(mat->mFlags & (MATFLAG_InverseColorBlend | MATFLAG_Opaque
+					                                                                         | MATFLAG_AlphaTest | MATFLAG_AlphaBlend)),
+					                   (mat->mPeInfo.mControlFlags & 1) ? mat->mPeInfo.mAlphaCompareFlags : 0u,
+					                   (mat->mPeInfo.mControlFlags & 1) ? mat->mPeInfo.mDepthTestFlags : 0u };
+				const bool peSkip = pcBlockSame(pcR, pcD.pe, PCGX_GEN_PE, peKey, sizeof(peKey)) != kPcBlockSend;
+				if (peSkip) {
+					// already in place
+				} else
+#endif
 				if (mat->mPeInfo.mControlFlags & 1) {
 					GXSetBlendMode(
 					    (GXBlendMode)(mat->mPeInfo.mBlendModeFlags & 0xf), (GXBlendFactor)(mat->mPeInfo.mBlendModeFlags >> 4 & 0xf),
@@ -1052,11 +1575,27 @@ void DGXGraphics::setMaterial(Material* mat, bool p2)
 					GXSetAlphaCompare(GX_ALWAYS, 0, GX_AOP_OR, GX_ALWAYS, 0);
 					GXSetZMode(GX_TRUE, GX_LEQUAL, GX_FALSE);
 				}
-
+#if defined(PC_VITA_MATBLOCKS)
+				if (!peSkip) {
+					pcBlockStore(pcR, pcD.pe, PCGX_GEN_PE, peKey, sizeof(peKey));
+				}
+				const bool kcolSkip = pcBlockSame(pcR, pcD.kcol, PCGX_GEN_KCOL, mat->mTevInfo->mKonstColors,
+				                                  sizeof(mat->mTevInfo->mKonstColors))
+				                   != kPcBlockSend;
+				if (!kcolSkip) {
+#endif
 				GXSetTevKColor(GX_KCOLOR0, reinterpret_cast<GXColor&>(mat->mTevInfo->mKonstColors[0]));
 				GXSetTevKColor(GX_KCOLOR1, reinterpret_cast<GXColor&>(mat->mTevInfo->mKonstColors[1]));
 				GXSetTevKColor(GX_KCOLOR2, reinterpret_cast<GXColor&>(mat->mTevInfo->mKonstColors[2]));
 				GXSetTevKColor(GX_KCOLOR3, reinterpret_cast<GXColor&>(mat->mTevInfo->mKonstColors[3]));
+#if defined(PC_VITA_MATBLOCKS)
+					pcBlockStore(pcR, pcD.kcol, PCGX_GEN_KCOL, mat->mTevInfo->mKonstColors, sizeof(mat->mTevInfo->mKonstColors));
+				}
+				// The TEV stages: sent here and below, and skipped or sent as a whole.
+				tevKeySize = pcTevKeySize(mat);
+				tevSkip    = tevKeySize && pcBlockSameTev(pcR, pcD.tev, mat, tevKeySize) != kPcBlockSend;
+				if (!tevSkip)
+#endif
 				for (int tevStageIdx = 0; tevStageIdx < mat->mTevInfo->mTevStageCount; tevStageIdx++) {
 					PVWTevStage& stage = mat->mTevInfo->mTevStages[tevStageIdx];
 					GXSetTevColorIn((GXTevStageID)tevStageIdx, (GXTevColorArg)stage.mTevColorCombiner.mInArgA,
@@ -1073,7 +1612,11 @@ void DGXGraphics::setMaterial(Material* mat, bool p2)
 					                (GXBool)stage.mTevAlphaCombiner.mDoClamp, (GXTevRegID)stage.mTevAlphaCombiner.mOutReg);
 				}
 
+#if defined(__vita__)
+				++*pcD.lightingSets;
+#else
 				gsys->mLightingSets++;
+#endif
 				setLighting((mat->mLightingInfo.mCtrlFlag & LightingControlFlags::EnableColor0) != 0, &mat->mLightingInfo);
 			}
 
@@ -1085,9 +1628,21 @@ void DGXGraphics::setMaterial(Material* mat, bool p2)
 				}
 			}
 
+#if defined(PC_VITA_MATBLOCKS)
+			// The three TEV colour registers.
+			ShortColour regKey[3] = { mat->mTevInfo->mTevColRegs[0].mAnimatedColor, mat->mTevInfo->mTevColRegs[1].mAnimatedColor,
+				                      mat->mTevInfo->mTevColRegs[2].mAnimatedColor };
+			const bool regSkip = pcBlockSame(pcR, pcD.tevReg, PCGX_GEN_TEVREG, regKey, sizeof(regKey)) != kPcBlockSend;
+			if (!regSkip) {
+#endif
 			GXSetTevColorS10(GX_TEVREG0, *(GXColorS10*)&mat->mTevInfo->mTevColRegs[0].mAnimatedColor);
 			GXSetTevColorS10(GX_TEVREG1, *(GXColorS10*)&mat->mTevInfo->mTevColRegs[1].mAnimatedColor);
 			GXSetTevColorS10(GX_TEVREG2, *(GXColorS10*)&mat->mTevInfo->mTevColRegs[2].mAnimatedColor);
+#if defined(PC_VITA_MATBLOCKS)
+				pcBlockStore(pcR, pcD.tevReg, PCGX_GEN_TEVREG, regKey, sizeof(regKey));
+			}
+			if (!tevSkip) {
+#endif
 
 			GXSetNumTevStages(mat->mTevInfo->mTevStageCount);
 
@@ -1098,6 +1653,15 @@ void DGXGraphics::setMaterial(Material* mat, bool p2)
 				GXSetTevKColorSel(GXTevStageID(tevStageIdx), GXTevKColorSel(stage.mTevKColorSel));
 				GXSetTevKAlphaSel(GXTevStageID(tevStageIdx), GXTevKAlphaSel(stage.mTevKAlphaSel));
 			}
+#if defined(PC_VITA_MATBLOCKS)
+				// Only a material without a register display list keeps the block.
+				if (!mat->mDisplayListPtr && tevKeySize) {
+					pcBlockStoreTev(pcR, pcD.tev, mat, tevKeySize);
+				} else {
+					pcD.tev.valid = false;
+				}
+			}
+#endif
 
 			Colour color;
 			color.set(mat->mColourInfo.mColour.r, mat->mColourInfo.mColour.g, mat->mColourInfo.mColour.b,
@@ -1187,7 +1751,7 @@ void DGXGraphics::setMaterial(Material* mat, bool p2)
 
 	GXSetNumTevStages(1);
 	GXSetTexCoordGen2(GX_TEXCOORD0, GX_TG_MTX3X4, GX_TG_TEX0, GX_IDENTITY, GX_FALSE, GX_PTIDENTITY);
-	oldCull = FALSE;
+	PC_OLD_CULL = FALSE;
 	GXSetCullMode(GX_CULL_BACK);
 
 	STACK_PAD_TERNARY(mCustomScale, 7);
@@ -1218,27 +1782,66 @@ static GXVtxAttrFmtList meshVAT[] = {
 	{ GX_VA_TEX4, GX_TEX_ST, GX_F32, 0 }, { GX_VA_TEX5, GX_TEX_ST, GX_F32, 0 }, { GX_VA_TEX6, GX_TEX_ST, GX_F32, 0 },
 	{ GX_VA_TEX7, GX_TEX_ST, GX_F32, 0 }, { GX_VA_NULL, GX_TEX_ST, GX_S16, 0 },
 };
+#if defined(__vita__)
+// Used by pcDgxWarmUp.
+static const GXVtxDescList* pcMeshVCD()
+{
+	return meshVCD;
+}
+static const GXVtxAttrFmtList* pcMeshVAT()
+{
+	return meshVAT;
+}
+#endif
 
 /**
  * @todo: Documentation
  */
 void DGXGraphics::initMesh(Shape* model)
 {
-	oldTevGroup = 0;
+#if defined(__vita__)
+	PC_DGX_CTX();
+	++pcD.meshPass;
+#elif defined(PIKI_PC_PORT)
+	++g_pcMeshPass;
+#endif
+	PC_OLD_TEV_GROUP = 0;
+#if defined(__vita__)
+	// Vertex state as one image (sPcMeshImg).
+	if (gxr_vtx_image(pcR, sPcMeshImg) != kGxqVtxApplied) {
+		gxr_set_vtx_attr_fmtv_calls(pcR, GX_VTXFMT0, meshVAT);
+		gxr_set_vtx_descv_calls(pcR, meshVCD);
+	}
+#else
 	GXSetVtxAttrFmtv(GX_VTXFMT0, meshVAT);
 	GXSetVtxDescv(meshVCD);
+#endif
+#if defined(__vita__)
+	pcD.volatileArrays = (model->mVertexCacheFlags & (VertexCacheFlags::VertexList | VertexCacheFlags::NormalList)) != 0;
+#endif
 	if (model->mVertexList) {
 		if (model->mVertexCacheFlags & VertexCacheFlags::VertexList) {
 			DCStoreRange(model->mVertexList, model->mVertexCount * sizeof(Vector3f));
 		}
+#if defined(__vita__)
+		// Positions rewritten: invalidate decoded lists.
+		gxr_GXSetArrayVolatile(pcR, GX_VA_POS, model->mVertexList, sizeof(Vector3f),
+		                       (model->mVertexCacheFlags & VertexCacheFlags::VertexList) != 0);
+#else
 		GXSetArray(GX_VA_POS, model->mVertexList, sizeof(Vector3f));
+#endif
 	}
 
 	if (model->mNormalList) {
 		if (model->mVertexCacheFlags & VertexCacheFlags::NormalList) {
 			DCStoreRange(model->mNormalList, model->mNormalCount * sizeof(Vector3f));
 		}
+#if defined(__vita__)
+		gxr_GXSetArrayVolatile(pcR, GX_VA_NRM, model->mNormalList, sizeof(Vector3f),
+		                       (model->mVertexCacheFlags & VertexCacheFlags::NormalList) != 0);
+#else
 		GXSetArray(GX_VA_NRM, model->mNormalList, sizeof(Vector3f));
+#endif
 	}
 
 	if (model->mNBTList) {
@@ -1265,20 +1868,27 @@ void DGXGraphics::initMesh(Shape* model)
 		GXSetArray(GX_VA_CLR0, model->mVtxColorList, sizeof(Colour));
 	}
 
+#if defined(__vita__)
+	// Stored only when it changes.
+	if (model->mVertexCacheFlags != VertexCacheFlags::None) {
+		model->mVertexCacheFlags = VertexCacheFlags::None;
+	}
+#else
 	model->mVertexCacheFlags = VertexCacheFlags::None;
+#endif
 
-	sendTxIndx      = false;
-	sendMtxIndx     = true;
-	sendColIndx     = false;
-	sendNbtIndx     = false;
-	sendTxUVIndx[0] = true;
-	sendTxUVIndx[1] = false;
-	sendTxUVIndx[2] = false;
-	sendTxUVIndx[3] = false;
-	sendTxUVIndx[4] = false;
-	sendTxUVIndx[5] = false;
-	sendTxUVIndx[6] = false;
-	sendTxUVIndx[7] = false;
+	PC_SEND_TX      = false;
+	PC_SEND_MTX     = true;
+	PC_SEND_COL     = false;
+	PC_SEND_NBT     = false;
+	PC_SEND_TXUV[0] = true;
+	PC_SEND_TXUV[1] = false;
+	PC_SEND_TXUV[2] = false;
+	PC_SEND_TXUV[3] = false;
+	PC_SEND_TXUV[4] = false;
+	PC_SEND_TXUV[5] = false;
+	PC_SEND_TXUV[6] = false;
+	PC_SEND_TXUV[7] = false;
 
 	for (i = 0; i < 8; i++) {
 		mActiveTexture[i] = nullptr;
@@ -1302,22 +1912,72 @@ void DGXGraphics::initMesh(Shape* model)
 // whenever the cache was right, and the correct one when it was not, at the cost
 // of a few trivial calls per mesh. The flags are still maintained so any other
 // reader of them behaves as before.
+#if defined(__vita__)
+// The 14 vertex calls below as one vertex-state image.
+static void pcSetupVtxImage(GxqVtxImage& img, int flags, bool scaled)
+{
+	img.descMask = (1u << GX_VA_PNMTXIDX) | (1u << GX_VA_TEX1MTXIDX) | (1u << GX_VA_NRM) | (1u << GX_VA_NBT) | (0xFFu << GX_VA_TEX0)
+	             | (1u << GX_VA_CLR0);
+	img.desc[GX_VA_PNMTXIDX]   = (flags & Mesh::FeatureFlags::PosAndNrm) ? GX_DIRECT : GX_NONE;
+	img.desc[GX_VA_TEX1MTXIDX] = (flags & Mesh::FeatureFlags::Tex1MtxIdx) ? GX_DIRECT : GX_NONE;
+	img.fmtIdx                 = GX_VTXFMT0;
+	if (scaled) {
+		img.fmtMask           = 1u << GX_VA_NBT;
+		img.fmt[GX_VA_NBT]    = gxq_vtx_fmt_pack(GX_NRM_NBT, GX_F32, 0);
+		img.desc[GX_VA_NRM]   = GX_NONE;
+		img.desc[GX_VA_NBT]   = GX_INDEX16;
+	} else {
+		img.fmtMask           = 1u << GX_VA_NRM;
+		img.fmt[GX_VA_NRM]    = gxq_vtx_fmt_pack(GX_NRM_XYZ, GX_F32, 0);
+		img.desc[GX_VA_NRM]   = GX_INDEX16;
+		img.desc[GX_VA_NBT]   = GX_NONE;
+	}
+	for (int texMapIdx = 0; texMapIdx < 8; texMapIdx++) {
+		img.desc[GX_VA_TEX0 + texMapIdx] = (flags & (1 << (texMapIdx + 3))) ? GX_INDEX16 : GX_NONE;
+	}
+	img.desc[GX_VA_CLR0] = (flags & Mesh::FeatureFlags::VtxColor) ? GX_INDEX16 : GX_NONE;
+	img.gens             = 14;
+}
+#endif
+
 void DGXGraphics::setupVtxDesc(Shape* model, Material* mat, Mesh* mesh)
 {
+#if defined(__vita__)
+	// Vertex state as one image; the array binding stays a call.
+	PC_DGX_CTX();
+	GxqVtxImage pcSetupImg;
+	const int pcFlags = mesh->mFeatureFlags;
+	pcSetupVtxImage(pcSetupImg, pcFlags, mCustomScale != nullptr);
+	if (gxr_vtx_image(pcR, pcSetupImg) == kGxqVtxApplied) {
+		if (mCustomScale) {
+			GXSetArray(GX_VA_NBT, model->mNBTList, sizeof(NBT));
+		} else {
+			GXSetArray(GX_VA_NRM, model->mNormalList, sizeof(Vector3f));
+		}
+		PC_SEND_MTX = (pcFlags & Mesh::FeatureFlags::PosAndNrm) != 0;
+		PC_SEND_TX  = (pcFlags & Mesh::FeatureFlags::Tex1MtxIdx) != 0;
+		PC_SEND_NBT = mCustomScale != nullptr;
+		for (int texMapIdx = 0; texMapIdx < 8; texMapIdx++) {
+			PC_SEND_TXUV[texMapIdx] = (pcFlags & (1 << (texMapIdx + 3))) != 0;
+		}
+		PC_SEND_COL = (pcFlags & Mesh::FeatureFlags::VtxColor) != 0;
+		return;
+	}
+#endif
 	if (mesh->mFeatureFlags & Mesh::FeatureFlags::PosAndNrm) {
 		GXSetVtxDesc(GX_VA_PNMTXIDX, GX_DIRECT);
-		sendMtxIndx = true;
+		PC_SEND_MTX = true;
 	} else {
 		GXSetVtxDesc(GX_VA_PNMTXIDX, GX_NONE);
-		sendMtxIndx = false;
+		PC_SEND_MTX = false;
 	}
 
 	if (mesh->mFeatureFlags & Mesh::FeatureFlags::Tex1MtxIdx) {
 		GXSetVtxDesc(GX_VA_TEX1MTXIDX, GX_DIRECT);
-		sendTxIndx = true;
+		PC_SEND_TX = true;
 	} else {
 		GXSetVtxDesc(GX_VA_TEX1MTXIDX, GX_NONE);
-		sendTxIndx = false;
+		PC_SEND_TX = false;
 	}
 
 	if (mCustomScale) {
@@ -1325,40 +1985,239 @@ void DGXGraphics::setupVtxDesc(Shape* model, Material* mat, Mesh* mesh)
 		GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_NBT, GX_NRM_NBT, GX_F32, 0);
 		GXSetVtxDesc(GX_VA_NRM, GX_NONE);
 		GXSetVtxDesc(GX_VA_NBT, GX_INDEX16);
-		sendNbtIndx = true;
+		PC_SEND_NBT = true;
 	} else {
 		GXSetArray(GX_VA_NRM, model->mNormalList, sizeof(Vector3f));
 		GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_NRM, GX_NRM_XYZ, GX_F32, 0);
 		GXSetVtxDesc(GX_VA_NRM, GX_INDEX16);
 		GXSetVtxDesc(GX_VA_NBT, GX_NONE);
-		sendNbtIndx = false;
+		PC_SEND_NBT = false;
 	}
 
 	for (int texMapIdx = 0; texMapIdx < 8; texMapIdx++) {
 		// Effectively `Mesh::FeatureFlags::Tex0 << texMapIdx`
 		if (mesh->mFeatureFlags & (1 << (texMapIdx + 3))) {
 			GXSetVtxDesc(GXAttr(GX_VA_TEX0 + texMapIdx), GX_INDEX16);
-			sendTxUVIndx[texMapIdx] = true;
+			PC_SEND_TXUV[texMapIdx] = true;
 		} else {
 			GXSetVtxDesc(GXAttr(GX_VA_TEX0 + texMapIdx), GX_NONE);
-			sendTxUVIndx[texMapIdx] = false;
+			PC_SEND_TXUV[texMapIdx] = false;
 		}
 	}
 
 	if (mesh->mFeatureFlags & Mesh::FeatureFlags::VtxColor) {
 		GXSetVtxDesc(GX_VA_CLR0, GX_INDEX16);
-		sendColIndx = true;
+		PC_SEND_COL = true;
 	} else {
 		GXSetVtxDesc(GX_VA_CLR0, GX_NONE);
-		sendColIndx = false;
+		PC_SEND_COL = false;
 	}
 }
 
 /**
  * @todo: Documentation
  */
+#if defined(PIKI_PC_PORT)
+// GX mirrors and counters: recorder context on the Vita, globals elsewhere.
+#if defined(__vita__)
+#define PC_CULL_ARGS   GxqCtx& pcR, PcDgxCtx& pcD,
+#define PC_CULL_PASS   pcR, pcD,
+#define PC_CULL_UNUSED (void)pcR, (void)pcD
+#define PC_GX_PROJ     (pcR.d.gxProj)
+#define PC_GX_CUR_MTX  (pcR.d.gxCurMtx)
+#define PC_GAME_FRAME  (pcR.d.gameFrame)
+#define PC_MESH_PASS   (pcD.meshPass)
+#define PC_MAT_GEN()   (pcR.d.matGen)
+#define PC_VTX_GEN()   (pcR.d.vtxGen)
+#else
+#define PC_CULL_ARGS
+#define PC_CULL_PASS
+#define PC_CULL_UNUSED (void)0
+#define PC_GX_PROJ     g_pcGxProj
+#define PC_GX_CUR_MTX  g_pcGxCurMtx
+#define PC_GAME_FRAME  g_pcGameFrame
+#define PC_MESH_PASS   g_pcMeshPass
+#define PC_MAT_GEN()   pc_gx_mat_gen()
+#define PC_VTX_GEN()   pc_gx_vtx_gen()
+#endif
+
+// Whether the box, through this joint matrix and the GX projection, is beyond one clip plane.
+static bool pcMatpolyOffscreen(PC_CULL_ARGS immut Matrix4f& joint, const float* bmin, const float* bmax)
+{
+	PC_CULL_UNUSED;
+	const float(*proj)[4] = PC_GX_PROJ;
+	int outL = 0, outR = 0, outB = 0, outT = 0, behind = 0;
+	for (int i = 0; i < 8; i++) {
+		const float x  = (i & 1) ? bmax[0] : bmin[0];
+		const float y  = (i & 2) ? bmax[1] : bmin[1];
+		const float z  = (i & 4) ? bmax[2] : bmin[2];
+		const float jx = joint.mMtx[0][0] * x + joint.mMtx[0][1] * y + joint.mMtx[0][2] * z + joint.mMtx[0][3];
+		const float jy = joint.mMtx[1][0] * x + joint.mMtx[1][1] * y + joint.mMtx[1][2] * z + joint.mMtx[1][3];
+		const float jz = joint.mMtx[2][0] * x + joint.mMtx[2][1] * y + joint.mMtx[2][2] * z + joint.mMtx[2][3];
+		const float cx = proj[0][0] * jx + proj[0][1] * jy + proj[0][2] * jz + proj[0][3];
+		const float cy = proj[1][0] * jx + proj[1][1] * jy + proj[1][2] * jz + proj[1][3];
+		const float cw = proj[3][0] * jx + proj[3][1] * jy + proj[3][2] * jz + proj[3][3];
+		if (cw <= 0.0f) {
+			++behind;
+			continue;
+		}
+		if (cx < -cw) ++outL;
+		if (cx > cw) ++outR;
+		if (cy < -cw) ++outB;
+		if (cy > cw) ++outT;
+	}
+	return behind == 8 || outL == 8 || outR == 8 || outB == 8 || outT == 8;
+}
+
+// One matrix group of a mesh, tested per display list.
+enum { kPcGroupOffscreen = 0, kPcGroupOnScreen = 1, kPcGroupUntestable = 2 };
+static int pcPrecullGroup(PC_CULL_ARGS Shape* model, const MtxGroup& group, immut Matrix4f& jointMtx)
+{
+	PC_CULL_UNUSED;
+	for (int d = 0; d < group.mDispLength; d++) {
+		const DispList& list = group.mDispList[d];
+		float lo[3], hi[3];
+		int usesMtxIdx = 0;
+		if (!pc_gx_dl_bounds(list.mData, list.mDataLength, model->mVertexList, lo, hi, &usesMtxIdx)) {
+			return kPcGroupUntestable;
+		}
+		if (!usesMtxIdx && PC_GX_CUR_MTX != 0) {
+			return kPcGroupUntestable;
+		}
+		if (!pcMatpolyOffscreen(PC_CULL_PASS jointMtx, lo, hi)) {
+			return kPcGroupOnScreen;
+		}
+	}
+	return kPcGroupOffscreen;
+}
+
+#if defined(__vita__)
+// Pre-cull union short-circuit
+static const int kPcUnionMaxLists = 32;
+static const u8 kPcUnionBackoff   = 8;
+
+// Whether every corner of the box is beyond the same clip plane by a margin.
+static bool pcBoxClearlyOffscreen(PC_CULL_ARGS immut Matrix4f& joint, const float* bmin, const float* bmax)
+{
+	PC_CULL_UNUSED;
+	const float(*proj)[4] = PC_GX_PROJ;
+	int behind = 0, outL = 0, outR = 0, outB = 0, outT = 0;
+	for (int i = 0; i < 8; i++) {
+		const float x  = (i & 1) ? bmax[0] : bmin[0];
+		const float y  = (i & 2) ? bmax[1] : bmin[1];
+		const float z  = (i & 4) ? bmax[2] : bmin[2];
+		const float jx = joint.mMtx[0][0] * x + joint.mMtx[0][1] * y + joint.mMtx[0][2] * z + joint.mMtx[0][3];
+		const float jy = joint.mMtx[1][0] * x + joint.mMtx[1][1] * y + joint.mMtx[1][2] * z + joint.mMtx[1][3];
+		const float jz = joint.mMtx[2][0] * x + joint.mMtx[2][1] * y + joint.mMtx[2][2] * z + joint.mMtx[2][3];
+		const float cx = proj[0][0] * jx + proj[0][1] * jy + proj[0][2] * jz + proj[0][3];
+		const float cy = proj[1][0] * jx + proj[1][1] * jy + proj[1][2] * jz + proj[1][3];
+		const float cw = proj[3][0] * jx + proj[3][1] * jy + proj[3][2] * jz + proj[3][3];
+		if (cw <= -1.0f) {
+			++behind;
+			continue;
+		}
+		if (!(cw >= 1.0f)) {
+			return false; // at the eye plane, or NaN
+		}
+		const float lim = cw + cw * (1.0f / 64.0f);
+		if (cx < -lim) ++outL;
+		if (cx > lim) ++outR;
+		if (cy < -lim) ++outB;
+		if (cy > lim) ++outT;
+	}
+	return behind == 8 || outL == 8 || outR == 8 || outB == 8 || outT == 8;
+}
+
+// The per-list loop of pcPrecullGroup over bounds already read.
+static int pcPrecullGroupStored(PC_CULL_ARGS int read, int fail, const float (*lo)[3], const float (*hi)[3], immut Matrix4f& jointMtx)
+{
+	for (int d = 0; d < read; d++) {
+		if (!pcMatpolyOffscreen(PC_CULL_PASS jointMtx, lo[d], hi[d])) {
+			return kPcGroupOnScreen;
+		}
+	}
+	if (fail) {
+		return kPcGroupUntestable;
+	}
+	return kPcGroupOffscreen;
+}
+
+// The group's verdict (kPcGroup*).
+static int pcPrecullGroupUnion(PC_CULL_ARGS Shape* model, const Joint::MatPoly* matPoly, int g, const MtxGroup& group,
+                               immut Matrix4f& jointMtx)
+{
+	const int n       = group.mDispLength;
+	PcUnionHint* hint = nullptr;
+	if (n >= 2 && n <= kPcUnionMaxLists) {
+		const u32 key = (u32(uintptr_t(matPoly)) >> 3) ^ (u32(uintptr_t(&jointMtx)) >> 6) ^ (u32(g) * 97u);
+		hint          = &pcD.unionHints[key & u32(kPcUnionHints - 1)];
+		if (hint->mMatPoly != matPoly || hint->mJoint != &jointMtx || hint->mGroup != g) {
+			hint->mMatPoly = matPoly;
+			hint->mJoint   = &jointMtx;
+			hint->mGroup   = g;
+			hint->mAllOff  = 0;
+			hint->mBackoff = 0;
+		} else if (hint->mAllOff && hint->mBackoff) {
+			--hint->mBackoff;
+		} else if (hint->mAllOff) {
+			// Every list's bounds, up to the first untestable one.
+			float lo[kPcUnionMaxLists][3], hi[kPcUnionMaxLists][3];
+			int read = 0, fail = 0;
+			for (int d = 0; d < n; d++) {
+				const DispList& list = group.mDispList[d];
+				int usesMtxIdx       = 0;
+				if (!pc_gx_dl_bounds(list.mData, list.mDataLength, model->mVertexList, lo[d], hi[d], &usesMtxIdx)) {
+					fail = 1;
+					break;
+				}
+				if (!usesMtxIdx && PC_GX_CUR_MTX != 0) {
+					fail = 2;
+					break;
+				}
+				++read;
+			}
+
+			bool unionOff = false;
+			if (!fail) {
+				float ulo[3], uhi[3];
+				for (int k = 0; k < 3; k++) {
+					ulo[k] = lo[0][k];
+					uhi[k] = hi[0][k];
+				}
+				for (int d = 1; d < n; d++) {
+					for (int k = 0; k < 3; k++) {
+						ulo[k] = lo[d][k] < ulo[k] ? lo[d][k] : ulo[k];
+						uhi[k] = hi[d][k] > uhi[k] ? hi[d][k] : uhi[k];
+					}
+				}
+				unionOff = pcBoxClearlyOffscreen(PC_CULL_PASS jointMtx, ulo, uhi);
+			}
+			if (unionOff) {
+				return kPcGroupOffscreen;
+			}
+			const int verdict = pcPrecullGroupStored(PC_CULL_PASS read, fail, lo, hi, jointMtx);
+			hint->mAllOff     = verdict == kPcGroupOffscreen;
+			if (hint->mAllOff) {
+				hint->mBackoff = kPcUnionBackoff;
+			}
+			return verdict;
+		}
+	}
+	const int verdict = pcPrecullGroup(PC_CULL_PASS model, group, jointMtx);
+	if (hint) {
+		hint->mAllOff = verdict == kPcGroupOffscreen;
+	}
+	return verdict;
+}
+
+#endif
+#endif
+
 void DGXGraphics::drawSingleMatpoly(Shape* model, Joint::MatPoly* matPoly)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	Mesh& mesh    = model->mMeshList[matPoly->mMeshIndex];
 	Material& mat = model->mMaterialList[matPoly->mIndex];
 
@@ -1374,12 +2233,171 @@ void DGXGraphics::drawSingleMatpoly(Shape* model, Joint::MatPoly* matPoly)
 		return;
 	}
 
-	mMtxDepIdx = mesh.mMtxDepIdx;
-	useMaterial(&mat);
-	setupVtxDesc(model, &mat, &mesh);
+#if defined(PIKI_PC_PORT)
+	// The animation matrices this draw reads.
+	const bool pcPosed     = model == mPcPoseShape;
+	Matrix4f* const pcAnim = pcPosed ? mPcPose : model->mAnimMatrices;
+	// Whether the shape draws from its animation.
+	auto pcAnimCtx  = [&]() __attribute__((no_instrument_function)) {
+		return pcPosed ? mPcPoseAnimCtx != 0 : model->mCurrentAnimation != nullptr;
+	};
+	auto pcAnimData = [&]() __attribute__((no_instrument_function)) {
+		return pcPosed ? mPcPoseAnimData != 0 : model->mCurrentAnimation->mData != nullptr;
+	};
+#endif
 
+#if defined(PIKI_PC_PORT)
+	// Pre-record frustum cull.
+#if defined(__vita__)
+	// Deformed meshes are never culled here.
+	if (pcAnimCtx() && !pcD.volatileArrays && ((PC_GAME_FRAME + (u32(uintptr_t(matPoly)) >> 5)) & 31u) != 0) {
+#else
+	if (pcAnimCtx() && ((PC_GAME_FRAME + (u32(uintptr_t(matPoly)) >> 5)) & 31u) != 0) {
+#endif
+		bool testable    = mesh.mMtxGroupCount > 0;
+		bool anyOnScreen = false;
+		for (int g = 0; g < mesh.mMtxGroupCount && testable && !anyOnScreen; g++) {
+			const MtxGroup& group = mesh.mMtxGroupList[g];
+			if (group.mDepLength != 1 || group.mDepList[0] < 0 || group.mDispLength <= 0) {
+				testable = false;
+				break;
+			}
+			const VtxMatrix& vtxMtx = model->mVtxMatrixList[group.mDepList[0]];
+			immut Matrix4f& jointMtx
+			    = pcAnimData() ? pcAnim[vtxMtx.mHasPartialWeights ? vtxMtx.mIndex : model->mJointCount + vtxMtx.mIndex]
+			                   : model->mJointList[vtxMtx.mIndex].mAnimMatrix;
+#if defined(__vita__)
+			const int verdict = pcPrecullGroupUnion(PC_CULL_PASS model, matPoly, g, group, jointMtx);
+#else
+			const int verdict = pcPrecullGroup(PC_CULL_PASS model, group, jointMtx);
+#endif
+			if (verdict == kPcGroupOnScreen) {
+				anyOnScreen = true;
+				break;
+			}
+			if (verdict == kPcGroupUntestable) {
+				testable = false;
+				break;
+			}
+		}
+		if (testable && !anyOnScreen) {
+			return;
+		}
+	}
+#endif
+	mMtxDepIdx = mesh.mMtxDepIdx;
+#if defined(PIKI_PC_PORT)
+	// Per-pass material cache.
+	{
+#if defined(__vita__)
+		bool& sHeld         = pcD.matCache.held;
+		unsigned& sPass     = pcD.matCache.pass;
+		Material*& sMat     = pcD.matCache.mat;
+		f32& sIntensity     = pcD.matCache.intensity;
+		int& sHasTexGen     = pcD.matCache.hasTexGen;
+		bool& sEnvMap       = pcD.matCache.envMap;
+		unsigned& sGen      = pcD.matCache.gen;
+#else
+		static bool sHeld        = false;
+		static unsigned sPass    = 0;
+		static Material* sMat    = nullptr;
+		static f32 sIntensity    = 0.0f;
+		static int sHasTexGen    = 0;
+		static bool sEnvMap      = false;
+		static unsigned sGen     = 0;
+#endif
+		const bool cacheable     = (mat.mFlags & MATFLAG_PVW) && !mat.mDisplayListPtr && !mLightCam
+		                    && mCurrentMaterialHandler == mDefaultMaterialHandler;
+		const bool hit = cacheable && sHeld && sPass == PC_MESH_PASS && sMat == &mat && sIntensity == mLightIntensity
+		              && sHasTexGen == int(mHasTexGen) && sEnvMap == mIsEnvMapActive && sGen == PC_MAT_GEN();
+		if (hit) {
+			setMatMatrices(&mat, mMtxDepIdx);
+		} else {
+			useMaterial(&mat);
+		}
+		sHeld = cacheable;
+		if (cacheable) {
+			sPass      = PC_MESH_PASS;
+			sMat       = &mat;
+			sIntensity = mLightIntensity;
+			sHasTexGen = int(mHasTexGen);
+			sEnvMap    = mIsEnvMapActive;
+			sGen       = PC_MAT_GEN();
+		}
+	}
+#else
+	useMaterial(&mat);
+#endif
+#if defined(PIKI_PC_PORT)
+	// Vertex descriptor cache.
+	{
+		// Keyed on the model and the mesh feature flags.
+#if defined(__vita__)
+		Shape*& sLastModel      = pcD.vtxCache.model;
+		int& sLastFlags         = pcD.vtxCache.flags;
+		const void*& sLastScale = pcD.vtxCache.scale;
+		u32& sLastGen           = pcD.vtxCache.gen;
+		bool& sValid            = pcD.vtxCache.valid;
+#else
+		static Shape* sLastModel      = nullptr;
+		static int sLastFlags         = -1;
+		static const void* sLastScale = nullptr;
+		static u32 sLastGen           = 0;
+		static bool sValid            = false;
+#endif
+		if (!(sValid && sLastModel == model && sLastFlags == mesh.mFeatureFlags
+		      && sLastScale == mCustomScale && sLastGen == PC_VTX_GEN())) {
+			setupVtxDesc(model, &mat, &mesh);
+			sValid     = true;
+			sLastModel = model;
+			sLastFlags = mesh.mFeatureFlags;
+			sLastScale = mCustomScale;
+			sLastGen   = PC_VTX_GEN();
+		}
+	}
+#else
+	setupVtxDesc(model, &mat, &mesh);
+#endif
+
+#if defined(__vita__)
+	// Grouped matrix loads.
+	const bool pcGroupLoad = !mCustomScale && !mLightCam && !mHasTexGen;
+#endif
 	for (int mtxGroupIdx = 0; mtxGroupIdx < mesh.mMtxGroupCount; mtxGroupIdx++) {
 		MtxGroup& group = mesh.mMtxGroupList[mtxGroupIdx];
+#if defined(__vita__)
+		if (pcGroupLoad && group.mDepLength <= kPcMtxGroupMax) {
+			u32 ids[kPcMtxGroupMax];
+			const f32(*matrices[kPcMtxGroupMax])[4];
+			int count = 0;
+			for (int depListIdx = 0; depListIdx < group.mDepLength; depListIdx++) {
+				int depMtxIdx = group.mDepList[depListIdx];
+				if (depMtxIdx == -1) {
+					continue;
+				}
+
+				// The matrix the loop below hands useMatrixQuick.
+				VtxMatrix& vtxMtx = model->mVtxMatrixList[depMtxIdx];
+				immut Matrix4f* matrix;
+				if (pcAnimData()) {
+					if (vtxMtx.mHasPartialWeights) {
+						matrix = &pcAnim[vtxMtx.mIndex];
+					} else {
+						matrix = &pcAnim[model->mJointCount + vtxMtx.mIndex];
+					}
+				} else {
+					matrix = &model->mJointList[vtxMtx.mIndex].mAnimMatrix;
+				}
+				mActiveMatrix   = matrix;
+				ids[count]      = depListIdx * 3;
+				matrices[count] = matrix->mMtx;
+				count++;
+			}
+			if (count) {
+				gxr_load_posnrm_group(pcR, count, ids, matrices);
+			}
+		} else
+#endif
 		for (int depListIdx = 0; depListIdx < group.mDepLength; depListIdx++) {
 			int depMtxIdx = group.mDepList[depListIdx];
 			if (depMtxIdx == -1) {
@@ -1387,6 +2405,17 @@ void DGXGraphics::drawSingleMatpoly(Shape* model, Joint::MatPoly* matPoly)
 			}
 
 			VtxMatrix& vtxMtx = model->mVtxMatrixList[depMtxIdx];
+#if defined(PIKI_PC_PORT)
+			if (pcAnimData()) {
+				if (vtxMtx.mHasPartialWeights) {
+					useMatrixQuick(pcAnim[vtxMtx.mIndex], depListIdx);
+				} else {
+					useMatrixQuick(pcAnim[model->mJointCount + vtxMtx.mIndex], depListIdx);
+				}
+			} else {
+				useMatrixQuick(model->mJointList[vtxMtx.mIndex].mAnimMatrix, depListIdx);
+			}
+#else
 			if (model->mCurrentAnimation->mData) {
 				if (vtxMtx.mHasPartialWeights) {
 					useMatrixQuick(model->getAnimMatrix(vtxMtx.mIndex), depListIdx);
@@ -1396,13 +2425,19 @@ void DGXGraphics::drawSingleMatpoly(Shape* model, Joint::MatPoly* matPoly)
 			} else {
 				useMatrixQuick(model->mJointList[vtxMtx.mIndex].mAnimMatrix, depListIdx);
 			}
+#endif
 		}
 
 		for (int dispListIdx = 0; dispListIdx < group.mDispLength; dispListIdx++) {
 			DispList& list = group.mDispList[dispListIdx];
 			setCullFront((list.mFlags & 3) ^ mCullFlip);
+#if defined(__vita__)
+			*pcD.polygonCount += list.mFaceCount;
+			++*pcD.dispCount;
+#else
 			gsys->mPolygonCount += list.mFaceCount;
 			gsys->mDispCount++;
+#endif
 			GXCallDisplayList(list.mData, list.mDataLength);
 		}
 	}
@@ -1425,6 +2460,9 @@ void DGXGraphics::drawMeshes(Camera&, Shape* shape)
  */
 void DGXGraphics::setColour(immut Colour& color, bool set)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	mPrimaryColour = color;
 	if (set) {
 		mAuxiliaryColour = color;
@@ -1453,6 +2491,9 @@ void DGXGraphics::setAuxColour(immut Colour& color)
  */
 void DGXGraphics::setPrimEnv(immut Colour* color0, immut Colour* color1)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	if (color0) {
 		GXSetTevColor(GX_TEVREG0, *reinterpret_cast<immut GXColor*>(color0));
 	}
@@ -1474,6 +2515,9 @@ void DGXGraphics::setClearColour(immut Colour& color)
  */
 void DGXGraphics::clearBuffer(int bufferFlags, bool mode)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	GXSetCopyClear(reinterpret_cast<GXColor&>(mBufferClearColour), 0xFFFFFF); // max clear_z value
 }
 
@@ -1482,6 +2526,9 @@ void DGXGraphics::clearBuffer(int bufferFlags, bool mode)
  */
 void DGXGraphics::setFog(bool enable)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	if (enable) {
 #if defined(VERSION_PIKIDEMO) || defined(VERSION_GPIJ01)
 		GXSetFog(GX_FOG_LINEAR, mFogStart, mFogEnd, mCamera->mNear, mCamera->mFar, reinterpret_cast<GXColor&>(mFogColour));
@@ -1518,6 +2565,9 @@ void DGXGraphics::setFog(bool enable, immut Colour& color, f32 density, f32 star
  */
 void DGXGraphics::setBlendMode(u8 blendFactor, u8 zMode, u8 blendMode)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	GXSetBlendMode(GX_BM_BLEND, (GXBlendFactor)(blendFactor & 0xf), (GXBlendFactor)(blendFactor >> 4), GX_LO_SET);
 
 	GXSetZMode((GXBool)((zMode & 8) >> 3), (GXCompare)(zMode & 7), (GXBool)(zMode >> 4));
@@ -1580,6 +2630,9 @@ void DGXGraphics::setBlendMode(u8 blendFactor, u8 zMode, u8 blendMode)
  */
 int DGXGraphics::setCBlending(int blendMode)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	int old    = mBlendMode;
 	mBlendMode = blendMode;
 	GXSetNumTexGens(1);
@@ -1675,6 +2728,9 @@ int DGXGraphics::setCBlending(int blendMode)
  */
 bool DGXGraphics::initParticle(bool hasVtxColor)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	if (!mActiveTexture[0]) {
 		return false;
 	}
@@ -1702,7 +2758,12 @@ void DGXGraphics::drawRotParticle(Camera& cam, immut Vector3f& pos, u16 angle, f
 		ERROR("no texture set!!");
 	}
 
+#if defined(__vita__)
+	PC_DGX_CTX();
+	*pcD.polygonCount += 2;
+#else
 	gsys->mPolygonCount += 2;
+#endif
 
 	// max - 0x2000
 	Vector3f nwVtx(radius * sinShort(angle + 0xE000), radius * cosShort(angle + 0xE000), 0.0f);
@@ -1739,7 +2800,12 @@ void DGXGraphics::drawParticle(Camera& cam, immut Vector3f& pos, f32 radius)
 	if (!mActiveTexture[0]) {
 		ERROR("no texture set!!");
 	}
+#if defined(__vita__)
+	PC_DGX_CTX();
+	*pcD.polygonCount += 2;
+#else
 	gsys->mPolygonCount += 2;
+#endif
 
 	Vector3f vec1(-radius, radius, 0.0f);
 	Vector3f vec2(radius, radius, 0.0f);
@@ -1777,7 +2843,12 @@ void DGXGraphics::drawCamParticle(Camera& cam, immut Vector3f& pos, immut Vector
 		ERROR("no texture set!!");
 	}
 
+#if defined(__vita__)
+	PC_DGX_CTX();
+	*pcD.polygonCount += 2;
+#else
 	gsys->mPolygonCount += 2;
+#endif
 
 	f32 y0, z, x1, y1, x0;
 
@@ -1817,6 +2888,9 @@ void DGXGraphics::drawCamParticle(Camera& cam, immut Vector3f& pos, immut Vector
  */
 void DGXGraphics::drawLine(immut Vector3f& start, immut Vector3f& end)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	useTexture(nullptr, GX_TEXMAP0);
 	GXClearVtxDesc();
 	GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
@@ -1840,6 +2914,9 @@ void DGXGraphics::drawLine(immut Vector3f& start, immut Vector3f& end)
  */
 void DGXGraphics::drawPoints(immut Vector3f* points, int count)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	useTexture(nullptr, GX_TEXMAP0);
 	GXClearVtxDesc();
 	GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
@@ -1862,7 +2939,12 @@ void DGXGraphics::drawPoints(immut Vector3f* points, int count)
  */
 void DGXGraphics::drawOneTri(immut Vector3f* vertices, immut Vector3f* normals, immut Vector2f* texCoords, int count)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+	++*pcD.polygonCount;
+#else
 	gsys->mPolygonCount++;
+#endif
 	GXClearVtxDesc();
 	GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
 	if (normals) {
@@ -1893,6 +2975,10 @@ void DGXGraphics::drawOneTri(immut Vector3f* vertices, immut Vector3f* normals, 
 		}
 		GXTexCoord2f32(texCoords[i].x, texCoords[i].y);
 	}
+#if defined(PIKI_PC_PORT)
+	// Explicit submission before the next primitive.
+	GXEnd();
+#endif
 }
 
 /**
@@ -1900,6 +2986,9 @@ void DGXGraphics::drawOneTri(immut Vector3f* vertices, immut Vector3f* normals, 
  */
 void DGXGraphics::blatRectangle(immut RectArea& rect)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	if (!mActiveTexture[0]) {
 		ERROR("no texture set!!");
 	}
@@ -1947,6 +3036,9 @@ void DGXGraphics::blatRectangle(immut RectArea& rect)
  */
 void DGXGraphics::testRectangle(immut RectArea& rect)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	u32 primClr = *reinterpret_cast<u32*>(&mPrimaryColour);
 	GXClearVtxDesc();
 	GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
@@ -1984,6 +3076,9 @@ void DGXGraphics::testRectangle(immut RectArea& rect)
  */
 void DGXGraphics::drawRectangle(immut RectArea& bounds, immut RectArea& texCoords, immut Vector3f* offset)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	if (!mActiveTexture[0]) {
 		ERROR("no texture set!!");
 	}
@@ -2023,6 +3118,9 @@ void DGXGraphics::drawRectangle(immut RectArea& bounds, immut RectArea& texCoord
  */
 void DGXGraphics::lineRectangle(immut RectArea& rect)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	GXClearVtxDesc();
 	GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
 	GXSetVtxDesc(GX_VA_CLR0, GX_DIRECT);
@@ -2058,6 +3156,9 @@ void DGXGraphics::lineRectangle(immut RectArea& rect)
  */
 void DGXGraphics::fillRectangle(immut RectArea& rect)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	GXClearVtxDesc();
 	GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
 	GXSetVtxDesc(GX_VA_CLR0, GX_DIRECT);
@@ -2068,21 +3169,37 @@ void DGXGraphics::fillRectangle(immut RectArea& rect)
 
 	u32 primClr = *reinterpret_cast<u32*>(&mPrimaryColour);
 	u32 auxClr  = *reinterpret_cast<u32*>(&mAuxiliaryColour);
+	f32 x0 = rect.mMinX;
+	f32 x1 = rect.mMaxX;
+#if defined(PIKI_PC_PORT)
+	// Full-width solid fills widened to the panel edges.
+	const bool plate = gPcUiPlatesEnabled && rect.mMinX <= 0 && rect.mMaxX >= mScreenWidth;
+	if (plate) {
+		const f32 ext = pc_gfx_ui_full_width_extent();
+		x0 -= ext;
+		x1 += ext;
+		// Open the scissor for this quad.
+		pc_gfx_set_scissor_panel();
+	}
+#endif
 	GXBegin(GX_QUADS, GX_VTXFMT0, 4);
 
-	GXPosition3f32(rect.mMinX, rect.mMinY, 0.0f);
+	GXPosition3f32(x0, rect.mMinY, 0.0f);
 	GXColor1u32(primClr);
 
-	GXPosition3f32(rect.mMaxX, rect.mMinY, 0.0f);
+	GXPosition3f32(x1, rect.mMinY, 0.0f);
 	GXColor1u32(primClr);
 
-	GXPosition3f32(rect.mMaxX, rect.mMaxY, 0.0f);
+	GXPosition3f32(x1, rect.mMaxY, 0.0f);
 	GXColor1u32(auxClr);
 
-	GXPosition3f32(rect.mMinX, rect.mMaxY, 0.0f);
+	GXPosition3f32(x0, rect.mMaxY, 0.0f);
 	GXColor1u32(auxClr);
 
 	GXEnd();
+#if defined(PIKI_PC_PORT)
+	if (plate) pc_gfx_set_scissor_ui_box();
+#endif
 }
 
 /**
@@ -2090,6 +3207,9 @@ void DGXGraphics::fillRectangle(immut RectArea& rect)
  */
 void DGXGraphics::texturePrintf(Font* font, int x, int y, immut char* format, ...)
 {
+#if defined(__vita__)
+	PC_DGX_CTX();
+#endif
 	char buf[PATH_MAX];
 	va_list vlist;
 	va_start(vlist, format);

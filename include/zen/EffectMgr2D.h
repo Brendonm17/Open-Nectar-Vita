@@ -107,6 +107,10 @@ struct EffectMgr2D {
 	                          zen::CallBack2<zen::particleGenerator*, zen::particleMdl*>*);
 	void update();
 	void draw(Graphics&);
+#if defined(PIKI_PC_PORT)
+	// Pass clipped to GX x in [sx0, sx1).
+	void draw(Graphics&, int sx0, int sx1);
+#endif
 	void killAll(bool);
 
 	// unused/inlined:

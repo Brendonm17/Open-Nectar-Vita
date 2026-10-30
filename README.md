@@ -112,7 +112,7 @@ nectar.exe > log.txt 2>&1
 
 Everything stays in the installation folder:
 
-- `save\card0\` — your save files, as ordinary files on disk
+- `GPIE01_Pikmin dataFile.gci`: your save file, a standard GameCube memory-card file named as Dolphin exports it (import/export it with Dolphin's memory-card manager, or GCMM on a console; any `*.gci` dropped next to it is picked up). `cardB\` is the second memory-card slot, used only by the in-game copy.
 - `pikmin_settings.conf` — the F1 menu settings
 - `assets\` — the extracted game data
 

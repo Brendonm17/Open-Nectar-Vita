@@ -18,6 +18,7 @@ static char extdir[64] = "/Banks/";
  */
 void Jac_RegisterARAMCallback(ARAMCallback callback)
 {
+	PC_JAC_JOIN();
 	ARCALL = callback;
 }
 
@@ -57,6 +58,7 @@ u32 LoadAramSingle(immut char* filepath, u32 src, u32 length, u32* status, u32 d
  */
 void Jac_WaveDirectorySet(immut char* directory)
 {
+	PC_JAC_JOIN();
 	strcpy(extdir, directory);
 }
 

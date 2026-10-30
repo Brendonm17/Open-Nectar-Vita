@@ -754,8 +754,9 @@ public:
 			}
 		}
 
-		P2DTextBox** tBox1;
-		P2DTextBox** tBox2;
+		// Null when no colour is known.
+		P2DTextBox** tBox1 = nullptr;
+		P2DTextBox** tBox2 = nullptr;
 		switch (mColorMode) {
 		case DrawContainer::COLOR_Red:
 		{
@@ -777,7 +778,7 @@ public:
 		}
 		}
 
-		for (int i = 0; i < mMessageCount; i++, tBox1++, tBox2++) {
+		for (int i = 0; tBox1 && tBox2 && i < mMessageCount; i++, tBox1++, tBox2++) {
 			u8 alpha = (*tBox1)->getAlpha();
 			if (i == mMessage) {
 				(*tBox1)->show();

@@ -1,0 +1,9 @@
+// The knockout grey-out (MapMgr postrefresh): the blur copy's red channel as
+// grey, tinted by the vertex colour 160 (TEV modulate with the RRRA swap
+// table), alpha = the desaturation level (vUV23.z, 0..255). Blended src-alpha.
+float4 main(float4 vUV01 : TEXCOORD0, float4 vUV23 : TEXCOORD1, uniform sampler2D uTex : TEXUNIT0) : COLOR
+{
+    float r = tex2D(uTex, vUV01.xy).r;
+    float g = floor(floor(r * 255.0f + 0.5f) * vUV23.w / 255.0f + 0.5f) / 255.0f;
+    return float4(g, g, g, vUV23.z / 255.0f);
+}

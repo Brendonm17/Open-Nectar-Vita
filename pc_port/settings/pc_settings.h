@@ -32,6 +32,12 @@ void pc_settings_apply_video(void);
 // True while the confirmation/revert dialog is pending after a video change.
 bool pc_settings_has_pending_video(void);
 
+void pc_settings_open(void);
+bool pc_settings_is_open(void);
+
+void pc_settings_set_in_field(int on);
+int  pc_settings_menu_nav(void);
+
 // Returns the current FPS mode (0=30 FPS, 1=60 FPS, 2=120 FPS experimental).
 int pc_settings_get_fps_mode(void);
 
@@ -45,11 +51,24 @@ int pc_settings_get_fps_mode(void);
 // stock port stays faithful.
 int pc_settings_get_chain_actions(void);
 
+// 1 while fog is on, 0 when off
+int pc_settings_get_fog(void);
+
+// GameCube distance blur: 1 on, 0 off
+int pc_settings_get_blur(void);
+// Display vertical filter: 1 on, 0 off
+int pc_settings_get_display_filter(void);
+
 /// What the mouse wheel controls: 0 = Pikmin colour to throw, 1 = camera zoom.
 int pc_settings_get_mouse_wheel_action(void);
 
 /// Pikmin allowed on the field at once. 100 is the original.
 int pc_settings_get_piki_limit(void);
+
+static const int kNectarDefaultDayMinutes = 10;
+int pc_settings_get_day_minutes(void);
+
+int pc_settings_get_debug_keys(void);
 
 #ifdef __cplusplus
 }

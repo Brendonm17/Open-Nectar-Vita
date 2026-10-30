@@ -1,4 +1,5 @@
 #include "audio/pc_sequence_archive.h"
+#include "dolphin_stubs/dvd_image.h"
 
 #include <fstream>
 
@@ -28,12 +29,13 @@ bool PCSequenceArchive::load(const char* arcPath, const u8* header, size_t heade
         mError = "truncated BARC entry table";
         return false;
     }
-    std::ifstream arc(arcPath, std::ios::binary | std::ios::ate);
-    if (!arc) {
+    // Sized from the mounted disc image, or the extracted file.
+    uint32_t arcSize32 = 0;
+    if (!pc_disc_file_size(arcPath, &arcSize32)) {
         mError = "could not open sequence ARC";
         return false;
     }
-    const size_t arcSize = static_cast<size_t>(arc.tellg());
+    const size_t arcSize = arcSize32;
     mArcPath = arcPath;
     mEntries.reserve(count);
     for (u32 i = 0; i < count; ++i) {
@@ -68,9 +70,11 @@ bool PCSequenceArchive::read(u32 index, std::vector<u8>& sequence) const {
     sequence.clear();
     const PCSequenceEntry* item = entry(index);
     if (!item || !item->size) return false;
-    std::ifstream arc(mArcPath, std::ios::binary);
-    if (!arc) return false;
-    arc.seekg(item->offset);
     sequence.resize(item->size);
-    return static_cast<bool>(arc.read(reinterpret_cast<char*>(sequence.data()), item->size));
+    if (pc_disc_read_range(mArcPath.c_str(), sequence.data(), item->offset, item->size)
+        != static_cast<int64_t>(item->size)) {
+        sequence.clear();
+        return false;
+    }
+    return true;
 }

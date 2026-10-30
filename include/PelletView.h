@@ -29,6 +29,10 @@ public:
 	virtual f32 viewGetBottomRadius() = 0;                                 // _28
 	virtual f32 viewGetHeight()       = 0;                                 // _2C
 	virtual Vector3f viewGetScale() { return Vector3f(1.0f, 1.0f, 1.0f); } // _30 (weak)
+#if defined(__vita__)
+	// View kind: 0 any, 1 teki carcass.
+	virtual int pcDrViewKind() { return 0; }
+#endif
 
 	void becomePellet(u32, Vector3f NRef, f32);
 

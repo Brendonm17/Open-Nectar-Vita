@@ -85,7 +85,12 @@ void TimeGraph::set(u16 time, int color, int num)
 {
 	int entryIdx = time - mStartTime;
 	if (entryIdx < 0 || entryIdx >= (mEndTime - mStartTime + 1)) {
+#if defined(PIKI_PC_PORT)
+		// Hour outside the day.
+		return;
+#else
 		ERROR("illegal time int %d\n", time);
+#endif
 	}
 	mEntries[entryIdx].set(color, num);
 }
@@ -261,6 +266,12 @@ PlayerState::PlayerState()
  */
 bool PlayerState::courseOpen(int courseID)
 {
+#if defined(NECTAR_DEBUG_UNLOCK)
+	// Debug unlock: all landing sites open.
+	if (courseID >= STAGE_START && courseID <= STAGE_TESTMAP) {
+		return true;
+	}
+#endif
 	if (courseID >= STAGE_START && courseID <= STAGE_TESTMAP) {
 		return IS_STAGE_OPEN(gameflow.mPlayState.mCourseOpenFlags, courseID) != 0;
 	}
@@ -547,6 +558,10 @@ void PlayerState::loadCard(RandomAccessStream& data)
  */
 bool PlayerState::isTutorial()
 {
+#if defined(NECTAR_DEBUG_UNLOCK)
+	// Debug unlock: tutorial reported complete.
+	return false;
+#else
 	if (flowCont.mCurrentStage && flowCont.mCurrentStage->mStageID != STAGE_Practice) {
 		return false;
 	}
@@ -556,6 +571,7 @@ bool PlayerState::isTutorial()
 	}
 
 	return mIsTutorialMode;
+#endif
 }
 
 /**

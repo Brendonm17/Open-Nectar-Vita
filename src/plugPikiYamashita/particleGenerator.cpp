@@ -1036,6 +1036,14 @@ void zen::particleGenerator::drawPtclOriented(Graphics& gfx)
 	GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_S16, 0);
 	GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_U8, 0);
 
+#if defined(PIKI_PC_PORT)
+	// Byte-swap lpsPos to native order.
+	static bool sPosSwapped = false;
+	if (!sPosSwapped) {
+		for (int i = 0; i + 1 < 48; i += 2) { u8 t = lpsPos[i]; lpsPos[i] = lpsPos[i + 1]; lpsPos[i + 1] = t; }
+		sPosSwapped = true;
+	}
+#endif
 	GXSetArray(GX_VA_POS, lpsPos, 6);
 	GXSetArray(GX_VA_TEX0, lpsCoord, 2);
 

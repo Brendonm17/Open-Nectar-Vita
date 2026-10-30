@@ -717,6 +717,13 @@ zen::DrawGameInfo::DrawGameInfo(zen::DrawGameInfo::playModeFlag playMode)
 		}
 	}
 
+#if defined(PIKI_PC_PORT)
+	// Stray 'c_lr' picture in play09.blo.
+	if (P2DPane* stray = mUpperScreenMgr->search('c_lr', false)) {
+		stray->hide();
+	}
+#endif
+
 	pane = mLowerScreenMgr->search('li_i', true);
 	pane->setCallBack(new NaviIconCallBack(pane));
 

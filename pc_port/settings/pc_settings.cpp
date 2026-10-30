@@ -12,6 +12,8 @@
  */
 
 #include "settings/pc_settings.h"
+#include "sysNew.h"
+#include "pc_menu_repeat.h"
 
 #include <SDL2/SDL.h>
 #include <cstdio>
@@ -27,7 +29,17 @@
 #include "pc_window.h"
 #include "gl/pc_gfx.h"
 #include "Graphics.h"
+#ifdef __vita__
+#include "gameflow.h"
+#include "Section.h"
+#endif
 #include "Font.h"
+#ifdef __vita__
+#include "P2D/Font.h"
+#include "P2D/Print.h"
+#include "P2D/Util.h"
+#include "Texture.h"
+#endif
 #include "Colour.h"
 #include "Matrix4f.h"
 #include "Geometry.h"
@@ -56,12 +68,16 @@ struct PcConfig {
 
     // Control mode (0=Classic, 1=Mouse Cursor)
     int controlMode = PC_CONTROL_CLASSIC;
+    int rightStickRole = PC_ROLE_SQUAD;   // Vita: right-stick role
+    int dpadRole = PC_ROLE_OFF;           // Vita: d-pad role
 
     // Keyboard bindings (scancodes for each action)
     int keyboardBindings[PC_KEY_ACT_COUNT];
 
-    // Mouse sensitivity (0.1 - 5.0, default 1.0)
+    // Mouse sensitivity (0.1 - 5.0, default 1.0); Vita Cursor role speed.
     float mouseSensitivity = 1.0f;
+    // Vita: Camera role orbit-rate multiplier.
+    float cameraSpeed = 1.0f;
 
     // Stick dead zone (0 - 127, default 8)
     int stickDeadZone = 8;
@@ -70,6 +86,7 @@ struct PcConfig {
     // 0 = normal, 1 = inverted
     int stickInvert = 0;  // bit 0: X, bit 1: Y
     int cStickInvert = 0; // bit 0: X, bit 1: Y
+    int dpadInvert = 0;   // Vita: bit 0 left/right, bit 1 up/down
 
     // Gamepad button bindings (SDL GameController button IDs)
     int gamepadBindings[PC_KEY_ACT_COUNT];
@@ -86,6 +103,16 @@ struct PcConfig {
     // parameter of its own (AIConstant "p15"), so raising it is supported
     // rather than forced. 100 is the original.
     int pikiLimit = 100;
+    // Minutes of play per in-game day (10 = original).
+    int dayMinutes = 10;
+    // Debug shortcuts (F5/F6).
+    int debugKeys = 0;
+    // Fog (1 = on).
+    int fog = 1;
+    // Distance blur (1 = on).
+    int blur = 1;
+    // Display copy vertical filter (0 = off).
+    int displayFilter = 0;
 
     void applyDefaults() {
         windowWidth = 1280;
@@ -97,13 +124,22 @@ struct PcConfig {
         aspectRatioMode = 0;
         fpsMode = 0;
         controlMode = PC_CONTROL_CLASSIC;
+        rightStickRole = PC_ROLE_SQUAD;
+        dpadRole = PC_ROLE_OFF;
         mouseSensitivity = 1.0f;
+        cameraSpeed = 1.0f;
         stickDeadZone = 8;
         stickInvert = 0;
         cStickInvert = 0;
+        dpadInvert = 0;
         chainActions = 0;
         mouseWheelAction = 0;
         pikiLimit = 100;
+        dayMinutes = 10;
+        debugKeys = 0;
+        fog = 1;
+        blur = 1;
+        displayFilter = 0;
         for (int i = 0; i < PC_KEY_ACT_COUNT; i++) {
             keyboardBindings[i] = kDefaultKeyBindings[i];
             gamepadBindings[i] = -1; // -1 = not remapped (use default)
@@ -112,6 +148,15 @@ struct PcConfig {
 };
 
 PcConfig sConfig;      // the confirmed, persisted settings
+
+namespace {
+int menuStickThreshold()
+{
+	// Dead zone in SDL axis units, with a floor.
+	const int threshold = sConfig.stickDeadZone * 256;
+	return threshold < 2048 ? 2048 : threshold;
+}
+} // namespace
 PcConfig sPending;     // settings staged while editing
 
 // ---------------------------------------------------------------------------
@@ -156,7 +201,16 @@ int sDesktopH = 0;
 bool sHadConfigFile = false;
 
 bool sMenuOpen = false;
-int sSelection = ROW_DISPLAY_MODE;
+// Desktop: every row visible.
+static bool rowVisibleHere(int row) { (void)row; return true; }
+static int firstVisibleRow() {
+    for (int i = 0; i < ROW_COUNT; i++) {
+        if (rowVisibleHere(i)) return i;
+    }
+    return 0;
+}
+
+int sSelection = firstVisibleRow();
 static std::vector<Uint8> gPrevKeys; // previous-frame keyboard state snapshot
 
 // Video confirm/revert dialog state.
@@ -197,11 +251,19 @@ constexpr int kAdvancedRowCount = 4;
 // alone. 0=control scheme, 1=chain Pikmin actions.
 bool sInModsSubmenu = false;
 int sModsSelection = 0;
-constexpr int kModsRowCount = 4;
+#if PIKI_DEBUG_KEYS
+constexpr int kModsRowCount = 6;
+#else
+constexpr int kModsRowCount = 5;
+#endif
 
 // Field-limit stops. 100 is what the original game uses.
 constexpr int kPikiLimits[]   = { 50, 100, 150, 200, 300, 500, 750, 999 };
 constexpr int kPikiLimitCount = int(sizeof(kPikiLimits) / sizeof(kPikiLimits[0]));
+
+// Day length stops, in minutes of play.
+constexpr int kDayMinutes[]    = { 5, 7, 10, 15, 20, 30 };
+constexpr int kDayMinutesCount = int(sizeof(kDayMinutes) / sizeof(kDayMinutes[0]));
 
 // Submenu de resolucion. La lista sale del monitor, asi que puede traer veinte
 // o cuarenta entradas segun el panel: recorrerlas de una en una con
@@ -340,10 +402,13 @@ void applyVideo() {
 
 void applyControls(const PcConfig& config) {
     pc_window_set_control_mode(config.controlMode);
+    pc_window_set_stick_roles(config.rightStickRole, config.dpadRole);
     pc_window_set_mouse_sensitivity(config.mouseSensitivity);
+    pc_window_set_camera_speed(config.cameraSpeed);
     pc_window_set_stick_dead_zone(config.stickDeadZone);
     pc_window_set_stick_invert(config.stickInvert);
     pc_window_set_cstick_invert(config.cStickInvert);
+    pc_window_set_dpad_invert(config.dpadInvert);
     for (int i = 0; i < PC_KEY_ACT_COUNT; i++) {
         pc_window_set_key_binding(i, static_cast<SDL_Scancode>(config.keyboardBindings[i]));
         pc_window_set_gamepad_binding(i, config.gamepadBindings[i]);
@@ -423,11 +488,20 @@ void saveConfig() {
     out << "chainActions = " << sConfig.chainActions << "\n";
     out << "mouseWheelAction = " << sConfig.mouseWheelAction << "\n";
     out << "pikiLimit = " << sConfig.pikiLimit << "\n";
+    out << "dayMinutes = " << sConfig.dayMinutes << "\n";
+    out << "debugKeys = " << sConfig.debugKeys << "\n";
+    out << "fog = " << sConfig.fog << "\n";
+    out << "blur = " << sConfig.blur << "\n";
+    out << "displayFilter = " << sConfig.displayFilter << "\n";
     out << "controlMode = " << sConfig.controlMode << "\n";
+    out << "rightStickRole = " << sConfig.rightStickRole << "\n";
+    out << "dpadRole = " << sConfig.dpadRole << "\n";
     out << "mouseSensitivity = " << sConfig.mouseSensitivity << "\n";
+    out << "cameraSpeed = " << sConfig.cameraSpeed << "\n";
     out << "stickDeadZone = " << sConfig.stickDeadZone << "\n";
     out << "stickInvert = " << sConfig.stickInvert << "\n";
     out << "cStickInvert = " << sConfig.cStickInvert << "\n";
+    out << "dpadInvert = " << sConfig.dpadInvert << "\n";
     // Keyboard bindings
     for (int i = 0; i < PC_KEY_ACT_COUNT; i++) {
         out << "key_" << i << " = " << sConfig.keyboardBindings[i] << "\n";
@@ -437,7 +511,6 @@ void saveConfig() {
         out << "gp_" << i << " = " << sConfig.gamepadBindings[i] << "\n";
     }
     out.close();
-    printf("[PC Settings] Saved %s\n", path.c_str());
 }
 
 void loadConfig() {
@@ -445,11 +518,11 @@ void loadConfig() {
     std::string path = std::string(kConfigFilename);
     std::ifstream in(path, std::ios::in);
     if (!in) {
-        printf("[PC Settings] No config file (%s); using defaults.\n", path.c_str());
         sHadConfigFile = false;
         return;
     }
     sHadConfigFile = true;
+    bool rolesFromFile = false;   // the file had the role keys
     std::string line;
     while (std::getline(in, line)) {
         size_t a = line.find_first_not_of(" \t");
@@ -480,7 +553,7 @@ void loadConfig() {
         }
         else if (key == "controlMode") {
             sConfig.controlMode = atoi(val.c_str());
-            if (sConfig.controlMode < PC_CONTROL_CLASSIC || sConfig.controlMode > PC_CONTROL_MOUSE_CURSOR) {
+            if (sConfig.controlMode < PC_CONTROL_CLASSIC || sConfig.controlMode > PC_CONTROL_CAMERA_STICK) {
                 sConfig.controlMode = PC_CONTROL_CLASSIC;
             }
         }
@@ -488,6 +561,13 @@ void loadConfig() {
             sConfig.mouseSensitivity = (float)atof(val.c_str());
             if (sConfig.mouseSensitivity < 0.1f) sConfig.mouseSensitivity = 0.1f;
             if (sConfig.mouseSensitivity > 5.0f) sConfig.mouseSensitivity = 5.0f;
+        }
+        else if (key == "dpadInvert") {
+            sConfig.dpadInvert = atoi(val.c_str()) & 3;
+        }
+        else if (key == "cameraSpeed") {
+            sConfig.cameraSpeed = (float)atof(val.c_str());
+            if (sConfig.cameraSpeed < 0.25f || sConfig.cameraSpeed > 4.0f) sConfig.cameraSpeed = 1.0f;
         }
         else if (key == "stickDeadZone") {
             sConfig.stickDeadZone = atoi(val.c_str());
@@ -504,6 +584,16 @@ void loadConfig() {
             if (sConfig.fpsMode < 0) sConfig.fpsMode = 0;
             if (sConfig.fpsMode > 2) sConfig.fpsMode = 2;
         }
+        else if (key == "rightStickRole") {
+            sConfig.rightStickRole = atoi(val.c_str());
+            if (sConfig.rightStickRole < PC_ROLE_SQUAD || sConfig.rightStickRole > PC_ROLE_CURSOR) sConfig.rightStickRole = PC_ROLE_SQUAD;
+            rolesFromFile = true;
+        }
+        else if (key == "dpadRole") {
+            sConfig.dpadRole = atoi(val.c_str());
+            if (sConfig.dpadRole < PC_ROLE_OFF || sConfig.dpadRole > PC_ROLE_CAMERA) sConfig.dpadRole = PC_ROLE_OFF;
+            rolesFromFile = true;
+        }
         else if (key == "chainActions") {
             sConfig.chainActions = atoi(val.c_str()) ? 1 : 0;
         }
@@ -514,6 +604,22 @@ void loadConfig() {
         else if (key == "pikiLimit") {
             sConfig.pikiLimit = atoi(val.c_str());
             if (sConfig.pikiLimit < 50 || sConfig.pikiLimit > 999) sConfig.pikiLimit = 100;
+        }
+        else if (key == "dayMinutes") {
+            sConfig.dayMinutes = atoi(val.c_str());
+            if (sConfig.dayMinutes < 1 || sConfig.dayMinutes > 120) sConfig.dayMinutes = 10;
+        }
+        else if (key == "debugKeys") {
+            sConfig.debugKeys = atoi(val.c_str()) ? 1 : 0;
+        }
+        else if (key == "fog") {
+            sConfig.fog = atoi(val.c_str()) ? 1 : 0;
+        }
+        else if (key == "blur") {
+            sConfig.blur = atoi(val.c_str()) ? 1 : 0;
+        }
+        else if (key == "displayFilter") {
+            sConfig.displayFilter = atoi(val.c_str()) ? 1 : 0;
         }
         else if (key == "stickInvert") sConfig.stickInvert = atoi(val.c_str()) & 3;
         else if (key == "cStickInvert") sConfig.cStickInvert = atoi(val.c_str()) & 3;
@@ -537,16 +643,57 @@ void loadConfig() {
         }
     }
     in.close();
+    // Pre-role file: derive roles from the old scheme.
+    if (!rolesFromFile) {
+        if (sConfig.controlMode == PC_CONTROL_MOUSE_CURSOR) { sConfig.rightStickRole = PC_ROLE_CURSOR; sConfig.dpadRole = PC_ROLE_SQUAD; }
+        else if (sConfig.controlMode == PC_CONTROL_CAMERA_STICK) { sConfig.rightStickRole = PC_ROLE_CAMERA; sConfig.dpadRole = PC_ROLE_SQUAD; }
+    }
     if (sConfig.windowWidth <= 0) sConfig.windowWidth = 1280;
     if (sConfig.windowHeight <= 0) sConfig.windowHeight = 720;
-    printf("[PC Settings] Loaded %s: %dx%d mode=%d vsync=%d refresh=%.0f\n",
-           path.c_str(), sConfig.windowWidth, sConfig.windowHeight,
-           sConfig.displayMode, sConfig.vsync ? 1 : 0, sConfig.refreshRate);
 }
 
 // ---------------------------------------------------------------------------
 // Input
 // ---------------------------------------------------------------------------
+
+namespace {
+/// Menu input repeat (pc_menu_repeat).
+bool padEdge(bool pressed, int slot) { return pc_menu_edge(pressed, slot, SDL_GetTicks()); }
+
+/// Stick threshold for menus, from the configured dead zone.
+int menuStickThreshold();
+
+// Dominant-axis stick steering.
+static void menuStick(SDL_GameController* c, int& x, int& y)
+{
+	x = SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_LEFTX);
+	y = SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_LEFTY);
+}
+static int menuRowThreshold()   { const int t = menuStickThreshold(); return t > 12000 ? t : 12000; }
+static int menuValueThreshold() { const int t = menuStickThreshold(); return t > 16000 ? t : 16000; }
+bool padNavUp(SDL_GameController* c)
+{
+	int x, y; menuStick(c, x, y);
+	return padEdge(SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_DPAD_UP) || (y < -menuRowThreshold() && -y >= abs(x)), 0);
+}
+bool padNavDown(SDL_GameController* c)
+{
+	int x, y; menuStick(c, x, y);
+	return padEdge(SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_DPAD_DOWN) || (y > menuRowThreshold() && y >= abs(x)), 1);
+}
+bool padNavLeft(SDL_GameController* c)
+{
+	int x, y; menuStick(c, x, y);
+	return padEdge(SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_DPAD_LEFT) || (x < -menuValueThreshold() && -x > abs(y)), 2);
+}
+bool padNavRight(SDL_GameController* c)
+{
+	int x, y; menuStick(c, x, y);
+	return padEdge(SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) || (x > menuValueThreshold() && x > abs(y)), 3);
+}
+bool padNavA(SDL_GameController* c) { return padEdge(SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_A), 4); }
+bool padNavB(SDL_GameController* c) { return padEdge(SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_B), 5); }
+} // namespace
 
 bool keyWentDown(SDL_Scancode sc) {
     int numKeys = 0;
@@ -557,13 +704,312 @@ bool keyWentDown(SDL_Scancode sc) {
 }
 
 void latchKeys() {
+    PikiPcPersistentAlloc pcKeep;   // port state outlives the level heaps (sysNew.cpp)
     int numKeys = 0;
     const Uint8* state = SDL_GetKeyboardState(&numKeys);
     if (numKeys < 0) numKeys = 0;
     gPrevKeys.assign(state, state + numKeys);
 }
 
+#ifdef __vita__
+// ---------------------------------------------------------------------------
+// Vita settings page
+// ---------------------------------------------------------------------------
+namespace {
+
+enum VitaRow {
+    VROW_HDR_SCREEN = 0,
+    VROW_SCREEN,
+    VROW_FOG,
+    VROW_BLUR,
+    VROW_DISPLAY_FILTER,
+    VROW_HDR_CONTROLS,
+    VROW_RIGHT_STICK,
+    VROW_DPAD,
+    VROW_CURSOR_SPEED,
+    VROW_CAMERA_SPEED,
+    VROW_DEAD_ZONE,
+    VROW_INVERT_RIGHT,
+    VROW_INVERT_DPAD,
+    VROW_CHAIN,
+    VROW_HDR_BUTTONS,
+    VROW_BTN_A,       // these eight follow PC_KEY_ACT_A .. PC_KEY_ACT_R
+    VROW_BTN_B,
+    VROW_BTN_X,
+    VROW_BTN_Y,
+    VROW_BTN_Z,
+    VROW_BTN_START,
+    VROW_BTN_L,
+    VROW_BTN_R,
+    VROW_RESET,
+    VROW_SAVE,
+    VROW_COUNT,
+};
+
+int sVitaSel    = VROW_SCREEN;
+int sVitaScroll = 0;
+int sVitaOpenSerial = 0;   // bumped per open; the draw side restarts the panel on it
+constexpr int kVitaRowH = 22;
+
+bool vitaRowIsHeader(int row) { return row == VROW_HDR_SCREEN || row == VROW_HDR_CONTROLS || row == VROW_HDR_BUTTONS; }
+bool vitaRowIsAction(int row) { return row == VROW_RESET || row == VROW_SAVE; }
+int  vitaRowAction(int row)   { return row >= VROW_BTN_A && row <= VROW_BTN_R ? PC_KEY_ACT_A + (row - VROW_BTN_A) : -1; }
+
+// Panel layout.
+// Body plate: 576x396 at (32, 72) in the game's 640x480.
+int vitaPanelY(int screenH)  { (void)screenH; return 72; }
+int vitaPanelH(int screenH)  { (void)screenH; return 396; }
+int vitaListTop(int screenH) { return vitaPanelY(screenH) + 22; }
+int vitaHelpY(int screenH)   { return vitaPanelY(screenH) + vitaPanelH(screenH) - 56; }
+int vitaVisibleRows(int screenH) {
+    const int rows = (vitaHelpY(screenH) - 8 - vitaListTop(screenH)) / kVitaRowH;
+    return rows < 4 ? 4 : rows;
+}
+int vitaScreenH() {
+    return gsys && gsys->mDGXGfx ? static_cast<DGXGraphics*>(gsys->mDGXGfx)->mScreenHeight : 480;
+}
+
+// The eight Vita buttons a GameCube button can sit on, in the order a row cycles.
+const int kVitaButtons[8] = {
+    SDL_CONTROLLER_BUTTON_A, SDL_CONTROLLER_BUTTON_B, SDL_CONTROLLER_BUTTON_X, SDL_CONTROLLER_BUTTON_Y,
+    SDL_CONTROLLER_BUTTON_LEFTSHOULDER, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER,
+    SDL_CONTROLLER_BUTTON_START, SDL_CONTROLLER_BUTTON_BACK,
+};
+const char* kVitaButtonNames[8] = { "Cross", "Circle", "Square", "Triangle", "L", "R", "Start", "Select" };
+
+int vitaEffectiveButton(int action) {
+    int b = sPending.gamepadBindings[action];
+    if (b < 0) b = kDefaultGamepadBindings[action];
+    return b;
+}
+const char* vitaButtonName(int button) {
+    for (int i = 0; i < 8; i++) {
+        if (kVitaButtons[i] == button) return kVitaButtonNames[i];
+    }
+    return pc_window_get_gamepad_button_name(button);
+}
+// Aspect: whole panel or 4:3 with bars.
+bool vitaScreenIs43() { return sPending.aspectRatioMode == 1; }
+
+const char* vitaRowLabel(int row) {
+    switch (row) {
+    case VROW_HDR_SCREEN:   return "SCREEN";
+    case VROW_SCREEN:       return "Aspect Ratio";
+    case VROW_FOG:          return "Fog";
+    case VROW_BLUR:         return "Distance Blur";
+    case VROW_DISPLAY_FILTER: return "Display Filter";
+    case VROW_HDR_CONTROLS: return "CONTROLS";
+    case VROW_RIGHT_STICK:  return "Right Stick";
+    case VROW_DPAD:         return "D-pad";
+    case VROW_CURSOR_SPEED: return "Cursor Speed";
+    case VROW_CAMERA_SPEED: return "Camera Speed";
+    case VROW_DEAD_ZONE:    return "Stick Dead Zone";
+    case VROW_INVERT_RIGHT: return "Invert Right Stick";
+    case VROW_INVERT_DPAD:  return "Invert D-pad";
+    case VROW_CHAIN:        return "Chain Pikmin Actions";
+    case VROW_HDR_BUTTONS:  return "BUTTONS";
+    case VROW_BTN_A:        return "A   Throw / Pluck";
+    case VROW_BTN_B:        return "B   Whistle";
+    case VROW_BTN_X:        return "X   Dismiss";
+    case VROW_BTN_Y:        return "Y   Map";
+    case VROW_BTN_Z:        return "Z   Camera Angle";
+    case VROW_BTN_START:    return "Start   Pause";
+    case VROW_BTN_L:        return "L   Center Camera";
+    case VROW_BTN_R:        return "R   Zoom";
+    case VROW_RESET:        return "[  Reset to Defaults  ]";
+    case VROW_SAVE:         return "[  Save  ]";
+    default:                return "";
+    }
+}
+
+void vitaRowValue(int row, char* out, size_t n) {
+    switch (row) {
+    case VROW_SCREEN:
+        snprintf(out, n, "%s", vitaScreenIs43() ? "4:3" : "Fullscreen");
+        break;
+    case VROW_RIGHT_STICK:
+        snprintf(out, n, "%s", sPending.rightStickRole == PC_ROLE_CAMERA ? "Camera"
+                             : sPending.rightStickRole == PC_ROLE_CURSOR ? "Cursor" : "Squad (original)");
+        break;
+    case VROW_DPAD:
+        snprintf(out, n, "%s", sPending.dpadRole == PC_ROLE_SQUAD ? "Squad"
+                             : sPending.dpadRole == PC_ROLE_CAMERA ? "Camera" : "Off (original)");
+        break;
+    case VROW_CURSOR_SPEED: snprintf(out, n, "%.2fx", sPending.mouseSensitivity); break;
+    case VROW_CAMERA_SPEED: snprintf(out, n, "%.2fx", sPending.cameraSpeed); break;
+    case VROW_DEAD_ZONE:    snprintf(out, n, "%d%%", (sPending.stickDeadZone * 100 + 63) / 127); break;
+    case VROW_INVERT_RIGHT:
+    case VROW_INVERT_DPAD: {
+        static const char* names[4] = { "Off", "Left / Right", "Up / Down", "Both" };
+        const int bits = row == VROW_INVERT_DPAD ? sPending.dpadInvert : sPending.cStickInvert;
+        snprintf(out, n, "%s", names[bits & 3]);
+        break;
+    }
+    case VROW_CHAIN:
+        snprintf(out, n, "%s", sPending.chainActions ? "On" : "Off (original)");
+        break;
+    case VROW_FOG:
+        snprintf(out, n, "%s", sPending.fog ? "On (original)" : "Off");
+        break;
+    case VROW_BLUR:
+        snprintf(out, n, "%s", sPending.blur ? "On (original)" : "Off");
+        break;
+    case VROW_DISPLAY_FILTER:
+        snprintf(out, n, "%s", sPending.displayFilter ? "Interlaced" : "Off (progressive)");
+        break;
+    default: {
+        const int act = vitaRowAction(row);
+        if (act >= 0) snprintf(out, n, "%s", vitaButtonName(vitaEffectiveButton(act)));
+        else out[0] = 0;
+        break;
+    }
+    }
+}
+
+const char* vitaRowHelp(int row) {
+    switch (row) {
+    case VROW_SCREEN:       return "Fullscreen fills the screen. 4:3 is the GameCube's picture.";
+    case VROW_FOG:          return "The distance haze. Off draws the scene clear and saves some GPU time.";
+    case VROW_BLUR:         return "The GameCube's soft focus on distant scenery. Off saves some GPU time.";
+    case VROW_DISPLAY_FILTER: return "The slight vertical softening of an interlaced GameCube picture.";
+    case VROW_RIGHT_STICK:  return "Squad moves the Pikmin, Camera orbits, Cursor aims throws.";
+    case VROW_DPAD:         return "Down alone is the role. Hold L + down to lie down.";
+    case VROW_CURSOR_SPEED: return "How fast the cursor moves with the Cursor role.";
+    case VROW_CAMERA_SPEED: return "How fast the camera orbits with the Camera role.";
+    case VROW_DEAD_ZONE:    return "Raise it if a stick drifts on its own.";
+    case VROW_INVERT_RIGHT: return "Flips the right stick's directions.";
+    case VROW_INVERT_DPAD:  return "Flips the d-pad's directions for its role.";
+    case VROW_CHAIN:        return "A Pikmin that finishes a job looks for more work nearby.";
+    case VROW_RESET:        return "Puts every setting on this page back to the original.";
+    case VROW_SAVE:         return "Saves and returns to the Options menu.";
+    default:
+        return vitaRowAction(row) >= 0 ? "Left/Right picks the button. Two actions may share one." : "";
+    }
+}
+
+// dir is -1 for left, +1 for right or Cross.
+void vitaRowChange(int row, int dir) {
+    switch (row) {
+    case VROW_SCREEN:
+        sPending.aspectRatioMode = vitaScreenIs43() ? 0 : 1;
+        pc_gfx_set_aspect_ratio_mode(sPending.aspectRatioMode);   // Save keeps it, Circle reverts it
+        break;
+    case VROW_RIGHT_STICK: {
+        // Squad, Camera, Cursor.
+        const int r = (sPending.rightStickRole - PC_ROLE_SQUAD + 3 + dir) % 3;
+        sPending.rightStickRole = PC_ROLE_SQUAD + r;
+        sPending.controlMode    = sPending.rightStickRole == PC_ROLE_CURSOR ? PC_CONTROL_MOUSE_CURSOR : PC_CONTROL_CLASSIC;
+        break;
+    }
+    case VROW_DPAD:
+        sPending.dpadRole = (sPending.dpadRole + 3 + dir) % 3;
+        break;
+    case VROW_CURSOR_SPEED:
+        sPending.mouseSensitivity = fminf(3.0f, fmaxf(0.5f, sPending.mouseSensitivity + 0.25f * dir));
+        break;
+    case VROW_CAMERA_SPEED:
+        sPending.cameraSpeed = fminf(2.0f, fmaxf(0.5f, sPending.cameraSpeed + 0.25f * dir));
+        break;
+    case VROW_DEAD_ZONE:
+        sPending.stickDeadZone = std::min(64, std::max(0, sPending.stickDeadZone + 4 * dir));
+        break;
+    case VROW_INVERT_RIGHT:
+        sPending.cStickInvert = ((sPending.cStickInvert & 3) + 4 + dir) % 4;
+        break;
+    case VROW_INVERT_DPAD:
+        sPending.dpadInvert = ((sPending.dpadInvert & 3) + 4 + dir) % 4;
+        break;
+    case VROW_CHAIN:
+        sPending.chainActions = sPending.chainActions ? 0 : 1;
+        break;
+    case VROW_FOG:
+        sPending.fog = sPending.fog ? 0 : 1;
+        break;
+    case VROW_BLUR:
+        sPending.blur = sPending.blur ? 0 : 1;
+        break;
+    case VROW_DISPLAY_FILTER:
+        sPending.displayFilter = sPending.displayFilter ? 0 : 1;
+        break;
+    default: {
+        const int act = vitaRowAction(row);
+        if (act < 0) break;
+        const int cur = vitaEffectiveButton(act);
+        int idx = 0;
+        for (int i = 0; i < 8; i++) {
+            if (kVitaButtons[i] == cur) { idx = i; break; }
+        }
+        sPending.gamepadBindings[act] = kVitaButtons[(idx + 8 + dir) % 8];
+        break;
+    }
+    }
+}
+
+void vitaClampScroll() {
+    const int visible = vitaVisibleRows(vitaScreenH());
+    if (sVitaSel < sVitaScroll) sVitaScroll = sVitaSel;
+    if (sVitaSel >= sVitaScroll + visible) sVitaScroll = sVitaSel - visible + 1;
+    // A section header directly above the selection scrolls in with it.
+    if (sVitaSel > 0 && vitaRowIsHeader(sVitaSel - 1) && sVitaScroll == sVitaSel) sVitaScroll = sVitaSel - 1;
+    if (sVitaScroll > VROW_COUNT - visible) sVitaScroll = VROW_COUNT - visible;
+    if (sVitaScroll < 0) sVitaScroll = 0;
+}
+
+void openMenuVita() {
+    sPending = sConfig;
+    sPending.controlMode = pc_window_get_control_mode();
+    if (sPending.aspectRatioMode != 1) sPending.aspectRatioMode = 0;   // old 16:10, 16:9 and 21:9 mean the whole panel
+    sMenuOpen = true;
+    pc_window_set_settings_menu_open(true);
+    sVideoConfirmActive = false;
+    sVitaSel    = VROW_SCREEN;
+    sVitaScroll = 0;
+    sVitaOpenSerial++;
+}
+
+void pollMenuInputVita() {
+    if (!sMenuOpen) return;
+    SDL_GameController* ctl = pc_window_get_controller();
+    if (!ctl) return;
+    const bool up = padNavUp(ctl), down = padNavDown(ctl), left = padNavLeft(ctl), right = padNavRight(ctl);
+    const bool ok = padNavA(ctl), back = padNavB(ctl);
+    if (back) {
+        closeMenu();   // discards unsaved changes
+        return;
+    }
+    if (up || down) {
+        const int step = up ? -1 : 1;
+        do { sVitaSel = (sVitaSel + VROW_COUNT + step) % VROW_COUNT; } while (vitaRowIsHeader(sVitaSel));
+        vitaClampScroll();
+        return;
+    }
+    if (sVitaSel == VROW_RESET) {
+        if (ok) resetToDefaults();
+        return;
+    }
+    if (sVitaSel == VROW_SAVE) {
+        if (ok) {
+            sConfig = sPending;
+            applyVideo();
+            applyControls(sConfig);
+            saveConfig();
+            closeMenu();
+        }
+        return;
+    }
+    if (left) vitaRowChange(sVitaSel, -1);
+    else if (right || ok) vitaRowChange(sVitaSel, +1);
+}
+
+} // namespace
+#endif // __vita__
+
 void pollMenuInput() {
+#ifdef __vita__
+    // The Vita page is opened from the Options menu (ogTitle.cpp).
+    pollMenuInputVita();
+    return;
+#endif
     // F1 toggles the menu.
     if (keyWentDown(SDL_SCANCODE_F1)) {
         if (sMenuOpen) {
@@ -573,7 +1019,7 @@ void pollMenuInput() {
             sPending.controlMode = pc_window_get_control_mode();
             sMenuOpen = true;
             pc_window_set_settings_menu_open(true);
-            sSelection = ROW_DISPLAY_MODE;
+            sSelection = firstVisibleRow();
             sVideoConfirmActive = false;
             rebuildResolutionList();
             const int idx = resolutionIndexFor(pc_window_get_width(), pc_window_get_height());
@@ -598,11 +1044,11 @@ void pollMenuInput() {
         }
         if (keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE) ||
             keyWentDown(SDL_SCANCODE_J) ||
-            (ctl && SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_A))) {
+            (ctl && padNavA(ctl))) {
             confirmVideoSettings();
         } else if (keyWentDown(SDL_SCANCODE_ESCAPE) || keyWentDown(SDL_SCANCODE_K) ||
                    keyWentDown(SDL_SCANCODE_B) ||
-                   (ctl && SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_B))) {
+                   (ctl && padNavB(ctl))) {
             revertVideoSettings();
         }
         return;
@@ -627,7 +1073,7 @@ void pollMenuInput() {
                 }
             }
             // ESC cancels capture.
-            if (keyWentDown(SDL_SCANCODE_ESCAPE) || (ctl && SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_B))) {
+            if (keyWentDown(SDL_SCANCODE_ESCAPE) || (ctl && padNavB(ctl))) {
                 sWaitingForKey = false;
             }
             return;
@@ -641,19 +1087,15 @@ void pollMenuInput() {
         bool ok = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
 
         if (ctl) {
-            if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_UP) ||
-                (SDL_GameControllerGetAxis(ctl, SDL_CONTROLLER_AXIS_LEFTY) < -8000))
+            if (padNavUp(ctl))
                 up = true;
-            if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_DOWN) ||
-                (SDL_GameControllerGetAxis(ctl, SDL_CONTROLLER_AXIS_LEFTY) > 8000))
+            if (padNavDown(ctl))
                 down = true;
-            if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_LEFT) ||
-                (SDL_GameControllerGetAxis(ctl, SDL_CONTROLLER_AXIS_LEFTX) < -8000))
+            if (padNavLeft(ctl))
                 left = true;
-            if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) ||
-                (SDL_GameControllerGetAxis(ctl, SDL_CONTROLLER_AXIS_LEFTX) > 8000))
+            if (padNavRight(ctl))
                 right = true;
-            if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_A))
+            if (padNavA(ctl))
                 ok = true;
         }
 
@@ -676,7 +1118,7 @@ void pollMenuInput() {
         }
         // B / ESC exits submenu.
         if (keyWentDown(SDL_SCANCODE_ESCAPE) || keyWentDown(SDL_SCANCODE_K) ||
-            keyWentDown(SDL_SCANCODE_B) || (ctl && SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_B))) {
+            keyWentDown(SDL_SCANCODE_B) || (ctl && padNavB(ctl))) {
             sInControlsSubmenu = false;
             sWaitingForKey = false;
         }
@@ -697,7 +1139,7 @@ void pollMenuInput() {
                 }
             }
             // ESC cancels capture.
-            if (keyWentDown(SDL_SCANCODE_ESCAPE) || (ctl && SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_B))) {
+            if (keyWentDown(SDL_SCANCODE_ESCAPE) || (ctl && padNavB(ctl))) {
                 sWaitingForButton = false;
             }
             return;
@@ -711,19 +1153,15 @@ void pollMenuInput() {
         bool ok = keyWentDown(SDL_SCANCODE_RETURN) || keyWentDown(SDL_SCANCODE_SPACE);
 
         if (ctl) {
-            if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_UP) ||
-                (SDL_GameControllerGetAxis(ctl, SDL_CONTROLLER_AXIS_LEFTY) < -8000))
+            if (padNavUp(ctl))
                 up = true;
-            if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_DOWN) ||
-                (SDL_GameControllerGetAxis(ctl, SDL_CONTROLLER_AXIS_LEFTY) > 8000))
+            if (padNavDown(ctl))
                 down = true;
-            if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_LEFT) ||
-                (SDL_GameControllerGetAxis(ctl, SDL_CONTROLLER_AXIS_LEFTX) < -8000))
+            if (padNavLeft(ctl))
                 left = true;
-            if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) ||
-                (SDL_GameControllerGetAxis(ctl, SDL_CONTROLLER_AXIS_LEFTX) > 8000))
+            if (padNavRight(ctl))
                 right = true;
-            if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_A))
+            if (padNavA(ctl))
                 ok = true;
         }
 
@@ -744,7 +1182,7 @@ void pollMenuInput() {
             return;
         }
         if (keyWentDown(SDL_SCANCODE_ESCAPE) || keyWentDown(SDL_SCANCODE_K) ||
-            keyWentDown(SDL_SCANCODE_B) || (ctl && SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_B))) {
+            keyWentDown(SDL_SCANCODE_B) || (ctl && padNavB(ctl))) {
             sInGamepadSubmenu = false;
             sWaitingForButton = false;
         }
@@ -762,21 +1200,17 @@ void pollMenuInput() {
                       keyWentDown(SDL_SCANCODE_B);
 
         if (ctl) {
-            if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_UP) ||
-                (SDL_GameControllerGetAxis(ctl, SDL_CONTROLLER_AXIS_LEFTY) < -8000))
+            if (padNavUp(ctl))
                 up = true;
-            if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_DOWN) ||
-                (SDL_GameControllerGetAxis(ctl, SDL_CONTROLLER_AXIS_LEFTY) > 8000))
+            if (padNavDown(ctl))
                 down = true;
-            if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_LEFT) ||
-                (SDL_GameControllerGetAxis(ctl, SDL_CONTROLLER_AXIS_LEFTX) < -8000))
+            if (padNavLeft(ctl))
                 left = true;
-            if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) ||
-                (SDL_GameControllerGetAxis(ctl, SDL_CONTROLLER_AXIS_LEFTX) > 8000))
+            if (padNavRight(ctl))
                 right = true;
-            if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_A))
+            if (padNavA(ctl))
                 ok = true;
-            if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_B))
+            if (padNavB(ctl))
                 cancel = true;
         }
 
@@ -829,15 +1263,13 @@ void pollMenuInput() {
                       keyWentDown(SDL_SCANCODE_B);
 
         if (ctl) {
-            if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_UP) ||
-                (SDL_GameControllerGetAxis(ctl, SDL_CONTROLLER_AXIS_LEFTY) < -8000))
+            if (padNavUp(ctl))
                 up = true;
-            if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_DOWN) ||
-                (SDL_GameControllerGetAxis(ctl, SDL_CONTROLLER_AXIS_LEFTY) > 8000))
+            if (padNavDown(ctl))
                 down = true;
-            if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_A))
+            if (padNavA(ctl))
                 ok = true;
-            if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_B))
+            if (padNavB(ctl))
                 cancel = true;
         }
 
@@ -878,19 +1310,15 @@ void pollMenuInput() {
                       keyWentDown(SDL_SCANCODE_B);
 
         if (ctl) {
-            if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_UP) ||
-                (SDL_GameControllerGetAxis(ctl, SDL_CONTROLLER_AXIS_LEFTY) < -8000))
+            if (padNavUp(ctl))
                 up = true;
-            if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_DOWN) ||
-                (SDL_GameControllerGetAxis(ctl, SDL_CONTROLLER_AXIS_LEFTY) > 8000))
+            if (padNavDown(ctl))
                 down = true;
-            if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_LEFT) ||
-                (SDL_GameControllerGetAxis(ctl, SDL_CONTROLLER_AXIS_LEFTX) < -8000))
+            if (padNavLeft(ctl))
                 left = true;
-            if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) ||
-                (SDL_GameControllerGetAxis(ctl, SDL_CONTROLLER_AXIS_LEFTX) > 8000))
+            if (padNavRight(ctl))
                 right = true;
-            if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_B))
+            if (padNavB(ctl))
                 cancel = true;
         }
 
@@ -932,6 +1360,20 @@ void pollMenuInput() {
             else if (right) idx = (idx + 1) % kPikiLimitCount;
             sPending.pikiLimit = kPikiLimits[idx];
         }
+        // Day length.
+        else if (sModsSelection == 4) {
+            int idx = 0;
+            for (int i = 0; i < kDayMinutesCount; i++) {
+                if (kDayMinutes[i] == sPending.dayMinutes) { idx = i; break; }
+            }
+            if (left) idx = (idx + kDayMinutesCount - 1) % kDayMinutesCount;
+            else if (right) idx = (idx + 1) % kDayMinutesCount;
+            sPending.dayMinutes = kDayMinutes[idx];
+        }
+        // Debug shortcuts.
+        else if (sModsSelection == 5) {
+            if (left || right) sPending.debugKeys = sPending.debugKeys ? 0 : 1;
+        }
         return;
     }
 
@@ -945,30 +1387,26 @@ void pollMenuInput() {
                   keyWentDown(SDL_SCANCODE_B);
 
     if (ctl) {
-        if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_UP) ||
-            (SDL_GameControllerGetAxis(ctl, SDL_CONTROLLER_AXIS_LEFTY) < -8000))
+        if (padNavUp(ctl))
             up = true;
-        if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_DOWN) ||
-            (SDL_GameControllerGetAxis(ctl, SDL_CONTROLLER_AXIS_LEFTY) > 8000))
+        if (padNavDown(ctl))
             down = true;
-        if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_LEFT) ||
-            (SDL_GameControllerGetAxis(ctl, SDL_CONTROLLER_AXIS_LEFTX) < -8000))
+        if (padNavLeft(ctl))
             left = true;
-        if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) ||
-            (SDL_GameControllerGetAxis(ctl, SDL_CONTROLLER_AXIS_LEFTX) > 8000))
+        if (padNavRight(ctl))
             right = true;
-        if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_A))
+        if (padNavA(ctl))
             ok = true;
-        if (SDL_GameControllerGetButton(ctl, SDL_CONTROLLER_BUTTON_B))
+        if (padNavB(ctl))
             cancel = true;
     }
 
     if (up) {
-        sSelection = (sSelection + ROW_COUNT - 1) % ROW_COUNT;
+        do { sSelection = (sSelection + ROW_COUNT - 1) % ROW_COUNT; } while (!rowVisibleHere(sSelection));
         return;
     }
     if (down) {
-        sSelection = (sSelection + 1) % ROW_COUNT;
+        do { sSelection = (sSelection + 1) % ROW_COUNT; } while (!rowVisibleHere(sSelection));
         return;
     }
 
@@ -1123,6 +1561,9 @@ void ensureFont() {
     if (sFontTried) return;
     sFontTried = true;
     if (gsys) {
+        // Sys heap, untagged.
+        PikiPcPersistentAlloc keep;
+        struct SysHeap { int prev; SysHeap() : prev(gsys->setHeap(SYSHEAP_Sys)) {} ~SysHeap() { gsys->setHeap(prev); } } sysHeap;
         sFont = new Font;
         Texture* tex = gsys->loadTexture("consFont.bti", true);
         if (tex) {
@@ -1157,7 +1598,11 @@ void fillRoundRectGrad(DGXGraphics* gfx, int x, int y, int w, int h, int r,
     if (w <= 0 || h <= 0) return;
     if (r > w / 2) r = w / 2;
     if (r > h / 2) r = h / 2;
+#ifdef __vita__
+    const int step = 4;
+#else
     const int step = 2;
+#endif
     for (int yy = y; yy < y + h; yy += step) {
         int bandH = step;
         if (yy + bandH > y + h) bandH = y + h - yy;
@@ -1188,12 +1633,21 @@ void drawTextOutline(int x, int y, const char* fmt, Colour main, Colour shadow, 
     DGXGraphics* gfx = static_cast<DGXGraphics*>(gsys->mDGXGfx);
     gfx->setColour(shadow, true);
     gfx->setAuxColour(shadow);
+#ifdef __vita__
+    static const int kOx[1] = { 1 };
+    static const int kOy[1] = { 1 };
+    for (int i = 0; i < 1; i++) {
+        gDrawCursorX = x + kOx[i]; gDrawCursorY = y + kOy[i];
+        drawText("%s", buf);
+    }
+#else
     for (int ox = -2; ox <= 2; ox++) {
         for (int oy = -1; oy <= 1; oy++) {
             gDrawCursorX = x + ox; gDrawCursorY = y + oy;
             drawText("%s", buf);
         }
     }
+#endif
     gfx->setColour(main, true);
     gfx->setAuxColour(main);
     gDrawCursorX = x; gDrawCursorY = y;
@@ -1277,6 +1731,206 @@ void drawSubmenuRow(DGXGraphics* gfx, int x, int y, int w,
 
 } // namespace
 
+#ifdef __vita__
+namespace {
+// Vita page skin: glass plate, bubble dot and bigFont.
+P2DFont* sVitaFont  = nullptr;
+Texture* sVitaGlass = nullptr;   // w08_160.bti 160x88
+Texture* sVitaDot   = nullptr;   // dot_32.bti  32x32
+bool     sVitaSkinTried = false;
+
+Texture* vitaScreenTexture(const char* name) {
+    int lang = (int)gameflow.mLanguageIndex;
+    if (lang < 0 || lang >= LANG_CAPACITY) lang = 0;
+    const char* dir = gameflow.mLangModes[lang].mTexPath;
+    char path[128];
+    snprintf(path, sizeof(path), "%s%s", dir ? dir : "screen/eng_tex/", name);
+    return gsys->loadTexture(path, true);
+}
+
+void vitaSkinEnsure() {
+    if (sVitaSkinTried) return;
+    sVitaSkinTried = true;
+    if (!gsys) return;
+    // Sys heap, untagged.
+    PikiPcPersistentAlloc keep;
+    struct SysHeap { int prev; SysHeap() : prev(gsys->setHeap(SYSHEAP_Sys)) {} ~SysHeap() { gsys->setHeap(prev); } } sysHeap;
+    sVitaFont = new P2DFont("sumiw9_2.bfn");
+    if (!sVitaGlass) sVitaGlass = vitaScreenTexture("w08_160.bti");
+    if (!sVitaDot)   sVitaDot   = vitaScreenTexture("dot_32.bti");
+}
+
+u32 vitaPacked(Colour c) { return *reinterpret_cast<u32*>(&c); }
+
+// GX for an untextured or a textured 2D quad, set in full every time.
+void vitaQuadState(Texture* tex) {
+    GXSetNumChans(1);
+    GXSetChanCtrl(GX_COLOR0A0, GX_FALSE, GX_SRC_VTX, GX_SRC_VTX, 1, GX_DF_NONE, GX_AF_NONE);
+    GXSetNumTevStages(1);
+    GXSetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_CLEAR);
+    GXSetZMode(GX_FALSE, GX_LEQUAL, GX_TRUE);
+    GXClearVtxDesc();
+    GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
+    GXSetVtxDesc(GX_VA_CLR0, GX_DIRECT);
+    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
+    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
+    if (tex) {
+        if (tex->mAttachName == -1) tex->attach();
+        GXLoadTexObj(tex->mTexObj, GX_TEXMAP0);
+        GXSetNumTexGens(1);
+        GXSetTexCoordGen2(GX_TEXCOORD0, GX_TG_MTX3X4, GX_TG_TEX0, GX_IDENTITY, GX_FALSE, GX_PTIDENTITY);
+        GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
+        GXSetTevOp(GX_TEVSTAGE0, GX_MODULATE);
+        GXSetVtxDesc(GX_VA_TEX0, GX_DIRECT);
+        GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0);
+    } else {
+        GXSetNumTexGens(0);
+        GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD_NULL, GX_TEXMAP_NULL, GX_COLOR0A0);
+        GXSetTevOp(GX_TEVSTAGE0, GX_PASSCLR);
+    }
+    GXLoadPosMtxImm(Matrix4f::ident.mMtx, 0);
+    GXSetCurrentMtx(0);
+}
+
+void vitaFill(int x, int y, int w, int h, Colour c) {
+    vitaQuadState(nullptr);
+    const u32 col = vitaPacked(c);
+    GXBegin(GX_QUADS, GX_VTXFMT0, 4);
+    GXPosition3f32((f32)x,       (f32)y,       0.0f); GXColor1u32(col);
+    GXPosition3f32((f32)(x + w), (f32)y,       0.0f); GXColor1u32(col);
+    GXPosition3f32((f32)(x + w), (f32)(y + h), 0.0f); GXColor1u32(col);
+    GXPosition3f32((f32)x,       (f32)(y + h), 0.0f); GXColor1u32(col);
+    GXEnd();
+}
+
+// One textured quad; u/v in texels of the bound texture. State is set by the caller.
+void vitaTexQuad(Texture* tex, int x, int y, int w, int h, int u0, int v0, int u1, int v1, u32 col) {
+    const f32 sx = 1.0f / (f32)tex->mWidth, sy = 1.0f / (f32)tex->mHeight;
+    GXBegin(GX_QUADS, GX_VTXFMT0, 4);
+    GXPosition3f32((f32)x,       (f32)y,       0.0f); GXColor1u32(col); GXTexCoord2f32(u0 * sx, v0 * sy);
+    GXPosition3f32((f32)(x + w), (f32)y,       0.0f); GXColor1u32(col); GXTexCoord2f32(u1 * sx, v0 * sy);
+    GXPosition3f32((f32)(x + w), (f32)(y + h), 0.0f); GXColor1u32(col); GXTexCoord2f32(u1 * sx, v1 * sy);
+    GXPosition3f32((f32)x,       (f32)(y + h), 0.0f); GXColor1u32(col); GXTexCoord2f32(u0 * sx, v1 * sy);
+    GXEnd();
+}
+
+// Nine-sliced glass plate.
+void vitaGlass(int x, int y, int w, int h) {
+    if (!sVitaGlass) { fillRoundRectGrad(static_cast<DGXGraphics*>(gsys->mDGXGfx), x, y, w, h, 18, Colour(190, 200, 215, 200), Colour(150, 160, 175, 200)); return; }
+    const int cw = 40, ch = 24;                 // corner texels
+    const int ex = w - 2 * cw, ey = h - 2 * ch; // the stretched middle
+    if (ex < 0 || ey < 0) return;
+    vitaQuadState(sVitaGlass);
+    const u32 white = 0xFFFFFFFFu;
+    const int xs[4] = { x, x + cw, x + cw + ex, x + w };
+    const int ys[4] = { y, y + ch, y + ch + ey, y + h };
+    const int us[4] = { 0, 40, 120, 160 };
+    const int vs[4] = { 0, 24, 64, 88 };
+    for (int r = 0; r < 3; r++) {
+        for (int c = 0; c < 3; c++) {
+            const int qw = xs[c + 1] - xs[c], qh = ys[r + 1] - ys[r];
+            if (qw > 0 && qh > 0) vitaTexQuad(sVitaGlass, xs[c], ys[r], qw, qh, us[c], vs[r], us[c + 1], vs[r + 1], white);
+        }
+    }
+}
+void vitaDot(int cx, int cy) {
+    if (!sVitaDot) return;
+    vitaQuadState(sVitaDot);
+    vitaTexQuad(sVitaDot, cx - 14, cy - 14, 28, 28, 0, 0, 32, 32, 0xFFFFFFFFu);
+}
+
+// One string in the game's font: left, centred or right within a box of boxW.
+void vitaText(int x, int y, int boxW, P2DTextBoxHBinding bind, int size, Colour top, Colour bottom, const char* str) {
+    if (!sVitaFont) return;
+    P2DPrint print(sVitaFont, -4, 0, top, bottom);
+    print.setFontSize(size, size);
+    GXLoadPosMtxImm(Matrix4f::ident.mMtx, 0);
+    GXSetCurrentMtx(0);
+    print.locate(x, y);
+    print.printReturn(str, boxW, size + 8, bind, TBOXVBIND_Top, 0, 0);
+}
+void vitaTextShadowed(int x, int y, int boxW, P2DTextBoxHBinding bind, int size, Colour top, Colour bottom, const char* str) {
+    const Colour shadow(0, 8, 20, 200);
+    vitaText(x + 2, y + 2, boxW, bind, size, shadow, shadow, str);
+    vitaText(x, y, boxW, bind, size, top, bottom, str);
+}
+
+void drawMenuVita(DGXGraphics* gfx) {
+    vitaSkinEnsure();
+
+    // The game's 2D space, 640x480 in the 4:3 box.
+    Matrix4f ortho;
+    gfx->setOrthogonal(ortho.mMtx, RectArea(0, 0, 640, 480));
+
+    const int panelX = 32, panelY = vitaPanelY(480);
+    const int panelW = 576, panelH = vitaPanelH(480);
+    const int px1 = panelX, py1 = panelY, px2 = panelX + panelW, py2 = panelY + panelH;
+
+    // Text colours: white over sky blue, gold over orange for the pick.
+    const Colour rowTop(255, 255, 255, 255), rowBot(150, 215, 255, 255);
+    const Colour selTop(255, 236, 120, 255), selBot(255, 160, 30, 255);
+    const Colour hdrTop(190, 240, 255, 255), hdrBot(90, 170, 230, 255);
+    const Colour dimTop(215, 225, 240, 255), dimBot(150, 170, 200, 255);
+
+    // Body: solid backing, then the glass.
+    vitaFill(px1 + 14, py1 + 10, panelW - 28, panelH - 20, Colour(14, 26, 48, 224));
+    vitaGlass(px1, py1, panelW, panelH);
+    // Title plate.
+    vitaGlass(172, 26, 296, 60);
+
+    const int listTop = vitaListTop(480);
+    const int helpY   = vitaHelpY(480);
+    const int visible = vitaVisibleRows(480);
+    const int labelX  = px1 + 40, labelW = 280;
+    const int valueX  = px1 + 322, valueW = panelW - 322 - 36;
+    const int end     = std::min((int)VROW_COUNT, sVitaScroll + visible);
+    const int fontPx  = 18;
+
+    // Bubble dots beside the pick.
+    {
+        int y = listTop;
+        for (int i = sVitaScroll; i < end; i++, y += kVitaRowH) {
+            if (i != sVitaSel) continue;
+            const bool action = vitaRowIsAction(i);
+            vitaDot(action ? px1 + 150 : px1 + 22, y + 11);
+            vitaDot(action ? px2 - 150 : px2 - 22, y + 11);
+        }
+    }
+
+    vitaTextShadowed(172, 40, 296, TBOXHBIND_Center, 28, rowTop, rowBot, "More Settings");
+
+    int y = listTop;
+    for (int i = sVitaScroll; i < end; i++) {
+        const bool selected = i == sVitaSel;
+        if (vitaRowIsHeader(i)) {
+            vitaTextShadowed(px1 + 26, y, 300, TBOXHBIND_Left, 15, hdrTop, hdrBot, vitaRowLabel(i));
+        } else if (vitaRowIsAction(i)) {
+            vitaTextShadowed(px1, y, panelW, TBOXHBIND_Center, fontPx, selected ? selTop : rowTop, selected ? selBot : rowBot, vitaRowLabel(i));
+        } else {
+            char value[64];
+            vitaRowValue(i, value, sizeof(value));
+            vitaTextShadowed(labelX, y, labelW, TBOXHBIND_Left, fontPx, selected ? selTop : rowTop, selected ? selBot : rowBot, vitaRowLabel(i));
+            vitaTextShadowed(valueX, y, valueW, TBOXHBIND_Left, fontPx, selected ? selTop : rowTop, selected ? selBot : rowBot, value);
+        }
+        y += kVitaRowH;
+    }
+    if (sVitaScroll > 0)   vitaTextShadowed(px2 - 34, listTop, 20, TBOXHBIND_Center, 16, dimTop, dimBot, "^");
+    if (end < VROW_COUNT)  vitaTextShadowed(px2 - 34, listTop + (visible - 1) * kVitaRowH, 20, TBOXHBIND_Center, 16, dimTop, dimBot, "v");
+
+    vitaTextShadowed(px1, helpY, panelW, TBOXHBIND_Center, 15, rowTop, rowBot, vitaRowHelp(sVitaSel));
+    vitaTextShadowed(px1, py2 - 30, panelW, TBOXHBIND_Center, 14, dimTop, dimBot,
+                     "Left/Right or Cross: change   Up/Down: move   Circle: back");
+
+    // Restore GX as a P2D screen leaves it.
+    GXSetNumTexGens(0);
+    GXSetNumTevStages(1);
+    GXSetTevOp(GX_TEVSTAGE0, GX_PASSCLR);
+    GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD_NULL, GX_TEXMAP_NULL, GX_COLOR0A0);
+    GXSetVtxDesc(GX_VA_TEX0, GX_NONE);
+}
+} // namespace
+#endif // __vita__
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -1306,7 +1960,6 @@ void pc_settings_init(void) {
     pc_gfx_set_render_scale(sPending.renderScale);
     pc_gfx_set_aspect_ratio_mode(sPending.aspectRatioMode);
     applyControls(sConfig);
-    printf("[PC Settings] Init complete.\n");
 }
 
 bool pc_settings_consume_game_input(void) {
@@ -1325,12 +1978,42 @@ bool pc_settings_has_pending_video(void) {
     return sVideoConfirmActive;
 }
 
+void pc_settings_open(void) {
+    if (sMenuOpen) return;
+#ifdef __vita__
+    openMenuVita();
+#else
+    sPending = sConfig;
+    sPending.controlMode = pc_window_get_control_mode();
+    sMenuOpen = true;
+    pc_window_set_settings_menu_open(true);
+    sSelection = firstVisibleRow();
+    sVideoConfirmActive = false;
+    rebuildResolutionList();
+#endif
+}
+
+bool pc_settings_is_open(void) {
+    return sMenuOpen;
+}
+
+static int sInField = 0;
+void pc_settings_set_in_field(int on) { sInField = on; }
+int  pc_settings_menu_nav(void) {
+    // A menu screen, or the field with a screen over it (pause, the map).
+    return !sInField || gameflow.mIsUIOverlayActive;
+}
+
 void pc_settings_draw(void) {
     if (!sMenuOpen) return;
     if (!gsys || !gsys->mDGXGfx) return;
     DGXGraphics* gfx = static_cast<DGXGraphics*>(gsys->mDGXGfx);
     ensureFont();
     if (!sFont) return;
+#ifdef __vita__
+    drawMenuVita(gfx);
+    return;
+#endif
 
     const int screenW = gfx->mScreenWidth;
     const int screenH = gfx->mScreenHeight;
@@ -1353,7 +2036,7 @@ void pc_settings_draw(void) {
     const int headerH = 34;
 
     drawPikminPanel(gfx, px1, py1, panelW, panelH, radius);
-    drawPikminHeader(gfx, px1, py1, panelW, "PC Settings");
+    drawPikminHeader(gfx, px1, py1, panelW, "More Settings");
 
     const char* modeNames[3] = { "Windowed", "Fullscreen", "Borderless" };
 
@@ -1431,6 +2114,7 @@ void pc_settings_draw(void) {
     const int valueLeft = px1 + panelW / 2 + 20;
     int y = py1 + headerH + 12;
     for (int i = 0; i < ROW_COUNT; i++) {
+        if (!rowVisibleHere(i)) continue;
         bool selected = (i == sSelection);
         if (actionRow[i]) {
             int tx = px1 + panelW / 2 - sFont->stringWidth(labels[i]) / 2;
@@ -1662,6 +2346,10 @@ void pc_settings_draw(void) {
             "Chain Pikmin Actions",
             "Mouse Wheel",
             "Pikmin Limit",
+            "Day Length",
+#if PIKI_DEBUG_KEYS
+            "Debug Keys (F5/F6)",
+#endif
         };
 
         const int listStartY = subY + 62;
@@ -1682,6 +2370,15 @@ void pc_settings_draw(void) {
             } else if (i == 2) {
                 snprintf(value, sizeof(value), "%s",
                          sPending.mouseWheelAction ? "Camera Zoom" : "Pikmin Colour");
+            } else if (i == 5) {
+                snprintf(value, sizeof(value), "%s",
+                         sPending.debugKeys ? "On" : "Off");
+            } else if (i == 4) {
+                if (sPending.dayMinutes == 10) {
+                    snprintf(value, sizeof(value), "10 min (original)");
+                } else {
+                    snprintf(value, sizeof(value), "%d min", sPending.dayMinutes);
+                }
             } else {
                 if (sPending.pikiLimit == 100) {
                     snprintf(value, sizeof(value), "100 (original)");
@@ -1700,8 +2397,9 @@ void pc_settings_draw(void) {
     }
 
     // Footer / help.
-    drawTextOutline(px1 + panelW / 2 - sFont->stringWidth("Left/Right: change   Up/Down: move   Esc: close") / 2, y + 14,
-                    "Left/Right: change   Up/Down: move   Esc: close",
+    static const char* kFooter = "Left/Right: change   Up/Down: move   Esc: close";
+    drawTextOutline(px1 + panelW / 2 - sFont->stringWidth(kFooter) / 2, y + 14,
+                    kFooter,
                     Colour(200, 210, 235, 255), Colour(10, 16, 36, 255));
     if (pc_window_get_last_error()[0]) {
         char errBuf[128];
@@ -1715,6 +2413,26 @@ int pc_settings_get_fps_mode(void) {
     return sConfig.fpsMode;
 }
 
+// Drops the settings page's level-owned font.
+extern "C" void pc_settings_level_released(void) {
+#ifdef __vita__
+    sVitaFont = nullptr;
+    sVitaSkinTried = false;
+#endif
+}
+
+int pc_settings_get_blur(void) {
+    return sConfig.blur;
+}
+
+int pc_settings_get_display_filter(void) {
+    return sConfig.displayFilter;
+}
+
+int pc_settings_get_fog(void) {
+    return sConfig.fog;
+}
+
 int pc_settings_get_chain_actions(void) {
     return sConfig.chainActions;
 }
@@ -1725,4 +2443,12 @@ int pc_settings_get_mouse_wheel_action(void) {
 
 int pc_settings_get_piki_limit(void) {
     return sConfig.pikiLimit;
+}
+
+int pc_settings_get_day_minutes(void) {
+    return sConfig.dayMinutes;
+}
+
+int pc_settings_get_debug_keys(void) {
+    return sConfig.debugKeys;
 }

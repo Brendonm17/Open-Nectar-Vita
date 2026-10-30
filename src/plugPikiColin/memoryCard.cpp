@@ -446,6 +446,10 @@ u32 MemoryCard::calcChecksum(void* dataptr, u32 length)
 	for (int i = 0; i < length >> 2; i++) {
 		u8 i2   = i;
 		u32 val = *((u32*)dataptr + i);
+#if defined(PIKI_PC_PORT) && (defined(_WIN32) || (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__))
+		// Checksum over big-endian words
+		val = __builtin_bswap32(val);
+#endif
 		sum += (i2 << 24) | (((i2 + 1) & 0xFF) << 16) | (((i2 - 1) & 0xFF) << 8) | ((i2 + 2) & 0xFF);
 		sum += val;
 	}

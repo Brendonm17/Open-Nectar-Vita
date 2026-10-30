@@ -20,6 +20,12 @@
 #include "zen/DrawHiScore.h"
 #include "zen/ogStart.h"
 #include "zen/ogTitle.h"
+#if defined(PIKI_PC_PORT)
+#include "gl/pc_gfx.h"
+#if defined(PIKI_PC_PORT) && defined(PIKI_PC_SETTINGS_MENU)
+#include "settings/pc_settings.h"
+#endif
+#endif
 
 class TitleSetupSection;
 
@@ -297,6 +303,9 @@ public:
 		if (mState == STATE_Active && startWindowOn) {
 			// NB: this timer is cumulative and doesn't get reset on activity on the title screen, only by re-transitioning from another
 			// section (tutorial movie, game section, etc)
+#if defined(PIKI_PC_PORT) && defined(PIKI_PC_SETTINGS_MENU)
+			if (!pc_settings_consume_game_input())
+#endif
 			mIdleMovieTimer -= gsys->getFrameTime();
 
 			// play pre-rendered tutorial movie
@@ -455,6 +464,9 @@ public:
 							startWindow->start();
 							startWindowOn = true;
 							titleWindowOn = false;
+#if defined(PIKI_PC_PORT)
+							mIdleMovieTimer = 20.0f;
+#endif
 						}
 #else
 #if defined(VERSION_GPIP01)
@@ -496,6 +508,9 @@ public:
 							startWindow->start();
 							startWindowOn = true;
 							titleWindowOn = false;
+#if defined(PIKI_PC_PORT)
+							mIdleMovieTimer = 20.0f;
+#endif
 						}
 #endif
 					}
@@ -530,6 +545,10 @@ public:
 	 */
 	virtual void draw(Graphics& gfx) // _14
 	{
+#if defined(PIKI_PC_PORT)
+		pc_gfx_set_section_clip_43(0);
+		pc_settings_set_in_field(0);
+#endif
 		if (mPlayer->mCurrentData) {
 			// current cutscene playing, use its camera
 			// in reality, this is always the case - the background is a cutscene

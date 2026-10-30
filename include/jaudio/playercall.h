@@ -34,6 +34,12 @@ END_SCOPE_EXTERN_C
 s32 Jac_CheckPlayerCallback(PlayerCallBack, void*);
 void PlayerCallback();
 void DspPlayerCallback();
+#if defined(PIKI_PC_PORT)
+// Marks a callback safe to run off the game thread.
+void PlayerCallbackMarkSeqSafe(PlayerCallBack callback);
+// True if every registered callback is marked safe.
+BOOL PlayerCallbacksAllSeqSafe();
+#endif
 
 ////////////////////////////////////////////////////////////
 

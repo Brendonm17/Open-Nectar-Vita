@@ -160,6 +160,7 @@ static f32 EVENT_DIST_SCALE[8] = { 1.0f, 1.0f, 2.0f, 0.8f, 1.2f, 1.0f, 1.2f, 2.0
  */
 void Jac_Debug_ActionEntry(void)
 {
+	PC_JAC_JOIN();
 	TRAP_UNIMPLEMENTED;
 }
 
@@ -193,6 +194,7 @@ void SendToStack(SEvent_* evt)
  */
 void Jac_InitEventSystem(void)
 {
+	PC_JAC_JOIN();
 	seqp_* handle;
 	u32 i;
 	u32 j;
@@ -235,6 +237,7 @@ void Jac_InitEventSystem(void)
  */
 void Jac_EventFrameCheck(void)
 {
+	PC_JAC_JOIN();
 	u32 i, j;
 	SEvent_* event;
 	if (Jac_DemoCheck()) {
@@ -269,6 +272,7 @@ void Jac_EventFrameCheck(void)
  */
 void Jac_UpdateCamera(struct SVector_* listenerPos, struct SVector_* listenerDir)
 {
+	PC_JAC_JOIN();
 	SEvent_* event;
 	u32 i;
 	u8 set = FALSE;
@@ -318,6 +322,7 @@ void Jac_UpdateCamera(struct SVector_* listenerPos, struct SVector_* listenerDir
  */
 int Jac_CreateEvent(u32 eventType, struct SVector_* eventPos)
 {
+	PC_JAC_JOIN();
 	u32 i;
 	u32 idx;
 	SEvent_* event;
@@ -375,6 +380,7 @@ int Jac_CreateEvent(u32 eventType, struct SVector_* eventPos)
  */
 BOOL Jac_UpdateEventPosition(int idx, struct SVector_* eventPos)
 {
+	PC_JAC_JOIN();
 	if (idx == -1) {
 		return FALSE;
 	}
@@ -396,6 +402,7 @@ BOOL Jac_UpdateEventPosition(int idx, struct SVector_* eventPos)
  */
 BOOL Jac_PlayEventAction(int eventIdx, int actionId)
 {
+	PC_JAC_JOIN();
 	u32 targetSlot;
 	u8 lowestPrio;
 	u8 group;
@@ -529,6 +536,7 @@ BOOL Jac_PlayEventAction(int eventIdx, int actionId)
  */
 BOOL Jac_StopEventAction(int eventIdx, int actionId)
 {
+	PC_JAC_JOIN();
 	u32 i;
 	SEvent_* event;
 	if (eventIdx == -1) {
@@ -593,6 +601,7 @@ void MML_StopEventAll(u8 idx, u16 activeMask)
  */
 BOOL Jac_DestroyEvent(s32 idx)
 {
+	PC_JAC_JOIN();
 	u32 i;
 	SEvent_* event;
 	if (idx == -1) {
@@ -623,6 +632,7 @@ BOOL Jac_DestroyEvent(s32 idx)
  */
 void Jac_InitAllEvent(void)
 {
+	PC_JAC_JOIN();
 	u32 i;
 	for (i = 0; i < 16; i++) {
 		Jac_DestroyEvent(i);
@@ -635,6 +645,7 @@ void Jac_InitAllEvent(void)
  */
 void Jac_DestroyNotThisEvent(void)
 {
+	PC_JAC_JOIN();
 	TRAP_UNIMPLEMENTED;
 }
 
@@ -643,6 +654,7 @@ void Jac_DestroyNotThisEvent(void)
  */
 int Jac_CheckFreeEvents(void)
 {
+	PC_JAC_JOIN();
 	u32 i;
 	int count = 0;
 	for (i = 0; i < 16; i++) {
@@ -659,6 +671,7 @@ int Jac_CheckFreeEvents(void)
  */
 int Jac_GetActiveEvents(u32* eventIDs)
 {
+	PC_JAC_JOIN();
 	u32 count = 0;
 	u32 i;
 	for (i = 0; i < 16; i++) {

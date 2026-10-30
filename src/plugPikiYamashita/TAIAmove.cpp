@@ -669,12 +669,12 @@ void TAIApatrol::setTargetPosition(Teki& teki)
 void TAIApatrol::start(Teki& teki)
 {
 	teki.setTableIndex(0);
+	f32 minDist = 0.0f;
 	for (int i = 0; i < mPatrolPointCount; i++) {
 		setTargetPosition(teki);
 
 		f32 sum = zen::Abs(teki.getPosition().x - teki.mTargetPosition.x) + zen::Abs(teki.getPosition().y - teki.mTargetPosition.y)
 		        + zen::Abs(teki.getPosition().z - teki.mTargetPosition.z);
-		f32 minDist;
 		if (i == 0) {
 			minDist = sum;
 		} else if (sum > minDist) {

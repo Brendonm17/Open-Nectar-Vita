@@ -20,7 +20,7 @@
 			if (_NAME)                             \
 				sysCon->print("%s: ", _NAME);      \
                                                    \
-			vsprintf(dest, fmt, args);             \
+			vsnprintf(dest, sizeof(dest), fmt, args); \
 			if (strlen(dest)) {                    \
 				sysCon->write(dest, strlen(dest)); \
 			}                                      \
@@ -35,7 +35,7 @@
 		va_list args;                         \
 		va_start(args, fmt);                  \
 		char buffer[2048];                    \
-		vsprintf(buffer, fmt, args);          \
+		vsnprintf(buffer, sizeof(buffer), fmt, args); \
 		va_end(args);                         \
 		System::halt(__FILE__, line, buffer); \
 	}
@@ -62,7 +62,11 @@
 #define PRINT
 #define ERROR _Error
 #elif defined(PIKI_PC_PORT)
+#ifdef __vita__
+#define PRINT
+#else
 #define PRINT _Print
+#endif
 #define ERROR _Error
 #else
 #define PRINT

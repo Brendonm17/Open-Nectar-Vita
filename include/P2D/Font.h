@@ -36,6 +36,10 @@ public:
 	void setGX();
 	void setGradColor(const Colour& topColour, const Colour& bottomColour);
 	f32 getWidth(int charCode, int drawWidth);
+#ifdef __vita__
+	// PS Vita button glyph at the font cell height. Returns the advance.
+	f32 drawButtonGlyph(f32 xPos, f32 yPos, int cell, int drawHeight);
+#endif
 	f32 drawChar(f32 xPos, f32 yPos, int charCode, int drawWidth, int drawHeight);
 
 	// unused/inlined:

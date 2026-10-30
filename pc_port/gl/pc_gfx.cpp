@@ -1,9 +1,16 @@
+#ifdef __vita__
+#ifdef __vita__
+#include <arm_neon.h>
+#endif
+#include "vita_gxq_rename.h"   // renames pc_gfx_* to pc_gfx_*_impl
+#include "vita_gxq.h"
+#endif
 #include "pc_gfx.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__vita__)
 // glibc's backtrace() has no Windows equivalent worth pulling a dependency in
 // for; the wild-vertex diagnostic below degrades to its raw dump instead.
 #else
@@ -13,14 +20,22 @@
 #include <algorithm>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <memory>
 
 #include "../timing/pc_render_packet.h"
 #include "pc_tev_shader.h"
 #include "../timing/pc_render_phase.h"
-#include "../timing/pc_tick_profiler.h"
 
 #include "pc_opengl.h"
+// ProgramLocations and the vgx_write_* uniform section writers.
+#include "pc_program_locations.h"
+#ifdef __vita__
+#include "vita_gl_record.h"   // GL/GXM call recording
+#include "settings/pc_settings.h"
+#include "vita_imm_chain.h"   // immediate-path fold chain
+#include <psp2/kernel/processmgr.h>
+#endif
 
 // ── GL Function Pointers (Loaded via SDL_GL_GetProcAddress) ──
 typedef void (APIENTRYP PFNGLGENBUFFERSPROC) (GLsizei n, GLuint *buffers);
@@ -54,6 +69,71 @@ typedef void (APIENTRYP PCGLGETQUERYOBJECTUI64VPROC) (GLuint id, GLenum pname, G
 // through SDL_GL_GetProcAddress like the rest. On Linux these two happen to be
 // declared by the system header, which is why they were called directly.
 static PFNGLACTIVETEXTUREPROC glActiveTexture_ptr = nullptr;
+static void apply_texture_filtering(u8 minAlpha, int width, int height);
+// Per-texture storage shape.
+struct PcTexShape { int w = 0, h = 0; GLenum fmt = 0, type = 0; };
+static std::unordered_map<GLuint, PcTexShape> sTexShape;
+// EFB copy targets, by game-memory address.
+struct PcCopyTarget { GLuint tex = 0; u16 w = 0, h = 0; };
+static std::unordered_map<const void*, PcCopyTarget> sCopyTargets;
+static std::vector<PcCopyTarget> sCopyTargetPool;   // copy textures kept between levels (pc_gfx_level_flush)
+static std::unordered_map<GLuint, bool> sEfbTextureIds;   // copy targets and the offscreen EFB
+// Offscreen EFB.
+static GLuint sEfbOffTex = 0;
+static int sEfbOffW = 0, sEfbOffH = 0;
+static bool sEfbOffscreen = false;
+static unsigned sTargetEpoch = 1;   // render target epoch
+static float sGxViewport[4] = { 0.0f, 0.0f, 640.0f, 480.0f };   // last GX-space viewport and scissor
+static u32 sGxScissor[4] = { 0, 0, 640, 480 };
+// Display copy vertical filter (GXSetCopyFilter), row weights /64.
+static int sVFilterEdge = 0, sVFilterCentre = 64;
+static void pc_tex_mip_forget(GLuint tex);
+
+static bool sSectionClip43 = false;
+
+
+// Fog.
+static float sFogStart = 0.0f, sFogEnd = 0.0f, sFogNear = 0.0f, sFogFar = 0.0f;
+static float sFogColour[3] = { 0.0f, 0.0f, 0.0f };
+static bool  sFogOn = false;
+// Vertex fog: vFog = w * K0 + K1.
+static float sFogK0 = 0.0f, sFogK1 = 0.0f;
+
+static uint32_t sFogGen = 1;   // fog state generation
+#ifdef __vita__
+// Fog state content hash.
+static uint64_t sFogHash = 0;
+static inline uint64_t hash_bytes(uint64_t h, const void* data, size_t bytes);
+#endif
+void pc_gfx_set_fog(bool enable, float startZ, float endZ, float nearZ, float farZ,
+                    unsigned char r, unsigned char g, unsigned char b) {
+    const bool usable = enable && farZ > nearZ && nearZ > 0.0f && endZ > startZ;
+    const float ns = usable ? startZ : 0.0f, ne = usable ? endZ : 0.0f, nn = usable ? nearZ : 0.0f, nf = usable ? farZ : 0.0f;
+    const float cr = usable ? r / 255.0f : 0.0f, cg = usable ? g / 255.0f : 0.0f, cb = usable ? b / 255.0f : 0.0f;
+    const bool changed = sFogOn != usable || sFogStart != ns || sFogEnd != ne || sFogNear != nn || sFogFar != nf
+                      || sFogColour[0] != cr || sFogColour[1] != cg || sFogColour[2] != cb;
+    sFogOn = usable; sFogStart = ns; sFogEnd = ne; sFogNear = nn; sFogFar = nf;
+    sFogColour[0] = cr; sFogColour[1] = cg; sFogColour[2] = cb;
+    sFogK0 = usable ? 1.0f / (ne - ns) : 0.0f;
+    sFogK1 = usable ? -ns / (ne - ns) : 0.0f;
+#ifdef __vita__
+    if (changed || sFogHash == 0) {
+#else
+    if (changed) {
+#endif
+        ++sFogGen;
+#ifdef __vita__
+        const float v[8] = { sFogOn ? 1.0f : 0.0f, sFogStart, sFogEnd, sFogNear, sFogFar, sFogColour[0], sFogColour[1], sFogColour[2] };
+        sFogHash = hash_bytes(0xF0C5A7E3D1B29486ull, v, sizeof(v));
+#endif
+    }
+}
+
+
+#ifndef __vita__
+typedef void (APIENTRYP PCGLGENERATEMIPMAPPROC) (GLenum target);
+static PCGLGENERATEMIPMAPPROC glGenerateMipmap_ptr = nullptr;
+#endif
 static PFNGLBLENDEQUATIONPROC glBlendEquation_ptr = nullptr;
 static PFNGLGENBUFFERSPROC glGenBuffers_ptr = nullptr;
 static PFNGLBINDBUFFERPROC glBindBuffer_ptr = nullptr;
@@ -103,9 +183,16 @@ static PCGLGETQUERYOBJECTIVPROC glGetQueryObjectiv_ptr = nullptr;
 static PCGLGETQUERYOBJECTUI64VPROC glGetQueryObjectui64v_ptr = nullptr;
 
 #include <SDL2/SDL.h>
+#ifdef __vita__
+// vitaGL entry points.
+#define SDL_GL_GetProcAddress vglGetProcAddress
+#endif
 
 static void load_gl_functions() {
     glActiveTexture_ptr = (PFNGLACTIVETEXTUREPROC)SDL_GL_GetProcAddress("glActiveTexture");
+#ifndef __vita__
+    glGenerateMipmap_ptr = (PCGLGENERATEMIPMAPPROC)SDL_GL_GetProcAddress("glGenerateMipmap");
+#endif
     glBlendEquation_ptr = (PFNGLBLENDEQUATIONPROC)SDL_GL_GetProcAddress("glBlendEquation");
     glGenBuffers_ptr = (PFNGLGENBUFFERSPROC)SDL_GL_GetProcAddress("glGenBuffers");
     glBindBuffer_ptr = (PFNGLBINDBUFFERPROC)SDL_GL_GetProcAddress("glBindBuffer");
@@ -191,7 +278,8 @@ static void load_gl_functions() {
 // the last value for every location and only cross the driver boundary when it
 // actually changes. Locations outside this deliberately generous range fall
 // back to the raw call.
-constexpr int PC_UNIFORM_CACHE_SIZE = 512;
+constexpr int PC_UNIFORM_CACHE_SIZE = 4096;
+static_assert(PC_UNIFORM_CACHE_SIZE == kVgxUniformCacheSlots, "the render thread's copy of this cache (rtunif) must have the same slots");
 // A location number only identifies a uniform within one program, and shader
 // specialisation means several programs are now in play. Entries therefore
 // carry the generation they were written in, and binding a different program
@@ -207,6 +295,11 @@ static bool uniform_cache_disabled() {
 }
 static void invalidate_uniform_cache() {
     if (++sUniformGeneration == 0) sUniformGeneration = 1;
+}
+static void invalidate_uniform_cache_on_program_switch() {
+#ifndef __vita__
+    invalidate_uniform_cache();
+#endif
 }
 template <typename T> struct UniformCacheEntry {
     uint32_t generation = 0;
@@ -224,6 +317,27 @@ static UniformCacheEntry<Uniform4iValue> sUniform4iCache[PC_UNIFORM_CACHE_SIZE];
 static UniformCacheEntry<Uniform4fValue> sUniform4fCache[PC_UNIFORM_CACHE_SIZE];
 static UniformCacheEntry<UniformMat4Value> sUniformMat4Cache[PC_UNIFORM_CACHE_SIZE];
 static UniformCacheEntry<UniformMat3Value> sUniformMat3Cache[PC_UNIFORM_CACHE_SIZE];
+
+#ifdef __vita__
+// Location owning each uniform cache slot.
+static GLint sUniformSlotOwner[PC_UNIFORM_CACHE_SIZE];
+static int uniform_cache_slot(GLint loc) {
+    const int slot = int((static_cast<uint32_t>(loc) / 8u) % uint32_t(PC_UNIFORM_CACHE_SIZE));
+    if (sUniformSlotOwner[slot] != loc) {
+        sUniformSlotOwner[slot] = loc;
+        sUniform1iCache[slot].generation = 0;
+        sUniform1fCache[slot].generation = 0;
+        sUniform2iCache[slot].generation = 0;
+        sUniform4iCache[slot].generation = 0;
+        sUniform4fCache[slot].generation = 0;
+        sUniformMat4Cache[slot].generation = 0;
+        sUniformMat3Cache[slot].generation = 0;
+    }
+    return slot;
+}
+#else
+static inline int uniform_cache_slot(GLint loc) { return loc; }
+#endif
 
 
 // Names the exact uniform write that OpenGL rejects. A rejected write leaves
@@ -259,31 +373,66 @@ static void check_uniform_write(GLint loc, const char* kind) {
     fflush(stdout);
 }
 
+#ifdef __vita__
+// Repoint GL function pointers at the recorders.
+static void vita_rt_override_gl_pointers() {
+    glActiveTexture_ptr        = rec_glActiveTexture;
+    glBlendEquation_ptr        = rec_glBlendEquation;
+    glGenBuffers_ptr           = rec_glGenBuffers;
+    glBindBuffer_ptr           = rec_glBindBuffer;
+    glBufferData_ptr           = rec_glBufferData;
+    glBufferSubData_ptr        = rec_glBufferSubData;
+    glUniform1i_ptr            = rec_glUniform1i;
+    glUniform1f_ptr            = rec_glUniform1f;
+    glUniform2i_ptr            = rec_glUniform2i;
+    glUniform4f_ptr            = rec_glUniform4f;
+    glUniform4i_ptr            = rec_glUniform4i;
+    glUniformMatrix3fv_ptr     = rec_glUniformMatrix3fv;
+    glUniformMatrix4fv_ptr     = rec_glUniformMatrix4fv;
+    glUseProgram_ptr           = rec_glUseProgram;
+    glVertexAttribPointer_ptr  = rec_glVertexAttribPointer;
+}
+// Uniform images: encoded slots below -1.
+static inline bool vita_slot_is_image(GLint loc) { return vgx_slot_is_image(loc); }
+static void vita_img_write(GLint slot, const void* src, uint32_t words, bool srcInt);
+#endif
 static void cached_uniform1i(GLint loc, GLint value) {
+#ifdef __vita__
+    if (vita_slot_is_image(loc)) { vita_img_write(loc, &value, 1, true); return; }
+#endif
     if (loc < 0) return;
     if (uniform_cache_disabled()) { glUniform1i_ptr(loc, value); return; }
-    if (loc >= PC_UNIFORM_CACHE_SIZE) { glUniform1i_ptr(loc, value); return; }
-    auto& entry = sUniform1iCache[loc];
+    const int slot = uniform_cache_slot(loc);
+    if (slot >= PC_UNIFORM_CACHE_SIZE) { glUniform1i_ptr(loc, value); return; }
+    auto& entry = sUniform1iCache[slot];
     if (entry.generation == sUniformGeneration && entry.value == value) return;
     entry.generation = sUniformGeneration; entry.value = value;
     glUniform1i_ptr(loc, value);
     check_uniform_write(loc, "1i");
 }
 static void cached_uniform1f(GLint loc, GLfloat value) {
+#ifdef __vita__
+    if (vita_slot_is_image(loc)) { vita_img_write(loc, &value, 1, false); return; }
+#endif
     if (loc < 0) return;
     if (uniform_cache_disabled()) { glUniform1f_ptr(loc, value); return; }
-    if (loc >= PC_UNIFORM_CACHE_SIZE) { glUniform1f_ptr(loc, value); return; }
-    auto& entry = sUniform1fCache[loc];
+    const int slot = uniform_cache_slot(loc);
+    if (slot >= PC_UNIFORM_CACHE_SIZE) { glUniform1f_ptr(loc, value); return; }
+    auto& entry = sUniform1fCache[slot];
     if (entry.generation == sUniformGeneration && entry.value == value) return;
     entry.generation = sUniformGeneration; entry.value = value;
     glUniform1f_ptr(loc, value);
     check_uniform_write(loc, "1f");
 }
 static void cached_uniform2i(GLint loc, GLint x, GLint y) {
+#ifdef __vita__
+    if (vita_slot_is_image(loc)) { const GLint v[2] = { x, y }; vita_img_write(loc, v, 2, true); return; }
+#endif
     if (loc < 0) return;
     if (uniform_cache_disabled()) { glUniform2i_ptr(loc, x, y); return; }
-    if (loc >= PC_UNIFORM_CACHE_SIZE) { glUniform2i_ptr(loc, x, y); return; }
-    auto& entry = sUniform2iCache[loc];
+    const int slot = uniform_cache_slot(loc);
+    if (slot >= PC_UNIFORM_CACHE_SIZE) { glUniform2i_ptr(loc, x, y); return; }
+    auto& entry = sUniform2iCache[slot];
     const Uniform2iValue value { x, y };
     if (entry.generation == sUniformGeneration && memcmp(&entry.value, &value, sizeof(value)) == 0) return;
     entry.generation = sUniformGeneration; entry.value = value;
@@ -291,10 +440,14 @@ static void cached_uniform2i(GLint loc, GLint x, GLint y) {
     check_uniform_write(loc, "2i");
 }
 static void cached_uniform4i(GLint loc, GLint x, GLint y, GLint z, GLint w) {
+#ifdef __vita__
+    if (vita_slot_is_image(loc)) { const GLint v[4] = { x, y, z, w }; vita_img_write(loc, v, 4, true); return; }
+#endif
     if (loc < 0) return;
     if (uniform_cache_disabled()) { glUniform4i_ptr(loc, x, y, z, w); return; }
-    if (loc >= PC_UNIFORM_CACHE_SIZE) { glUniform4i_ptr(loc, x, y, z, w); return; }
-    auto& entry = sUniform4iCache[loc];
+    const int slot = uniform_cache_slot(loc);
+    if (slot >= PC_UNIFORM_CACHE_SIZE) { glUniform4i_ptr(loc, x, y, z, w); return; }
+    auto& entry = sUniform4iCache[slot];
     const Uniform4iValue value { x, y, z, w };
     if (entry.generation == sUniformGeneration && memcmp(&entry.value, &value, sizeof(value)) == 0) return;
     entry.generation = sUniformGeneration; entry.value = value;
@@ -302,10 +455,14 @@ static void cached_uniform4i(GLint loc, GLint x, GLint y, GLint z, GLint w) {
     check_uniform_write(loc, "4i");
 }
 static void cached_uniform4f(GLint loc, GLfloat x, GLfloat y, GLfloat z, GLfloat w) {
+#ifdef __vita__
+    if (vita_slot_is_image(loc)) { const GLfloat v[4] = { x, y, z, w }; vita_img_write(loc, v, 4, false); return; }
+#endif
     if (loc < 0) return;
     if (uniform_cache_disabled()) { glUniform4f_ptr(loc, x, y, z, w); return; }
-    if (loc >= PC_UNIFORM_CACHE_SIZE) { glUniform4f_ptr(loc, x, y, z, w); return; }
-    auto& entry = sUniform4fCache[loc];
+    const int slot = uniform_cache_slot(loc);
+    if (slot >= PC_UNIFORM_CACHE_SIZE) { glUniform4f_ptr(loc, x, y, z, w); return; }
+    auto& entry = sUniform4fCache[slot];
     const Uniform4fValue value { x, y, z, w };
     if (entry.generation == sUniformGeneration && memcmp(&entry.value, &value, sizeof(value)) == 0) return;
     entry.generation = sUniformGeneration; entry.value = value;
@@ -313,24 +470,38 @@ static void cached_uniform4f(GLint loc, GLfloat x, GLfloat y, GLfloat z, GLfloat
     check_uniform_write(loc, "4f");
 }
 static void cached_uniform_mat4(GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) {
+#ifdef __vita__
+    if (vita_slot_is_image(loc)) {
+        if (value && transpose == GL_FALSE && count > 0) vita_img_write(loc, value, uint32_t(count) * 16u, false);
+        return;
+    }
+#endif
     if (loc < 0 || !value) return;
     if (uniform_cache_disabled()) { glUniformMatrix4fv_ptr(loc, count, transpose, value); return; }
-    if (count != 1 || transpose != GL_FALSE || loc >= PC_UNIFORM_CACHE_SIZE) {
+    const int slot = uniform_cache_slot(loc);
+    if (count != 1 || transpose != GL_FALSE || slot >= PC_UNIFORM_CACHE_SIZE) {
         glUniformMatrix4fv_ptr(loc, count, transpose, value); return;
     }
-    auto& entry = sUniformMat4Cache[loc];
+    auto& entry = sUniformMat4Cache[slot];
     if (entry.generation == sUniformGeneration && memcmp(entry.value.value, value, sizeof(entry.value.value)) == 0) return;
     entry.generation = sUniformGeneration; memcpy(entry.value.value, value, sizeof(entry.value.value));
     glUniformMatrix4fv_ptr(loc, count, transpose, value);
     check_uniform_write(loc, "mat4");
 }
 static void cached_uniform_mat3(GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) {
+#ifdef __vita__
+    if (vita_slot_is_image(loc)) {
+        if (value && transpose == GL_FALSE && count > 0) vita_img_write(loc, value, uint32_t(count) * 9u, false);
+        return;
+    }
+#endif
     if (loc < 0 || !value) return;
     if (uniform_cache_disabled()) { glUniformMatrix3fv_ptr(loc, count, transpose, value); return; }
-    if (count != 1 || transpose != GL_FALSE || loc >= PC_UNIFORM_CACHE_SIZE) {
+    const int slot = uniform_cache_slot(loc);
+    if (count != 1 || transpose != GL_FALSE || slot >= PC_UNIFORM_CACHE_SIZE) {
         glUniformMatrix3fv_ptr(loc, count, transpose, value); return;
     }
-    auto& entry = sUniformMat3Cache[loc];
+    auto& entry = sUniformMat3Cache[slot];
     if (entry.generation == sUniformGeneration && memcmp(entry.value.value, value, sizeof(entry.value.value)) == 0) return;
     entry.generation = sUniformGeneration; memcpy(entry.value.value, value, sizeof(entry.value.value));
     glUniformMatrix3fv_ptr(loc, count, transpose, value);
@@ -345,17 +516,61 @@ static void cached_uniform_mat3(GLint loc, GLsizei count, GLboolean transpose, c
 #define glUniformMatrix4fv_ptr cached_uniform_mat4
 #define glUniformMatrix3fv_ptr cached_uniform_mat3
 
+#ifdef __vita__
+// Flat uniform array location mapping.
+#include "vita_gx_shaders.h"
+#include "vita_vs_key.h"
+#undef glGetUniformLocation_ptr
+#define glGetUniformLocation_ptr vita_gx_uniform_location
+static void vita_build_all_programs();
+static void vita_rtgx_init();
+static void vita_rtgx_present();
+static void vita_rotate_vbo_segment();
+static void vita_dl_end_frame();         // vita_dl_cache.inl; called from pc_gfx_present
+static void vita_dl_flush_all();         // vita_dl_cache.inl; pc_gfx_level_flush
+static void vita_gxm_shadow_invalidate();
+extern const size_t kVitaAttrOff[8];
+extern const GLint  kVitaAttrSize[8];
+void vita_rt_set_attr_layout(const uint32_t offsets[8], const int sizes[8], int stride);   // vita_rt.cpp
+#endif
+
 // ── State Storage ──
 struct Vertex {
     float x, y, z;
     float nx, ny, nz;
     float r, g, b, a;
+#ifdef __vita__
+    float mtxIdx;   // matrix palette slot (ATTR7)
+#endif
     // The current GLSL backend exposes four texture-coordinate varyings.
     // TEX4-TEX7 still have to be consumed from GX display lists, but retaining
     // them in every streamed vertex only inflated the upload by 32 bytes.
     float tex[4][2];
 };
+#ifdef __vita__
+static_assert(sizeof(Vertex) == 76, "Vita vertex: 72 + palette slot");
+#else
 static_assert(sizeof(Vertex) == 72, "Keep the streamed GX vertex compact");
+#endif
+
+#ifdef __vita__
+// Allocator that default-initialises new elements.
+template <class T> struct VitaNoInitAlloc {
+    using value_type = T;
+    VitaNoInitAlloc() noexcept {}
+    template <class U> VitaNoInitAlloc(const VitaNoInitAlloc<U>&) noexcept {}
+    template <class U> struct rebind { using other = VitaNoInitAlloc<U>; };
+    T* allocate(size_t n) { return std::allocator<T>().allocate(n); }
+    void deallocate(T* p, size_t n) noexcept { std::allocator<T>().deallocate(p, n); }
+    template <class U> void construct(U* p) noexcept { ::new (static_cast<void*>(p)) U; }
+    template <class U, class... A> void construct(U* p, A&&... a) { ::new (static_cast<void*>(p)) U(std::forward<A>(a)...); }
+};
+template <class T, class U> inline bool operator==(const VitaNoInitAlloc<T>&, const VitaNoInitAlloc<U>&) noexcept { return true; }
+template <class T, class U> inline bool operator!=(const VitaNoInitAlloc<T>&, const VitaNoInitAlloc<U>&) noexcept { return false; }
+typedef std::vector<Vertex, VitaNoInitAlloc<Vertex>> PcVertexVec;
+#else
+typedef std::vector<Vertex> PcVertexVec;
+#endif
 
 static float sProjMatrix[16];
 static float sPosMatrix[64][16];
@@ -364,13 +579,7 @@ static u32 sCurrentPosMtxId = 0;
 // Normal matrices (3x3 rotation part, stored column-major)
 static float sNrmMatrix[64][9];
 
-// Texture coordinate generation
-struct TexCoordGen {
-    bool active = false;
-    int type = 1;      // GX_TG_MTX3X4
-    int src = 4;       // GX_TG_TEX0
-    u32 mtxIdx = 0;
-};
+// Texture coordinate generation (TexCoordGen: pc_program_locations.h)
 static TexCoordGen sTexCoordGen[8];
 static float sTexMatrices[64][16];
 // Matrix contents change far less often than they are drawn with, so the batch
@@ -380,26 +589,17 @@ static uint32_t sPosMtxGen[64] = {};
 static uint32_t sNrmMtxGen[64] = {};
 static uint32_t sTexMtxGen[64] = {};
 static uint32_t sProjMtxGen = 0;
+#ifdef __vita__
+// Per texture matrix: identity flag and its generation.
+struct VitaTexMtxIdent { uint32_t gen; uint8_t valid, ident, pad[2]; };
+static VitaTexMtxIdent sVitaTexMtxIdent[64];   // zeroed: nothing valid
+#endif
 static bool sTexMtxLoaded[64] = {};
 
-// Lighting state
-struct GfxLight {
-    float pos[3];    // world position (or half-vector for specular light 7)
-    float dir[3];    // direction / half-vector
-    float a[3];      // specular attenuation a0,a1,a2 (N.H quadratic curve)
-    float color[4];  // RGBA 0-1
-    float k[3];      // distance attenuation k0,k1,k2
-    bool active;
-};
+// Lighting state (GfxLight: pc_program_locations.h)
 static GfxLight sLights[8] = {};
 
-// TEV swap mode state
-struct TevSwapMode {
-    GXTevColorChan red;
-    GXTevColorChan green;
-    GXTevColorChan blue;
-    GXTevColorChan alpha;
-};
+// TEV swap mode state (TevSwapMode: pc_program_locations.h)
 static TevSwapMode sTevSwapModes[4] = {
     { GX_CH_RED,   GX_CH_GREEN, GX_CH_BLUE,  GX_CH_ALPHA },
     { GX_CH_RED,   GX_CH_RED,   GX_CH_RED,   GX_CH_ALPHA },
@@ -409,25 +609,7 @@ static TevSwapMode sTevSwapModes[4] = {
 static GXTevSwapSel sTevRasSwapSel[GX_MAXTEVSTAGE] = {};
 static GXTevSwapSel sTevTexSwapSel[GX_MAXTEVSTAGE] = {};
 
-struct GfxChannel {
-    bool enabled = false;
-    GXColorSrc matSrc = GX_SRC_VTX;      // Hardware GXInit default: vertex colors
-    GXColorSrc ambSrc = GX_SRC_REG;
-    u32 lightMask = 0;
-    GXDiffuseFn diffFn = GX_DF_NONE;
-    GXAttnFn attnFn = GX_AF_NONE;
-    bool alphaEnabled = false;
-    GXColorSrc alphaMatSrc = GX_SRC_VTX;
-    GXColorSrc alphaAmbSrc = GX_SRC_REG;
-    u32 alphaLightMask = 0;
-    GXDiffuseFn alphaDiffFn = GX_DF_NONE;
-    GXAttnFn alphaAttnFn = GX_AF_NONE;
-    float matColor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };  // White: multiply-through no-op
-    // GXInit initializes both ambient channel registers to black.  In
-    // particular COLOR1 is normally specular; a white default makes every
-    // specular material fully white even before a light contributes.
-    float ambColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-};
+// Lighting channels (GfxChannel: pc_program_locations.h)
 static GfxChannel sChannels[2] = {}; // COLOR0/ALPHA0, COLOR1/ALPHA1
 
 static constexpr GXAttnFn decode_xf_attn_fn(u32 control) {
@@ -470,6 +652,33 @@ static_assert(decode_xf_light_mask((1u << 2) | (1u << 14)) == 0x81,
 
 static GLuint sVBO = 0;
 static size_t sVboCapacity = 16 * 1024 * 1024;
+#ifdef __vita__
+// VBO ring for immediate-mode geometry.
+static constexpr int    kVitaVboSegs = 5;
+static constexpr size_t kVitaVboSeg  = sizeof(Vertex) * 20000;   // cached display lists carry the bulk
+// vitaGL glDrawArrays vertex limit (MAX_IDX_NUMBER).
+static constexpr GLsizei kVitaMaxDrawVerts = 0xC000;
+#endif
+// One-frame draw dump (PIKMIN_VDUMP_FRAME).
+static unsigned dump_frame_number() {
+#ifdef __vita__
+    return 0u;
+#else
+    static const unsigned n = [] {
+        const char* v = std::getenv("PIKMIN_VDUMP_FRAME");
+        return v ? static_cast<unsigned>(std::atoi(v)) : 0u;
+    }();
+    return n;
+#endif
+}
+static bool dump_frame_active(unsigned frame) {
+    return dump_frame_number() != 0 && frame == dump_frame_number();
+}
+static unsigned  sVitaFrameNo = 0;
+static bool      sVitaDumpActive = false;
+static unsigned  sVitaDumpDraw = 0;
+static int       sVitaBlendType = 0, sVitaBlendSrc = 0, sVitaBlendDst = 0;
+static uint64_t  sVitaLastKeyHash = 0;
 static size_t sVboWriteOffset = 0;
 static GLuint sShaderProgram = 0;
 static GLuint sNativeFramebuffer = 0;
@@ -498,6 +707,86 @@ static uint64_t sPerfVertices = 0;
 static uint64_t sPerfDisplayLists = 0;
 static uint64_t sPerfDisplayListBytes = 0;
 static uint64_t sPerfTextureUploads = 0;
+#ifdef __vita__
+// Static display-list cache (vita_dl_cache.inl).
+static bool     sVitaVatDirty = true, sVitaDescDirty = true;
+// Triangles per spatial cell of a big cached list.
+static constexpr int kVitaDlChunkTris = 600;
+// Soft alpha test program tag.
+static constexpr uint64_t kVitaSoftAlphaTag = 0x5AF7A1FA5AF7A1FAull;
+static bool     sVitaZWriteOn = true;        // GXSetZMode update flag, as last set
+// Alpha-test elision program tag.
+static constexpr uint64_t kVitaElideAlphaTag = 0xE11DEA1FA0E11DEAull;
+static float    sVitaRasAlphaMin = 0.0f;     // vertex alpha lower bound of the draw being applied
+static std::unordered_map<GLuint, uint8_t> sTexMinAlpha;   // minimum texel alpha per GL texture (255 = opaque)
+static uint8_t  sActiveTexMinAlpha[GX_MAX_TEXMAP] = {};    // per texmap, for the bound texture (0 = unknown)
+// Per-texture 16x16 grid of minimum alpha.
+struct VitaTexAlphaGrid { uint8_t cell[16][16]; uint8_t minAll; };   // minimum of all 256 cells
+static std::unordered_map<GLuint, VitaTexAlphaGrid> sTexAlphaGrid;
+static const VitaTexAlphaGrid* sActiveTexGrid[GX_MAX_TEXMAP] = {};
+static uint16_t sActiveTexW[GX_MAX_TEXMAP] = {}, sActiveTexH[GX_MAX_TEXMAP] = {};
+static uint8_t  sActiveTexWrapS[GX_MAX_TEXMAP] = {}, sActiveTexWrapT[GX_MAX_TEXMAP] = {};   // GXTexWrapMode
+static VitaTexAlphaGrid sVitaUploadGrid;      // filled by the upload paths
+static void vita_grid_reset() { memset(&sVitaUploadGrid, 255, sizeof(sVitaUploadGrid)); }
+static void vita_grid_min_rect(int x0, int y0, int x1, int y1, int w, int h, uint8_t a) {
+    if (w <= 0 || h <= 0) return;
+    const int cx0 = std::max(0, x0 * 16 / w), cx1 = std::min(15, x1 * 16 / w);
+    const int cy0 = std::max(0, y0 * 16 / h), cy1 = std::min(15, y1 * 16 / h);
+    for (int cy = cy0; cy <= cy1; ++cy) for (int cx = cx0; cx <= cx1; ++cx) if (a < sVitaUploadGrid.cell[cy][cx]) sVitaUploadGrid.cell[cy][cx] = a;
+}
+// Grid from a row-major image whose alpha byte sits at `alpha` with `stride` bytes per texel.
+static void vita_grid_from_alpha(const uint8_t* alpha, size_t stride, int w, int h) {
+    for (int cy = 0; cy < 16; ++cy) for (int cx = 0; cx < 16; ++cx) {
+        const int y0 = cy * h / 16, y1 = std::max(y0 + 1, (cy + 1) * h / 16);
+        const int x0 = cx * w / 16, x1 = std::max(x0 + 1, (cx + 1) * w / 16);
+        uint8_t m = 255;
+        for (int y = y0; y < y1 && y < h; ++y) {
+            const uint8_t* p = alpha + (size_t(y) * size_t(w) + size_t(x0)) * stride;
+            for (int x = x0; x < x1 && x < w; ++x, p += stride) if (*p < m) m = *p;
+        }
+        sVitaUploadGrid.cell[cy][cx] = m;
+    }
+}
+// Texcoord bounds of the cached list being applied, per attribute slot.
+static float sVitaListUvMin[4][2], sVitaListUvMax[4][2];
+static bool  sVitaListUvValid = false;
+// Hash of those bounds.
+static uint64_t sVitaListUvHash = 0;
+static uint8_t sVitaStageLo[GX_MAXTEVSTAGE] = {};   // per stage: texture alpha lower bound (x255)
+static bool  sVitaStageLoRegion = false;             // some stage's bound came from the sampled region
+static uint8_t  sVitaProgSelKind[256] = {};   // per program-selection memo entry: 0 tested, 1 soft, 2 elided, 3 rejected
+static bool     sVitaDrawRejected = false;    // the selected draw cannot pass its alpha test
+static uint8_t  sVitaCurAlphaKind = 0xFF;     // selected program's alpha-test kind: 0 tested, 1 soft, 2 elided, 3 rejected, 0xFF no test
+// Active texture alpha generation.
+static uint32_t sActiveTexAlphaGen = 1;
+// Per GL program: the batch key its uniforms hold.
+static uint64_t sVitaProgramAppliedKeyArr[16385]; static uint8_t sVitaProgramAppliedKeyValid[16385];
+static inline void vita_prog_applied_set(GLuint prog, uint64_t key) { if (prog < 16385u) { sVitaProgramAppliedKeyArr[prog] = key; sVitaProgramAppliedKeyValid[prog] = 1; } }
+static inline bool vita_prog_applied_is(GLuint prog, uint64_t key) { return prog < 16385u && sVitaProgramAppliedKeyValid[prog] && sVitaProgramAppliedKeyArr[prog] == key; }
+static inline void vita_prog_applied_clear(GLuint prog) { if (prog < 16385u) sVitaProgramAppliedKeyValid[prog] = 0; }
+static size_t   sVitaDlBytes = 0;            // display-list cache bytes
+// Batch key blocks.
+enum : unsigned { kKeyTev = 1u, kKeyChan = 2u, kKeyAlpha = 4u, kKeyTexGen = 8u, kKeyAll = 15u };
+static unsigned sKeyDirty = kKeyAll;
+static uint64_t sKeyBlockTev = 0, sKeyBlockChan = 0, sKeyBlockAlpha = 0, sKeyBlockTexGen = 0;
+static uint64_t sKeyBlockTevIdent = 0;   // program-identity part of the TEV block
+static uint64_t sKeyCalls = 0;           // batch-key computation count
+// Key call that last refreshed sVitaStageLo.
+static uint64_t sVitaStageLoKeyCall = ~0ull;
+void vita_key_dirty(unsigned mask) { sKeyDirty |= mask; }
+static bool sChanSrcDirty = true;   // a channel's colour source changed
+// Immediate-path fold chain (vita_imm_chain.h).
+static uint32_t sVitaBatchSerial = 0;          // ++ at every batch open (pc_gfx_end_core)
+// Last stream primitive's full-path outcome, for the fold chain.
+struct VitaImmEndNote { uint8_t outcome, matFold, which, rgbConst, aConst, reg0Neg; unsigned reads; };
+static VitaImmEndNote sVitaImmEnd;
+static bool     sVitaImmNoting = false;
+VitaImmChain g_vitaImmChain;
+// Fast stream decode.
+static float    sVitaU8F[256];                 // float(i) / 255.0f
+static const char* sVitaRingGpu = nullptr;  // GPU address of the ring VBO (vitaGL glMapBuffer)
+static bool     sVitaFrameFirstDraw = true; // first draw of the frame
+#endif
 static uint64_t sPerfFastDraws = 0;
 static uint64_t sPerfSourcePrimitives = 0;
 static uint64_t sPerfFastPathDraws[4] = {};
@@ -531,62 +820,16 @@ struct PerfTevPattern { uint64_t key = 0; uint64_t count = 0; };
 static PerfTevPattern sPerfTevPatterns[128] = {};
 struct PerfTevMultiPattern { uint64_t key = 0; uint64_t count = 0; u8 stages = 0; };
 static PerfTevMultiPattern sPerfTevMultiPatterns[128] = {};
-// Uniform locations belong to a program, and specialisation means there is
-// now one program per TEV configuration instead of a single ubershader. The
-// active program's locations live here; switching programs assigns a cached
-// set rather than re-querying the driver.
-struct ProgramLocations {
-	GLint projMtx = -1;
-	GLint posMtx = -1;
-	GLint materialColor = -1;
-	GLint useMaterialRgb = -1;
-	GLint useMaterialAlpha = -1;
-	GLint alphaComp0 = -1;
-	GLint alphaComp1 = -1;
-	GLint alphaOp = -1;
-	GLint alphaRef0 = -1;
-	GLint alphaRef1 = -1;
-	GLint numStages = -1;
-	GLint fastPath = -1;
-	GLint tevPrev = -1;
-	GLint tevReg0 = -1;
-	GLint tevReg1 = -1;
-	GLint tevReg2 = -1;
-	GLint konst[4] = {-1, -1, -1, -1};
-	GLint tevKonst[GX_MAXTEVSTAGE] = {};
-	GLint tevCSel[GX_MAXTEVSTAGE] = {};
-	GLint tevASel[GX_MAXTEVSTAGE] = {};
-	GLint tevCOps[GX_MAXTEVSTAGE] = {};
-	GLint tevAOps[GX_MAXTEVSTAGE] = {};
-	GLint tevTexInfo[GX_MAXTEVSTAGE] = {};
-	GLint tevSwapTable[4] = {};
-	GLint tevSwapSel[GX_MAXTEVSTAGE] = {};
-	GLint tex[8] = {};
-	GLint nrmMtx = -1;
-	GLint numLights = -1;
-	GLint lightPos[4] = {};
-	GLint lightColor[4] = {};
-	GLint lightK[4] = {};
-	GLint ambColor = -1;
-	GLint chan0En = -1;
-	GLint chan1En = -1;
-	GLint chan0AttnFn = -1;
-	GLint chan1AttnFn = -1;
-	GLint numLights1 = -1;
-	GLint lightPos1[4] = {};
-	GLint lightColor1[4] = {};
-	GLint lightK1[4] = {};
-	GLint ambColor1 = -1;
-	GLint materialColor1 = -1;
-	GLint useMaterialRgb1 = -1;
-	GLint specHalf1 = -1;   // specular half-vector for channel 1
-	GLint specAttn1 = -1;   // specular a[] coefficients
-	GLint tevChan[GX_MAXTEVSTAGE] = {};
-	GLint tcMode[8] = { -1, -1, -1, -1, -1, -1, -1, -1 };
-	GLint tcMtx[8] = { -1, -1, -1, -1, -1, -1, -1, -1 };
-};
 
+// Ubershader locations.
+static ProgramLocations sUberLocations;
+#ifdef __vita__
+// Active program's locations.
+static const ProgramLocations* sLocP = &sUberLocations;
+#define sLoc (*sLocP)
+#else
 static ProgramLocations sLoc;
+#endif
 // Fixed vertex attribute slots, forced with glBindAttribLocation on every
 // program so a single vertex array object describes them all.
 enum : GLuint {
@@ -607,11 +850,122 @@ static GLint sAttrTexCoord[8] = {
 static GLint sAttrPos = GLint(kAttrPosIndex);
 static GLint sAttrColor = GLint(kAttrColorIndex);
 
-// Ubershader locations, kept so the fallback path can be restored, plus the
-// program currently bound and the vertex shader shared by every program.
-static ProgramLocations sUberLocations;
+// Current program and the shared vertex shader.
 static GLuint sCurrentProgram = 0;
 static GLuint sSharedVertexShader = 0;
+// Shared vertex shader with a 3-slot palette.
+static GLuint sSharedVertexShaderSingle = 0;
+// Drawing a cached list that indexes the palette.
+static bool   sVitaNeedPalette = false;
+// uPosPal slots the current draw indexes.
+static int    sVitaPaletteSlots = 1;
+
+#ifdef __vita__
+// Uniform images: per-program CPU copies of the default uniform buffer.
+struct VitaUniformImage {
+    uint8_t* img[2]  = { nullptr, nullptr };        // [0] vertex, [1] fragment
+    uint32_t size[2] = { 0, 0 };
+    uint32_t lo[2]   = { UINT32_MAX, UINT32_MAX };  // pending (not yet sent) byte range
+    uint32_t hi[2]   = { 0, 0 };
+};
+static constexpr int kVitaMaxPrograms = 16385;      // vitaGL program ids are 1..16384
+// Per program: block hashes its uniform image holds.
+struct VitaProgApplied { uint64_t tev = 0, chan = 0, alpha = 0, texgen = 0; uint32_t proj = 0; uint64_t fog = 0; bool valid = false; };   // fog: sFogHash
+static VitaProgApplied sVitaProgApplied[kVitaMaxPrograms];
+static_assert(kVitaMaxPrograms == 16385, "sVitaProgramAppliedKeyArr is sized for kVitaMaxPrograms");
+static VitaUniformImage sVitaImg[kVitaMaxPrograms];
+static bool     sVitaColor1FromAttr = false;   // register-1 fold in effect
+// Palette provenance of the last cached-list palette upload.
+static bool     sVitaPalProvValid = false;
+// Palette provenance per program.
+static unsigned sVitaPalProgPresents = 0;        // present counter
+static void vita_palprog_forget(GLuint prog);   // vita_dl_cache.inl
+static void vita_palprog_forget_all();
+// Uniform sections on the render thread.
+static bool     sVitaRtUnif = false;
+
+static inline uint32_t vita_slot_code(GLint loc)   { return vgx_slot_code(loc); }
+static inline int      vita_slot_stage(GLint loc)  { return vgx_slot_stage(loc); }
+static inline bool     vita_slot_int(GLint loc)    { return vgx_slot_int(loc); }
+static inline uint32_t vita_slot_words(GLint loc)  { return vgx_slot_words(loc); }
+static inline uint32_t vita_slot_offset(GLint loc) { return vgx_slot_offset(loc); }
+
+// vitaGL location to image slot, or the raw location.
+static GLint vita_encode_slot(GLuint program, GLint loc) {
+    if (loc == -1 || loc == 0 || program == 0 || program >= GLuint(kVitaMaxPrograms)) return loc;
+    uint32_t bytes = 0; GLenum stage = 0; int type = 0;
+    const int32_t off = vglGetUniformShadowOffset(program, loc, &bytes, &stage, &type);
+    if (off < 0 || off > 0xFFFF || bytes == 0 || (bytes & 3u) != 0 || (bytes / 4u) > 0xFFFu) return loc;
+    const bool isInt = type == SCE_GXM_PARAMETER_TYPE_S32 || type == SCE_GXM_PARAMETER_TYPE_U32;
+    if (type != SCE_GXM_PARAMETER_TYPE_F32 && !isInt) return loc;   // F16 etc.
+    const uint32_t code = (uint32_t(stage == GL_FRAGMENT_SHADER) << 29) | (uint32_t(isInt) << 28)
+                        | ((bytes / 4u) << 16) | uint32_t(off);
+    return GLint(-(int32_t(code) + 2));
+}
+
+// Write words 32-bit values into an image slot.
+static void vita_img_write(GLint slot, const void* src, uint32_t words, bool srcInt) {
+    if (sCurrentProgram >= GLuint(kVitaMaxPrograms)) return;
+    VitaUniformImage& im = sVitaImg[sCurrentProgram];
+    const int st = vita_slot_stage(slot);
+    uint8_t* img = im.img[st];
+    if (!img) return;
+    uint32_t tmp[128];
+    const void* data;
+    uint32_t off, bytes;
+    if (!vgx_img_prepare(slot, src, words, srcInt, im.size[st], tmp, &data, &off, &bytes)) return;
+    uint8_t* dst = img + off;
+    if (memcmp(dst, data, bytes) == 0) return;
+    memcpy(dst, data, bytes);
+    if (off < im.lo[st]) im.lo[st] = off;
+    if (off + bytes > im.hi[st]) im.hi[st] = off + bytes;
+}
+
+// Send the pending uniform image ranges of a program.
+static void vita_img_flush(GLuint program) {
+    if (sVitaRtUnif) return;
+    if (program == 0 || program >= GLuint(kVitaMaxPrograms)) return;
+    VitaUniformImage& im = sVitaImg[program];
+    for (int st = 0; st < 2; ++st) {
+        if (im.hi[st] <= im.lo[st]) continue;
+        const uint32_t off = im.lo[st], bytes = im.hi[st] - im.lo[st];
+        uint8_t* p = static_cast<uint8_t*>(vita_rt_emit(RT_UNIFORM_IMAGE, 16 + size_t(bytes)));
+        if (p) {
+            rec_put(p, uint32_t(program)); rec_put(p, uint32_t(st)); rec_put(p, off); rec_put(p, bytes);
+            memcpy(p, im.img[st] + off, bytes);
+        }
+        im.lo[st] = UINT32_MAX; im.hi[st] = 0;
+    }
+}
+
+// glUniform4fv for the palette writers.
+static inline void vita_uniform4fv(GLint loc, GLsizei count, const GLfloat* v) {
+    if (vita_slot_is_image(loc)) { vita_img_write(loc, v, uint32_t(count) * 4u, false); return; }
+    if (loc >= 0) glUniform4fv(loc, count, v);
+}
+#endif // __vita__
+
+// Translator sink for the section writers.
+struct PcXlatSink {
+    void put(GLint loc, int kind, uint32_t words, const void* data) {
+        const GLint* iv = static_cast<const GLint*>(data);
+        const GLfloat* fv = static_cast<const GLfloat*>(data);
+        (void)words;
+        switch (kind) {
+        case kVgxPut1i:   cached_uniform1i(loc, iv[0]); break;
+        case kVgxPut1f:   cached_uniform1f(loc, fv[0]); break;
+        case kVgxPut2i:   cached_uniform2i(loc, iv[0], iv[1]); break;
+        case kVgxPut4i:   cached_uniform4i(loc, iv[0], iv[1], iv[2], iv[3]); break;
+        case kVgxPut4f:   cached_uniform4f(loc, fv[0], fv[1], fv[2], fv[3]); break;
+        case kVgxPutMat4: cached_uniform_mat4(loc, 1, GL_FALSE, fv); break;
+#ifdef __vita__
+        case kVgxPut4fv:  vita_uniform4fv(loc, GLsizei(words / 4u), fv); break;   // palette rows
+#endif
+        default: break;
+        }
+    }
+};
+
 // One generated program per TEV configuration instead of the interpreting
 // ubershader. PIKMIN_TEV_SPECIALIZE=0 falls back to the ubershader for the
 // whole session; PIKMIN_TEV_MAX_STAGES=N restricts specialisation to materials
@@ -621,21 +975,18 @@ static int sSpecialiseMaxStages = 16;
 static bool sSpecialiseFailed = false;
 static uint64_t sPerfShaderCompiles = 0;
 
-static std::vector<Vertex> sVertexStream;
+static PcVertexVec sVertexStream;   // resize()d only by vita_imm_decode_fast, which writes every vertex
 static GXPrimitive sCurrentPrimType;
 static u16 sExpectedVerts = 0;
+// Raw FIFO bytes pushed inside a primitive.
+static GXVtxFmt sCurVtxFmt = GX_VTXFMT0;
+static std::vector<u8> sRawPush;
+static void call_display_list_impl(const void* list, u32 nbytes);
 static bool sInPrimitive = false;
+static inline void raw_push_be(u32 v, int bytes) { if (!sInPrimitive) return; for (int i = bytes - 1; i >= 0; --i) sRawPush.push_back(u8(v >> (8 * i))); }
 static bool sHaveVertex = false;
 static bool sVerticesPretransformed = false;
 
-// PERF-NATIVE-002 step 1: GL pipeline state that lives outside pc_gfx_end
-// (blend, depth, cull, color mask, viewport, scissor, framebuffer, clears) is
-// not mirrored in any variable here, so the probe cannot hash it. Each setter
-// bumps this instead: a change of epoch is a change of state, which is exactly
-// what a batch would have to flush on. The same list is the flush-point
-// inventory step 5 needs, so it is worth getting complete now rather than
-// rediscovering it as visual corruption later.
-static uint64_t sGlStateEpoch = 0;
 void pc_gfx_flush_batch(void);
 // Called from each GL-state setter *after* its redundancy guard and *before*
 // it touches GL, so the pending batch is drawn under the state it was built
@@ -643,7 +994,6 @@ void pc_gfx_flush_batch(void);
 // programming is redundant, and flushing on those would defeat batching.
 static inline void pc_gfx_note_gl_state_change() {
     pc_gfx_flush_batch();
-    ++sGlStateEpoch;
 }
 
 // ── Render Packet Capture System ──
@@ -764,6 +1114,17 @@ static bool sHasActiveTextures[GX_MAX_TEXMAP] = {};
 static bool sUseMaterialRgb = false;
 static bool sUseMaterialAlpha = false;
 static float sMaterialColor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+#ifdef __vita__
+// Alpha reference offset by half an 8-bit level.
+static float vita_alpha_ref_for_shader(int comp, float ref) {
+    const float half8 = 0.5f / 255.0f;
+    switch (comp) {
+    case 1: case 6: return ref - half8;   // LESS, GEQUAL
+    case 3: case 4: return ref + half8;   // LEQUAL, GREATER
+    default: return ref;
+    }
+}
+#endif
 static GXCompare sAlphaComp0 = GX_ALWAYS;
 static GXCompare sAlphaComp1 = GX_ALWAYS;
 static GXAlphaOp sAlphaOp = GX_AOP_AND;
@@ -774,28 +1135,6 @@ static bool sAlphaUpdate = true;
 static float sCopyClearColor[4] = { 0.1f, 0.1f, 0.15f, 1.0f };
 static float sCopyClearDepth = 1.0f;
 static u8 sNumTevStages = 1;
-
-// Per-stage TEV state. Defaults mirror the GX hardware reset state: pass
-// rasterized color through to PREV, so nothing renders black before the game
-// programs its first material.
-struct TevStageState {
-	GXTevColorArg colorIn[4] = { GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_RASC };
-	GXTevAlphaArg alphaIn[4] = { GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA };
-	GXTevOp colorOp = GX_TEV_ADD;
-	GXTevBias colorBias = GX_TB_ZERO;
-	GXTevScale colorScale = GX_CS_SCALE_1;
-	GXBool colorClamp = GX_TRUE;
-	GXTevRegID colorOutReg = GX_TEVPREV;
-	GXTevOp alphaOp = GX_TEV_ADD;
-	GXTevBias alphaBias = GX_TB_ZERO;
-	GXTevScale alphaScale = GX_CS_SCALE_1;
-	GXBool alphaClamp = GX_TRUE;
-	GXTevRegID alphaOutReg = GX_TEVPREV;
-	GXTexMapID texMap = GX_TEXMAP_NULL;
-	GXTexCoordID texCoord = GX_TEXCOORD_NULL;
-	bool textureEnabled = false;
-	int rasChannel = 0; // 0/1 select a lit color channel; -1 means COLOR_NULL.
-};
 
 // BP TEV combiner register layout. Keep these helpers as the single source of
 // truth for display-list decoding; the static assertions guard against the
@@ -828,38 +1167,9 @@ static float sKonstColors[4][4] = {
 static GXTevKColorSel sKonstColorSel[GX_MAXTEVSTAGE] = {};
 static GXTevKAlphaSel sKonstAlphaSel[GX_MAXTEVSTAGE] = {};
 
-static float tev_konst_fraction(int selector) {
-    static const float fractions[8] = { 1.0f, 7.0f / 8.0f, 3.0f / 4.0f, 5.0f / 8.0f,
-                                        1.0f / 2.0f, 3.0f / 8.0f, 1.0f / 4.0f, 1.0f / 8.0f };
-    return selector >= 0 && selector < 8 ? fractions[selector] : 1.0f;
-}
-
+// Konst colour a stage's selectors resolve to.
 static void resolve_tev_konst(u8 stage, float out[4]) {
-    const int colorSel = static_cast<int>(sKonstColorSel[stage]);
-    if (colorSel < 8) {
-        out[0] = out[1] = out[2] = tev_konst_fraction(colorSel);
-    } else if (colorSel >= 12 && colorSel < 16) {
-        const float* color = sKonstColors[colorSel - 12];
-        out[0] = color[0]; out[1] = color[1]; out[2] = color[2];
-    } else if (colorSel >= 16 && colorSel < 32) {
-        const int component = (colorSel - 16) >> 2;
-        const int colorIndex = (colorSel - 16) & 3;
-        const float value = sKonstColors[colorIndex][component];
-        out[0] = out[1] = out[2] = value;
-    } else {
-        out[0] = out[1] = out[2] = 1.0f;
-    }
-
-    const int alphaSel = static_cast<int>(sKonstAlphaSel[stage]);
-    if (alphaSel < 8) {
-        out[3] = tev_konst_fraction(alphaSel);
-    } else if (alphaSel >= 16 && alphaSel < 32) {
-        const int component = (alphaSel - 16) >> 2;
-        const int colorIndex = (alphaSel - 16) & 3;
-        out[3] = sKonstColors[colorIndex][component];
-    } else {
-        out[3] = 1.0f;
-    }
+    vgx_resolve_konst(sKonstColorSel[stage], sKonstAlphaSel[stage], sKonstColors, out);
 }
 
 // Map of GXTexObj pointers to OpenGL Texture IDs
@@ -874,18 +1184,95 @@ struct PcTextureSignature {
     GXTexWrapMode wrapT = GX_CLAMP;
     bool indexed = false;
     u32 tlutName = 0;
+    // Sample of the image contents.
+    uint64_t sample = 0;
 
     bool operator==(const PcTextureSignature& other) const {
         return image == other.image && width == other.width && height == other.height
             && format == other.format && wrapS == other.wrapS && wrapT == other.wrapT
-            && indexed == other.indexed && tlutName == other.tlutName;
+            && indexed == other.indexed && tlutName == other.tlutName && sample == other.sample;
     }
 };
 static std::unordered_map<uintptr_t, PcTextureSignature> sTextureSignatures;
 
+// Content-keyed index over uploaded textures.
+struct PcTexBySignature { PcTextureSignature sig; GLuint tex = 0; };
+static std::unordered_map<uint64_t, PcTexBySignature> sTexBySignature;
+
+// Idle texture eviction.
+static std::unordered_map<GLuint, uint32_t> sTexLastUsed;   // frame each texture was last bound
+static uint32_t sTexFrame = 0;
+#ifdef __vita__
+// GXLoadTexObj memo.
+struct VitaTexLoadMemo { uintptr_t obj; uint32_t gen; GLuint tex; const VitaTexAlphaGrid* grid; uint16_t w, h; uint8_t minAlpha, wrapS, wrapT; uint32_t frame; };
+static VitaTexLoadMemo sTexLoadMemo[1024];
+static uint32_t sTexCacheGen = 1;
+#endif
+static constexpr uint32_t kTextureIdleFrames = 300;
+static uint64_t sTexEvictions = 0;
+#ifdef __vita__
+// Free memory floor for idle texture eviction (KB).
+static constexpr unsigned kVitaTexEvictFloorKb = 8 * 1024;
+#endif
+static void evict_idle_textures() {
+    ++sTexFrame;
+    if ((sTexFrame % 120) != 0) return;
+#ifdef __vita__
+    if (vita_rt_vram_free_kb() > kVitaTexEvictFloorKb) return;
+    bool evicted = false;
+#endif
+    for (auto it = sTexLastUsed.begin(); it != sTexLastUsed.end();) {
+        const GLuint tex = it->first;
+        if (sEfbTextureIds.count(tex)) { it = sTexLastUsed.erase(it); continue; }   // copy target
+        if (sTexFrame - it->second <= kTextureIdleFrames) { ++it; continue; }
+        bool bound = false;
+        for (int m = 0; m < 8; ++m) if (sBoundTextures[m] == tex || sActiveGLTextures[m] == tex) bound = true;
+        if (bound) { ++it; continue; }
+        glDeleteTextures(1, &tex);
+#ifdef __vita__
+        evicted = true;
+#endif
+        ++sTexEvictions;
+#ifdef __vita__
+        ++sTexCacheGen;
+#endif
+        sTexShape.erase(tex);
+        pc_tex_mip_forget(tex);
+#ifdef __vita__
+        sTexMinAlpha.erase(tex);
+        sTexAlphaGrid.erase(tex);
+        ++sActiveTexAlphaGen;
+#endif
+        for (auto c = sTextureCache.begin(); c != sTextureCache.end();) {
+            if (c->second == tex) c = sTextureCache.erase(c); else ++c;
+        }
+        for (auto b = sTexBySignature.begin(); b != sTexBySignature.end();) {
+            if (b->second.tex == tex) b = sTexBySignature.erase(b); else ++b;
+        }
+        it = sTexLastUsed.erase(it);
+    }
+#ifdef __vita__
+    // Rebind unit 0 to its mirrored texture.
+    if (evicted && vita_rt_recording()) glBindTexture(GL_TEXTURE_2D, sBoundTextures[0]);
+#endif
+}
+static uint64_t texture_signature_hash(const PcTextureSignature& s) {
+    uint64_t h = 1469598103934665603ull;
+    auto mix = [&h](uint64_t v) { h ^= v; h *= 1099511628211ull; };
+    mix((uint64_t)(uintptr_t)s.image); mix(s.width); mix(s.height); mix(s.format);
+    mix((uint64_t)s.wrapS); mix((uint64_t)s.wrapT); mix(s.indexed ? 1 : 0); mix(s.tlutName);
+    mix(s.sample);
+    return h;
+}
+
 struct PcTlut {
     std::vector<u8> rgba;
 };
+// GX wrap mode to GL.
+static inline GLint pc_gx_wrap_to_gl(GXTexWrapMode w) {
+    return w == GX_REPEAT ? GL_REPEAT : (w == GX_MIRROR ? GL_MIRRORED_REPEAT : GL_CLAMP_TO_EDGE);
+}
+
 struct PcCiTexture {
     const u8* image = nullptr;
     u16 width = 0;
@@ -905,10 +1292,17 @@ static int sDrawableHeight = 480;
 // it to the target aspect ratio. Translate GX's top-left origin to OpenGL's bottom-left.
 static void map_gx_rect(float x, float y, float width, float height,
                         GLint& glX, GLint& glY, GLsizei& glWidth, GLsizei& glHeight) {
+    if (sEfbOffscreen) {
+        // Offscreen EFB: GX pixels 1:1, top-left origin.
+        glX = (GLint)lroundf(x);
+        glY = (GLint)lroundf(float(sEfbOffH) - y - height);
+        glWidth = (GLsizei)std::max(0L, lroundf(width));
+        glHeight = (GLsizei)std::max(0L, lroundf(height));
+        return;
+    }
     const float targetWidth = sNativeFramebufferReady ? float(sRenderWidth) : float(sDrawableWidth);
     const float targetHeight = sNativeFramebufferReady ? float(sRenderHeight) : float(sDrawableHeight);
     
-    // Base dimensions match the target aspect ratio (not always 4:3)
     float aspect = sCurrentAspectRatio;
     int baseWidth = int(lroundf(480.0f * aspect));
     int baseHeight = 480;
@@ -946,7 +1340,7 @@ static const char* vShaderSrc =
     "uniform vec4 uAmbColor;\n"
     "uniform int uChan0En;\n"
     "uniform int uChan1En;\n"
-    "uniform int uChan0AttnFn;\n"  // 0=NONE,1=SPOT,2=SPEC
+    "uniform int uChan0AttnFn;\n"  // GXAttnFn: 0=SPEC, 1=SPOT, 2=NONE
     "uniform int uChan1AttnFn;\n"
     "uniform int uNumLights1;\n"
     "uniform vec4 uLightPos1[4];\n"
@@ -1000,16 +1394,20 @@ static const char* vShaderSrc =
     "    vec3 N = normalize(uNrmMtx * aNormal);\n"
     "    vec3 lit0 = uAmbColor.rgb + doLights(N, worldPos, uNumLights, uLightPos, uLightColor, uLightK);\n"
     "    vec3 spec1 = vec3(0.0);\n"
-    "    if (uChan1AttnFn == 2 && uNumLights1 > 0) {\n"
-    "        // GX hardware specular: att = clamp(a0 + a1*cosT + a2*cosT^2)\n"
+    "    if (uChan1AttnFn == 0 && uNumLights1 > 0) {\n"
+    "        // Specular is a ratio of two quadratics in N.H: the angle\n"
+    "        // coefficients over the distance ones.\n"
     "        float cosT = max(dot(N, normalize(uSpecHalf1.xyz)), 0.0);\n"
-    "        float att = clamp(uSpecAttn1.x + uSpecAttn1.y * cosT + uSpecAttn1.z * cosT * cosT, 0.0, 1.0);\n"
+    "        vec3 quad = vec3(1.0, cosT, cosT * cosT);\n"
+    "        float num = max(0.0, dot(uSpecAttn1.xyz, quad));\n"
+    "        float den = dot(uLightK1[0].xyz, quad);\n"
+    "        float att = (den > 1e-5) ? clamp(num / den, 0.0, 1.0) : 0.0;\n"
     "        spec1 = att * uLightColor1[0].rgb;\n"
     "    }\n"
     "    // GX_AF_SPEC uses the channel's attenuation function to produce the\n"
     "    // specular term.  Feeding the same light through the diffuse path as\n"
     "    // well double-counts COLOR1 and saturates specular materials white.\n"
-    "    vec3 diffuse1 = (uChan1AttnFn == 2)\n"
+    "    vec3 diffuse1 = (uChan1AttnFn == 0)\n"
     "        ? vec3(0.0)\n"
     "        : doLights(N, worldPos, uNumLights1, uLightPos1, uLightColor1, uLightK1);\n"
     "    vec3 lit1 = uAmbColor1.rgb + diffuse1 + spec1;\n"
@@ -1267,7 +1665,6 @@ static const char* fShaderSrc =
 void pc_gfx_set_render_scale(float scale) {
     sRenderScale = std::clamp(scale, 0.25f, 4.0f);
     sRenderScaleSet = true;
-    printf("[PC Port] Internal render scale set to %.2f\n", sRenderScale);
 }
 
 float pc_gfx_get_render_scale(void) {
@@ -1347,65 +1744,113 @@ static void bind_fixed_attrib_locations(GLuint program) {
     glBindAttribLocation_ptr(program, kAttrPosIndex, "aPos");
     glBindAttribLocation_ptr(program, kAttrColorIndex, "aColor");
     glBindAttribLocation_ptr(program, kAttrNormalIndex, "aNormal");
+    static const char* const kTexCoordNames[8] = { "aTexCoord0", "aTexCoord1", "aTexCoord2", "aTexCoord3",
+                                                   "aTexCoord4", "aTexCoord5", "aTexCoord6", "aTexCoord7" };
+    static_assert(kVertexTexCoordCount <= 8, "kTexCoordNames covers the texcoord attributes");
     for (int i = 0; i < kVertexTexCoordCount; ++i) {
-        char name[32];
-        snprintf(name, sizeof(name), "aTexCoord%d", i);
-        glBindAttribLocation_ptr(program, kAttrTexCoord0Index + i, name);
+        glBindAttribLocation_ptr(program, kAttrTexCoord0Index + i, kTexCoordNames[i]);
     }
+    // Matrix-palette index (ATTR7).
+    glBindAttribLocation_ptr(program, 7, "aMtxIdx");
 }
 
 // Resolves every uniform this backend can feed. A specialised program bakes
 // most of them away; those come back as -1 and the matching glUniform call is
 // ignored by the driver, which is what lets one upload path serve both the
 // ubershader and the generated programs.
-static void query_program_locations(GLuint program, ProgramLocations& out) {
-    out = ProgramLocations();
-    invalidate_uniform_cache();
-    out.projMtx = glGetUniformLocation_ptr(program, "uProjMtx");
-    out.posMtx = glGetUniformLocation_ptr(program, "uPosMtx");
-    out.materialColor = glGetUniformLocation_ptr(program, "uMaterialColor");
-    out.useMaterialRgb = glGetUniformLocation_ptr(program, "uUseMaterialRgb");
-    out.useMaterialAlpha = glGetUniformLocation_ptr(program, "uUseMaterialAlpha");
-    out.alphaComp0 = glGetUniformLocation_ptr(program, "uAlphaComp0");
-    out.alphaComp1 = glGetUniformLocation_ptr(program, "uAlphaComp1");
-    out.alphaOp = glGetUniformLocation_ptr(program, "uAlphaOp");
-    out.alphaRef0 = glGetUniformLocation_ptr(program, "uAlphaRef0");
-    out.alphaRef1 = glGetUniformLocation_ptr(program, "uAlphaRef1");
-    out.numStages = glGetUniformLocation_ptr(program, "uNumStages");
-    out.fastPath = glGetUniformLocation_ptr(program, "uFastPath");
-    out.tevPrev = glGetUniformLocation_ptr(program, "uTevPrev");
-    out.tevReg0 = glGetUniformLocation_ptr(program, "uTevReg0");
-    out.tevReg1 = glGetUniformLocation_ptr(program, "uTevReg1");
-    out.tevReg2 = glGetUniformLocation_ptr(program, "uTevReg2");
+
+#ifdef __vita__
+// Uniforms a program declares.
+struct ProgramUniformSet {
+    void build(GLuint program) {
+        mCount = 0;
+        GLint n = 0;
+        if (glGetProgramiv_ptr) glGetProgramiv_ptr(program, GL_ACTIVE_UNIFORMS, &n);
+        for (GLint i = 0; i < n && mCount < kMax; ++i) {
+            GLint size = 0; GLenum type = 0; GLsizei len = 0;
+            mNames[mCount][0] = '\0';
+            glGetActiveUniform(program, (GLuint)i, (GLsizei)kNameLen, &len, &size, &type, mNames[mCount]);
+            if (mNames[mCount][0]) ++mCount;
+        }
+    }
+
+    bool has(const char* name) const {
+        char flat[kNameLen];
+        const char* bracket = strchr(name, '[');
+        if (bracket) {
+            size_t base = (size_t)(bracket - name);
+            if (base < sizeof(flat) - 8) {
+                memcpy(flat, name, base);
+                snprintf(flat + base, sizeof(flat) - base, "_%d", atoi(bracket + 1));
+                name = flat;
+            }
+        }
+        for (int i = 0; i < mCount; ++i) {
+            if (strcmp(mNames[i], name) == 0) return true;
+        }
+        return false;
+    }
+
+    static const int kMax = 256;
+    static const int kNameLen = 80;
+    char mNames[kMax][kNameLen];
+    int  mCount = 0;
+};
+#endif
+
+// Every uniform a program may carry, as GLSL-style name and ProgramLocations field.
+template <class Q>
+static void program_location_sequence(ProgramLocations& out, Q&& QLOC) {
+    out.projMtx = QLOC("uProjMtx");
+    out.posMtx = QLOC("uPosMtx");
+    out.posPal = QLOC("uPosPal");
+    out.nrmPal = QLOC("uNrmPal");
+    out.fogParams = QLOC("uFogParams");
+    out.fogColour = QLOC("uFogColour");
+    out.materialColor = QLOC("uMaterialColor");
+    out.matSrc = QLOC("uMatSrc");
+    out.useMaterialRgb = QLOC("uUseMaterialRgb");
+    out.useMaterialAlpha = QLOC("uUseMaterialAlpha");
+    out.alphaComp0 = QLOC("uAlphaComp0");
+    out.alphaComp1 = QLOC("uAlphaComp1");
+    out.alphaOp = QLOC("uAlphaOp");
+    out.alphaRef0 = QLOC("uAlphaRef0");
+    out.alphaRef1 = QLOC("uAlphaRef1");
+    out.numStages = QLOC("uNumStages");
+    out.fastPath = QLOC("uFastPath");
+    out.tevPrev = QLOC("uTevPrev");
+    out.tevReg0 = QLOC("uTevReg0");
+    out.tevReg1 = QLOC("uTevReg1");
+    out.tevReg2 = QLOC("uTevReg2");
     for (int i = 0; i < 4; i++) {
         char buf[32];
         snprintf(buf, sizeof(buf), "uKonst%d", i);
-        out.konst[i] = glGetUniformLocation_ptr(program, buf);
+        out.konst[i] = QLOC(buf);
     }
     for (int i = 0; i < GX_MAXTEVSTAGE; i++) {
         char buf[64];
         snprintf(buf, sizeof(buf), "uTevCSel[%d]", i);
-        out.tevCSel[i] = glGetUniformLocation_ptr(program, buf);
+        out.tevCSel[i] = QLOC(buf);
         snprintf(buf, sizeof(buf), "uTevASel[%d]", i);
-        out.tevASel[i] = glGetUniformLocation_ptr(program, buf);
+        out.tevASel[i] = QLOC(buf);
         snprintf(buf, sizeof(buf), "uTevCOps[%d]", i);
-        out.tevCOps[i] = glGetUniformLocation_ptr(program, buf);
+        out.tevCOps[i] = QLOC(buf);
         snprintf(buf, sizeof(buf), "uTevAOps[%d]", i);
-        out.tevAOps[i] = glGetUniformLocation_ptr(program, buf);
+        out.tevAOps[i] = QLOC(buf);
         snprintf(buf, sizeof(buf), "uTevTexInfo[%d]", i);
-        out.tevTexInfo[i] = glGetUniformLocation_ptr(program, buf);
+        out.tevTexInfo[i] = QLOC(buf);
         snprintf(buf, sizeof(buf), "uTevKonst[%d]", i);
-        out.tevKonst[i] = glGetUniformLocation_ptr(program, buf);
+        out.tevKonst[i] = QLOC(buf);
     }
     for (int i = 0; i < 4; i++) {
         char buf[32];
         snprintf(buf, sizeof(buf), "uTevSwapTable[%d]", i);
-        out.tevSwapTable[i] = glGetUniformLocation_ptr(program, buf);
+        out.tevSwapTable[i] = QLOC(buf);
     }
     for (int i = 0; i < GX_MAXTEVSTAGE; i++) {
         char buf[32];
         snprintf(buf, sizeof(buf), "uTevSwapSel[%d]", i);
-        out.tevSwapSel[i] = glGetUniformLocation_ptr(program, buf);
+        out.tevSwapSel[i] = QLOC(buf);
     }
     for (int i = 0; i < 8; i++) {
         char buf[16];
@@ -1415,59 +1860,145 @@ static void query_program_locations(GLuint program, ProgramLocations& out) {
         // the new program's locations to whichever program was still current,
         // which GL either rejected or, when that location happened to hold an
         // integer uniform, silently overwrote with a sampler index.
-        out.tex[i] = glGetUniformLocation_ptr(program, buf);
+        out.tex[i] = QLOC(buf);
     }
 
     for (int i = 0; i < 8; ++i) {
         char name[32];
-        snprintf(name, sizeof(name), "aTexCoord%d", i);
         snprintf(name, sizeof(name), "uTcMode[%d]", i);
-        out.tcMode[i] = glGetUniformLocation_ptr(program, name);
+        out.tcMode[i] = QLOC(name);
         snprintf(name, sizeof(name), "uTcMtx[%d]", i);
-        out.tcMtx[i] = glGetUniformLocation_ptr(program, name);
+        out.tcMtx[i] = QLOC(name);
     }
-    out.nrmMtx = glGetUniformLocation_ptr(program, "uNrmMtx");
-    out.numLights = glGetUniformLocation_ptr(program, "uNumLights");
-    out.ambColor = glGetUniformLocation_ptr(program, "uAmbColor");
-    out.chan0En = glGetUniformLocation_ptr(program, "uChan0En");
-    out.chan1En = glGetUniformLocation_ptr(program, "uChan1En");
-    out.chan0AttnFn = glGetUniformLocation_ptr(program, "uChan0AttnFn");
-    out.chan1AttnFn = glGetUniformLocation_ptr(program, "uChan1AttnFn");
-    out.numLights1 = glGetUniformLocation_ptr(program, "uNumLights1");
-    out.ambColor1 = glGetUniformLocation_ptr(program, "uAmbColor1");
-    out.materialColor1 = glGetUniformLocation_ptr(program, "uMaterialColor1");
-    out.useMaterialRgb1 = glGetUniformLocation_ptr(program, "uUseMaterialRgb1");
-    out.specHalf1 = glGetUniformLocation_ptr(program, "uSpecHalf1");
-    out.specAttn1 = glGetUniformLocation_ptr(program, "uSpecAttn1");
+    out.nrmMtx = QLOC("uNrmMtx");
+    out.numLights = QLOC("uNumLights");
+    out.ambColor = QLOC("uAmbColor");
+    out.chan0En = QLOC("uChan0En");
+    out.chan1En = QLOC("uChan1En");
+    out.chan0AttnFn = QLOC("uChan0AttnFn");
+    out.chan1AttnFn = QLOC("uChan1AttnFn");
+    out.numLights1 = QLOC("uNumLights1");
+    out.ambColor1 = QLOC("uAmbColor1");
+    out.materialColor1 = QLOC("uMaterialColor1");
+    out.useMaterialRgb1 = QLOC("uUseMaterialRgb1");
+    out.specHalf1 = QLOC("uSpecHalf1");
+    out.specAttn1 = QLOC("uSpecAttn1");
     for (int i = 0; i < 16; i++) {
         char buf[32];
         snprintf(buf, sizeof(buf), "uTevChan[%d]", i);
-        out.tevChan[i] = glGetUniformLocation_ptr(program, buf);
+        out.tevChan[i] = QLOC(buf);
     }
     for (int i = 0; i < 4; i++) {
         char buf[32];
         snprintf(buf, sizeof(buf), "uLightPos[%d]", i);
-        out.lightPos[i] = glGetUniformLocation_ptr(program, buf);
+        out.lightPos[i] = QLOC(buf);
         snprintf(buf, sizeof(buf), "uLightColor[%d]", i);
-        out.lightColor[i] = glGetUniformLocation_ptr(program, buf);
+        out.lightColor[i] = QLOC(buf);
         snprintf(buf, sizeof(buf), "uLightK[%d]", i);
-        out.lightK[i] = glGetUniformLocation_ptr(program, buf);
+        out.lightK[i] = QLOC(buf);
         snprintf(buf, sizeof(buf), "uLightPos1[%d]", i);
-        out.lightPos1[i] = glGetUniformLocation_ptr(program, buf);
+        out.lightPos1[i] = QLOC(buf);
         snprintf(buf, sizeof(buf), "uLightColor1[%d]", i);
-        out.lightColor1[i] = glGetUniformLocation_ptr(program, buf);
+        out.lightColor1[i] = QLOC(buf);
         snprintf(buf, sizeof(buf), "uLightK1[%d]", i);
-        out.lightK1[i] = glGetUniformLocation_ptr(program, buf);
+        out.lightK1[i] = QLOC(buf);
     }
     for (int i = 0; i < 4; i++) {
         char buf[32];
         snprintf(buf, sizeof(buf), "uLightPos[%d]", i);
-        out.lightPos[i] = glGetUniformLocation_ptr(program, buf);
+        out.lightPos[i] = QLOC(buf);
         snprintf(buf, sizeof(buf), "uLightColor[%d]", i);
-        out.lightColor[i] = glGetUniformLocation_ptr(program, buf);
+        out.lightColor[i] = QLOC(buf);
         snprintf(buf, sizeof(buf), "uLightK[%d]", i);
-        out.lightK[i] = glGetUniformLocation_ptr(program, buf);
+        out.lightK[i] = QLOC(buf);
     }
+}
+
+#ifdef __vita__
+// Flat uniform name to ProgramLocations field.
+struct VitaLocName { char flat[48]; char glsl[48]; uint16_t field; };
+static std::vector<VitaLocName> sVitaLocNames;   // sorted by flat name
+static void vita_flatten_uniform_name(const char* name, char* flat, size_t cap) {
+    const char* bracket = strchr(name, '[');
+    if (bracket && size_t(bracket - name) < cap - 8) {
+        const size_t base = size_t(bracket - name);
+        memcpy(flat, name, base);
+        snprintf(flat + base, cap - base, "_%d", atoi(bracket + 1));
+    } else {
+        snprintf(flat, cap, "%s", name);
+    }
+}
+static void vita_build_location_names() {
+    if (!sVitaLocNames.empty()) return;
+    std::vector<std::string> names;
+    ProgramLocations probe;
+    program_location_sequence(probe, [&](const char* n) -> GLint {
+        names.emplace_back(n);
+        return GLint(-(int(names.size()) - 1 + 100));
+    });
+    const GLint* f = reinterpret_cast<const GLint*>(&probe);
+    const size_t nf = sizeof(ProgramLocations) / sizeof(GLint);
+    for (size_t i = 0; i < nf; ++i) {
+        const int k = -int(f[i]) - 100;
+        if (k < 0 || size_t(k) >= names.size()) continue;
+        VitaLocName e{};
+        snprintf(e.glsl, sizeof(e.glsl), "%s", names[size_t(k)].c_str());
+        vita_flatten_uniform_name(e.glsl, e.flat, sizeof(e.flat));
+        e.field = uint16_t(i);
+        sVitaLocNames.push_back(e);
+    }
+    std::sort(sVitaLocNames.begin(), sVitaLocNames.end(),
+              [](const VitaLocName& a, const VitaLocName& b) { return strcmp(a.flat, b.flat) < 0; });
+}
+#endif
+
+static void query_program_locations(GLuint program, ProgramLocations& out) {
+    out = ProgramLocations();
+    invalidate_uniform_cache();
+#ifdef __vita__
+    sVitaPalProvValid = false;
+    vita_palprog_forget_all();
+    ProgramUniformSet present;
+    present.build(program);
+    // Uniform images.
+    if (program < GLuint(kVitaMaxPrograms) && vglPrepareProgramShadow(program)) {
+        VitaUniformImage& im = sVitaImg[program];
+        for (int st = 0; st < 2; ++st) {
+            uint32_t sz = 0;
+            void* sh = vglGetProgramShadow(program, st ? GL_FRAGMENT_SHADER : GL_VERTEX_SHADER, &sz);
+            if (sh && sz && !im.img[st]) {
+                im.img[st] = static_cast<uint8_t*>(calloc(sz, 1));
+                im.size[st] = im.img[st] ? sz : 0;
+            }
+        }
+    }
+    vita_build_location_names();
+    GLint* fields = reinterpret_cast<GLint*>(&out);
+    for (int u = 0; u < present.mCount; ++u) {
+        const char* name = present.mNames[u];
+        auto it = std::lower_bound(sVitaLocNames.begin(), sVitaLocNames.end(), name,
+                                   [](const VitaLocName& e, const char* key) { return strcmp(e.flat, key) < 0; });
+        for (; it != sVitaLocNames.end() && strcmp(it->flat, name) == 0; ++it) {
+            fields[it->field] = vita_encode_slot(program, glGetUniformLocation_ptr(program, it->glsl));
+        }
+    }
+    // Location table self-check, one program in 64.
+    static unsigned sLocCheck = 0;
+    if ((sLocCheck++ & 63u) == 0) {
+        ProgramLocations ref;
+        program_location_sequence(ref, [&](const char* n) -> GLint {
+            const GLint raw = present.has(n) ? glGetUniformLocation_ptr(program, n) : -1;
+            return vita_encode_slot(program, raw);
+        });
+        if (memcmp(&ref, &out, sizeof(out)) != 0) {
+            static int reported = 0;
+            if (reported++ < 4) printf("ERROR: uniform location table mismatch for program %u; using the full query\n", (unsigned)program);
+            out = ref;
+        }
+    }
+#else
+    program_location_sequence(out, [&](const char* n) -> GLint { return glGetUniformLocation_ptr(program, n); });
+#endif
     // Sampler bindings are program state, so the program has to be current
     // before they are written. Leaving it out sent every glUniform1i to
     // whichever program happened to be bound: GL rejected them, the samplers
@@ -1479,23 +2010,20 @@ static void query_program_locations(GLuint program, ProgramLocations& out) {
     }
 }
 
+#ifdef __vita__
+void pc_gfx_init_impl(void) {
+#else
 void pc_gfx_init(void) {
+#endif
     load_gl_functions();
 
-    const GLubyte* glVersion = glGetString(GL_VERSION);
-    const GLubyte* glslVersion = glGetString(GL_SHADING_LANGUAGE_VERSION);
     gl_error_checkpoint("context creation");
-    printf("[PC Port] OpenGL context: %s; GLSL: %s\n",
-           glVersion ? reinterpret_cast<const char*>(glVersion) : "unknown",
-           glslVersion ? reinterpret_cast<const char*>(glslVersion) : "unknown");
     if (const char* value = std::getenv("PIKMIN_TEV_SPECIALIZE")) {
         sSpecialiseShaders = value[0] != '0';
     }
     if (const char* value = std::getenv("PIKMIN_TEV_MAX_STAGES")) {
         sSpecialiseMaxStages = std::clamp(atoi(value), 0, 16);
     }
-    printf("[PC Port] TEV specialisation: %s, up to %d stage(s); the rest use the ubershader.\n",
-           sSpecialiseShaders ? "on" : "off", sSpecialiseMaxStages);
     if (const char* value = std::getenv("PIKMIN_RENDER_SCALE")) {
         if (!sRenderScaleSet) {
             sRenderScale = std::clamp(strtof(value, nullptr), 0.25f, 4.0f);
@@ -1519,12 +2047,21 @@ void pc_gfx_init(void) {
             sTexCoordGen[c].mtxIdx = 0;
         }
     }
+#ifdef __vita__
+    memset(sVitaTexMtxIdent, 0, sizeof(sVitaTexMtxIdent));
+#endif
 
     if (!glCreateShader_ptr) {
         printf("[PC Port Error] OpenGL extension loader failed!\n");
         return;
     }
 
+#ifdef __vita__
+    // Precompiled GXP programs.
+    GLuint vs = vita_gx_vertex_shader();
+    sSharedVertexShader = vs;
+    vita_build_all_programs();
+#else
     // Compile Shaders
     GLuint vs = glCreateShader_ptr(GL_VERTEX_SHADER);
     glShaderSource_ptr(vs, 1, &vShaderSrc, NULL);
@@ -1569,11 +2106,18 @@ void pc_gfx_init(void) {
             printf("[PC Port] TEV evaluator shaders compiled and linked OK\n");
         }
     }
+#endif
 
     gl_error_checkpoint("ubershader link");
+#ifdef __vita__
+    query_program_locations(sShaderProgram, sUberLocations);
+    gl_error_checkpoint("ubershader uniform locations");
+    sLocP = &sUberLocations;
+#else
     query_program_locations(sShaderProgram, sLoc);
     gl_error_checkpoint("ubershader uniform locations");
     sUberLocations = sLoc;
+#endif
     sCurrentProgram = sShaderProgram;
     // The vertex shader is identical for every specialised program, so it is
     // compiled once here and reused when linking them.
@@ -1582,6 +2126,10 @@ void pc_gfx_init(void) {
     gl_error_checkpoint("shader setup");
     glGenBuffers_ptr(1, &sVBO);
     glBindBuffer_ptr(GL_ARRAY_BUFFER, sVBO);
+#ifdef __vita__
+    // VBO ring.
+    sVboCapacity = size_t(kVitaVboSegs) * kVitaVboSeg;
+#endif
     glBufferData_ptr(GL_ARRAY_BUFFER, sVboCapacity, nullptr, GL_STREAM_DRAW);
 
     if (glGenFramebuffers_ptr && glBindFramebuffer_ptr && glFramebufferTexture2D_ptr
@@ -1602,11 +2150,13 @@ void pc_gfx_init(void) {
         glFramebufferRenderbuffer_ptr(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
                                       GL_RENDERBUFFER, sNativeDepthStencil);
         sNativeFramebufferReady = glCheckFramebufferStatus_ptr(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+#ifdef __vita__
+        // Render straight to the display.
+        sNativeFramebufferReady = false;
+#endif
         glBindFramebuffer_ptr(GL_FRAMEBUFFER, sNativeFramebufferReady ? sNativeFramebuffer : 0);
         glBindTexture(GL_TEXTURE_2D, 0);
         sBoundTextures[0] = 0;
-        printf("[PC Port] Scalable render target: %s (scale %.2f)\n",
-               sNativeFramebufferReady ? "active" : "unavailable", sRenderScale);
     }
     glEnableVertexAttribArray_ptr(sAttrPos);
     glVertexAttribPointer_ptr(sAttrPos, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, x));
@@ -1624,6 +2174,18 @@ void pc_gfx_init(void) {
                                       sizeof(Vertex), reinterpret_cast<void*>(offset));
         }
     }
+#ifdef __vita__
+    // ATTR7: matrix palette slot.
+    glBindBuffer_ptr(GL_ARRAY_BUFFER, sVBO);
+    glEnableVertexAttribArray_ptr(7);
+    glVertexAttribPointer_ptr(7, 1, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, mtxIdx));
+    sVitaRingGpu = static_cast<const char*>(glMapBuffer(GL_ARRAY_BUFFER, GL_READ_ONLY));
+    glUnmapBuffer(GL_ARRAY_BUFFER);
+    // GXM fast path.
+    rec_fast_mode(1);
+    // Uniform sections on the render thread.
+    vita_rtgx_init();
+#endif
 
     gl_error_checkpoint("vertex array setup");
     glEnable(GL_DEPTH_TEST);
@@ -1634,9 +2196,22 @@ void pc_gfx_init(void) {
     glFrontFace(GL_CW);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-    printf("[PC Port] OpenGL Backend & GLSL Shaders initialized successfully\n");
 }
+#ifdef __vita__
+void pc_gfx_init(void) {
+    vita_rt_run_init_gfx();
+    vita_rt_override_gl_pointers();
+    {
+        uint32_t off[8]; int sz[8];
+        for (int i = 0; i < 8; ++i) { off[i] = uint32_t(kVitaAttrOff[i]); sz[i] = kVitaAttrSize[i]; }
+        vita_rt_set_attr_layout(off, sz, int(sizeof(Vertex)));
+    }
+    vita_rt_begin_recording();
+    // Translator thread from here on.
+    for (int i = 0; i < 256; ++i) sVitaU8F[i] = float(i) / 255.0f;
+    vita_gxq_start();
+}
+#endif
 
 void pc_gfx_perf_scope_begin(const char* name) {
     sPerfCurrentScope = -1;
@@ -1718,6 +2293,8 @@ static void perf_gpu_scene_begin() {
 }
 
 void pc_gfx_begin_frame(void) {
+#ifndef __vita__
+    // Desktop frame report (PIKMIN_PERF_STATS).
     using Clock = std::chrono::steady_clock;
     static const bool perfStats = std::getenv("PIKMIN_PERF_STATS") != nullptr;
     sPerfStatsEnabled = perfStats;
@@ -1839,13 +2416,21 @@ void pc_gfx_begin_frame(void) {
             scope.vertices = 0;
         }
     }
+#endif // !__vita__
 
+#ifdef __vita__
+    sDrawableWidth = 960;
+    sDrawableHeight = 544;
+#else
     SDL_Window* window = SDL_GL_GetCurrentWindow();
     if (window) SDL_GL_GetDrawableSize(window, &sDrawableWidth, &sDrawableHeight);
-    if (sNativeFramebufferReady && sDrawableWidth > 0 && sDrawableHeight > 0) {
-        // Calculate aspect ratio for this frame
-        float windowAspect = float(sDrawableWidth) / float(sDrawableHeight);
+#endif
+    // Frame aspect.
+    if (sDrawableWidth > 0 && sDrawableHeight > 0) {
+        const float windowAspect = float(sDrawableWidth) / float(sDrawableHeight);
         sCurrentAspectRatio = calculate_aspect_ratio(sAspectRatioMode, windowAspect);
+    }
+    if (sNativeFramebufferReady && sDrawableWidth > 0 && sDrawableHeight > 0) {
         
         // Scale the exact output viewport instead of first quantising the
         // aspect ratio through a 480-line base. The old calculation turned a
@@ -1872,16 +2457,257 @@ void pc_gfx_begin_frame(void) {
     }
 
     if (!sVBO || !glBufferData_ptr) return;
+#ifndef __vita__
     glBindBuffer_ptr(GL_ARRAY_BUFFER, sVBO);
     // Orphan once per frame. The driver can finish consuming the previous
     // storage asynchronously while the CPU streams the next frame contiguously.
     glBufferData_ptr(GL_ARRAY_BUFFER, sVboCapacity, nullptr, GL_STREAM_DRAW);
     sVboWriteOffset = 0;
+#else
+#endif
     perf_gpu_scene_begin();
 }
 
+// GXCopyTex
+void pc_gfx_copy_tex(void* dest, GXBool clear, u16 srcX, u16 srcY, u16 srcW, u16 srcH, u16 dstW, u16 dstH, GXTexFmt fmt, GXBool mipmap) {
+#ifdef __vita__
+    if (!dest || !srcW || !srcH || !dstW || !dstH) return;
+    pc_gfx_note_gl_state_change();
+    PcCopyTarget& t = sCopyTargets[dest];
+    if (!t.tex) {
+        for (size_t i = 0; i < sCopyTargetPool.size(); ++i) {
+            if (sCopyTargetPool[i].w == dstW && sCopyTargetPool[i].h == dstH) {
+                t.tex = sCopyTargetPool[i].tex;
+                sCopyTargetPool.erase(sCopyTargetPool.begin() + std::ptrdiff_t(i));
+                break;
+            }
+        }
+        if (!t.tex) glGenTextures(1, &t.tex);
+        sEfbTextureIds[t.tex] = true;
+        // Texture objects at this address switch to the copy's texture.
+        for (auto& kv : sTextureSignatures) {
+            if (kv.second.image == dest) sTextureCache[kv.first] = t.tex;
+        }
+        for (auto it = sTexBySignature.begin(); it != sTexBySignature.end();) {
+            if (it->second.sig.image == dest) it = sTexBySignature.erase(it); else ++it;
+        }
+        ++sTexCacheGen;
+    }
+    t.w = dstW; t.h = dstH;
+    GLint x, y; GLsizei w, h;
+    map_gx_rect(float(srcX), float(srcY), float(srcW), float(srcH), x, y, w, h);
+    const float tw = sEfbOffscreen ? float(sEfbOffW) : float(sNativeFramebufferReady ? sRenderWidth : sDrawableWidth);
+    const float th = sEfbOffscreen ? float(sEfbOffH) : float(sNativeFramebufferReady ? sRenderHeight : sDrawableHeight);
+    const float top = th - float(y + h);   // GL rects are bottom-up, texture rows top-down
+    int program = RT_EFB_PROG_RGBA, depth = 0;
+    switch (fmt) {
+        case GX_TF_Z8: case GX_TF_Z16: case GX_TF_Z24X8: case GX_CTF_Z4: case GX_CTF_Z8M: case GX_CTF_Z8L: case GX_CTF_Z16L:
+            program = RT_EFB_PROG_Z8; depth = 1; break;
+        case GX_TF_I4: case GX_TF_I8: case GX_TF_IA4: case GX_TF_IA8:
+            program = RT_EFB_PROG_I8; break;
+        case GX_TF_RGB565:
+            program = RT_EFB_PROG_565; break;
+        default: break;
+    }
+    rec_efb_copy(t.tex, dstW, dstH, program, depth, float(x) / tw, top / th, float(x + w) / tw, (top + float(h)) / th, mipmap ? 1 : 0);
+    vita_gxm_shadow_invalidate();
+    if (clear) {
+        // GXCopyTex clear.
+        const GLboolean scissorWasEnabled = glIsEnabled(GL_SCISSOR_TEST);
+        glDisable(GL_SCISSOR_TEST);
+        glClearColor(sCopyClearColor[0], sCopyClearColor[1], sCopyClearColor[2], sCopyClearColor[3]);
+        glClearDepth(sCopyClearDepth);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+        if (scissorWasEnabled) glEnable(GL_SCISSOR_TEST);
+    }
+#else
+    (void)dest; (void)clear; (void)srcX; (void)srcY; (void)srcW; (void)srcH; (void)dstW; (void)dstH; (void)fmt; (void)mipmap;
+#endif
+}
+
+// Full-screen composite from copy targets (blur, knockout grey-out).
+void pc_gfx_efb_composite(int kind, const void* dest0, const void* dest1, float p0, float p1) {
+#ifdef __vita__
+    auto t0 = sCopyTargets.find(dest0);
+    if (t0 == sCopyTargets.end()) return;   // not copied yet
+    GLuint tex1 = 0;
+    if (dest1) {
+        auto t1 = sCopyTargets.find(dest1);
+        if (t1 == sCopyTargets.end()) return;
+        tex1 = t1->second.tex;
+    }
+    pc_gfx_note_gl_state_change();
+    rec_efb_composite(kind, t0->second.tex, tex1, p0, p1);
+    vita_gxm_shadow_invalidate();
+#else
+    (void)kind; (void)dest0; (void)dest1; (void)p0; (void)p1;
+#endif
+}
+
+// Level memory freed.
+#ifdef __vita__
+// Is p in one of n sorted, disjoint [start, end) pairs?
+static bool pc_addr_in_ranges(const uintptr_t* r, int n, uintptr_t p) {
+    int lo = 0, hi = n - 1;
+    while (lo <= hi) {
+        const int mid = (lo + hi) >> 1;
+        if (p < r[2 * mid]) hi = mid - 1;
+        else if (p >= r[2 * mid + 1]) lo = mid + 1;
+        else return true;
+    }
+    return false;
+}
+
+// Release textures in freed memory ranges.
+static void pc_tex_release_freed(const uintptr_t* ranges, int n) {
+    auto gone = [&](const void* p) { return p && pc_addr_in_ranges(ranges, n, uintptr_t(p)); };
+    size_t keysDropped = 0;
+    for (auto it = sTextureSignatures.begin(); it != sTextureSignatures.end();) {
+        if (gone(reinterpret_cast<const void*>(it->first)) || gone(it->second.image)) {
+            sTextureCache.erase(it->first);
+            it = sTextureSignatures.erase(it);
+            ++keysDropped;
+        } else ++it;
+    }
+    for (auto it = sCiTextures.begin(); it != sCiTextures.end();) {
+        if (gone(reinterpret_cast<const void*>(it->first)) || gone(it->second.image)) {
+            sTextureCache.erase(it->first);
+            it = sCiTextures.erase(it);
+            ++keysDropped;
+        } else ++it;
+    }
+    for (auto it = sTextureCache.begin(); it != sTextureCache.end();) {
+        if (gone(reinterpret_cast<const void*>(it->first))) { it = sTextureCache.erase(it); ++keysDropped; }
+        else ++it;
+    }
+    for (auto it = sTlutObjects.begin(); it != sTlutObjects.end();) {
+        if (gone(reinterpret_cast<const void*>(it->first))) it = sTlutObjects.erase(it); else ++it;
+    }
+    for (auto it = sTexBySignature.begin(); it != sTexBySignature.end();) {
+        if (gone(it->second.sig.image)) it = sTexBySignature.erase(it); else ++it;
+    }
+
+    std::unordered_set<GLuint> live;
+    live.reserve(sTextureCache.size() + sTexBySignature.size());
+    for (const auto& kv : sTextureCache) live.insert(kv.second);
+    for (const auto& kv : sTexBySignature) live.insert(kv.second.tex);
+    std::vector<GLuint> dead;
+    for (const auto& kv : sTexLastUsed) {
+        if (!live.count(kv.first) && !sEfbTextureIds.count(kv.first)) dead.push_back(kv.first);
+    }
+    for (GLuint tex : dead) {
+        for (int m = 0; m < 8; ++m) if (sBoundTextures[m] == tex) sBoundTextures[m] = 0;
+        for (int m = 0; m < GX_MAX_TEXMAP; ++m) {
+            if (sActiveGLTextures[m] == tex) {
+                sActiveGLTextures[m] = 0;
+                sHasActiveTextures[m] = false;
+                sActiveTexGrid[m] = nullptr;
+            }
+        }
+        glDeleteTextures(1, &tex);
+        ++sTexEvictions;
+        sTexShape.erase(tex);
+        pc_tex_mip_forget(tex);
+        sTexMinAlpha.erase(tex);
+        sTexAlphaGrid.erase(tex);
+        sTexLastUsed.erase(tex);
+    }
+    ++sActiveTexAlphaGen;
+    // Rebind unit 0 to its mirrored texture.
+    if (!dead.empty() && vita_rt_recording()) glBindTexture(GL_TEXTURE_2D, sBoundTextures[0]);
+    printf("[LEVEL] freed %d ranges: %u texture keys, %u GL textures released (%u kept, VRAM free %u KB)\n",
+           n, unsigned(keysDropped), unsigned(dead.size()), unsigned(sTexLastUsed.size()), vita_rt_vram_free_kb());
+}
+#endif
+
+void pc_gfx_level_flush(const void* rangesIn, int count) {
+    const uintptr_t* ranges = static_cast<const uintptr_t*>(rangesIn);
+#ifdef __vita__
+    pc_gfx_note_gl_state_change();
+    vita_dl_flush_all();
+    for (auto& kv : sCopyTargets) {
+        for (auto it = sTextureCache.begin(); it != sTextureCache.end();) {
+            if (it->second == kv.second.tex) { sTextureSignatures.erase(it->first); it = sTextureCache.erase(it); }
+            else ++it;
+        }
+        sCopyTargetPool.push_back(kv.second);
+    }
+    sCopyTargets.clear();
+    if (ranges && count > 0) pc_tex_release_freed(ranges, count);
+    ++sTexCacheGen;
+#endif
+    std::free(const_cast<uintptr_t*>(ranges));
+}
+
+// Offscreen EFB target on or off.
+void pc_gfx_efb_target(int on, int w, int h) {
+#ifdef __vita__
+    // Display GX viewport and scissor.
+    static float savedVp[4] = { 0.0f, 0.0f, 640.0f, 480.0f };
+    static u32 savedSc[4] = { 0, 0, 640, 480 };
+    pc_gfx_note_gl_state_change();
+    if (on && w > 0 && h > 0) {
+        if (!sEfbOffTex) { glGenTextures(1, &sEfbOffTex); sEfbTextureIds[sEfbOffTex] = true; }
+        if (!sEfbOffscreen) {
+            memcpy(savedVp, sGxViewport, sizeof(savedVp));
+            memcpy(savedSc, sGxScissor, sizeof(savedSc));
+        }
+        sEfbOffscreen = true; sEfbOffW = w; sEfbOffH = h;
+        rec_efb_target(sEfbOffTex, w, h);
+        vita_gxm_shadow_invalidate();
+    } else {
+        if (!sEfbOffscreen) return;
+        sEfbOffscreen = false;
+        rec_efb_target(0, 0, 0);
+        vita_gxm_shadow_invalidate();
+        memcpy(sGxViewport, savedVp, sizeof(savedVp));
+        memcpy(sGxScissor, savedSc, sizeof(savedSc));
+    }
+    ++sTargetEpoch;
+    pc_gfx_set_viewport(sGxViewport[0], sGxViewport[1], sGxViewport[2], sGxViewport[3], 0.0f, 1.0f);
+    pc_gfx_set_scissor(sGxScissor[0], sGxScissor[1], sGxScissor[2], sGxScissor[3]);
+#else
+    (void)on; (void)w; (void)h;
+#endif
+}
+
+// GXSetCopyFilter vertical filter. Rows y-1, y, y+1 get (f0+f1), (f2+f3+f4), (f5+f6) of 64.
+void pc_gfx_set_copy_filter(int vertFilter, const u8 vfilter[7]) {
+    if (!vertFilter || !vfilter) { sVFilterEdge = 0; sVFilterCentre = 64; return; }
+    sVFilterEdge = int(vfilter[0]) + int(vfilter[1]);
+    sVFilterCentre = int(vfilter[2]) + int(vfilter[3]) + int(vfilter[4]);
+}
+
+extern "C" int pc_vi_get_black(void);   // vi_stubs.cpp
 void pc_gfx_present(void) {
     pc_gfx_flush_batch();
+    // VISetBlack frame count.
+    static int sViBlackFrames = 0;
+    sViBlackFrames = pc_vi_get_black() ? sViBlackFrames + 1 : 0;
+    if (sViBlackFrames > 0 && sViBlackFrames <= 30) {
+        const GLboolean scissorWasEnabled = glIsEnabled(GL_SCISSOR_TEST);
+        glDisable(GL_SCISSOR_TEST);
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        if (scissorWasEnabled) glEnable(GL_SCISSOR_TEST);
+    }
+    evict_idle_textures();
+#ifdef __vita__
+    // Display copy vertical filter.
+    if (pc_settings_get_display_filter() && sVFilterEdge > 0 && !sEfbOffscreen) {
+        const float rowStep = 1.0f / 480.0f;   // one EFB line
+        rec_efb_vfilter(rowStep, float(sVFilterEdge) / 64.0f, float(sVFilterCentre) / 64.0f);
+    }
+    vita_rtgx_present();
+    vita_rt_present();     // swap on the render thread
+    vita_rotate_vbo_segment();   // fence the VBO ring
+    vita_dl_end_frame();
+    sVitaFrameFirstDraw = true;
+#endif
+    ++sVitaFrameNo;
+    if (sVitaDumpActive) printf("[VDUMP] end of frame %u: %u draws\n", sVitaFrameNo - 1, sVitaDumpDraw);
+    sVitaDumpActive = dump_frame_active(sVitaFrameNo);
+    if (sVitaDumpActive) { sVitaDumpDraw = 0; printf("[VDUMP] begin frame %u\n", sVitaFrameNo); }
 #ifdef GL_TIME_ELAPSED
     if (sPerfGpuSceneActive) {
         glEndQuery_ptr(GL_TIME_ELAPSED);
@@ -1932,6 +2758,33 @@ void pc_gfx_present(void) {
     glEnable(GL_SCISSOR_TEST);
 }
 
+#ifdef __vita__
+// Projection interning.
+struct VitaProjIntern { float m[16]; uint32_t id, lastUse; bool valid; };
+static VitaProjIntern sVitaProjTab[8];
+static uint32_t sVitaProjNextId = 0, sVitaProjUseClock = 0;
+static uint32_t vita_proj_intern(const float* m) {
+    if (!sVitaProjTab[0].valid && sVitaProjNextId == 0) {
+        for (int i = 0; i < 16; ++i) sVitaProjTab[0].m[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+        sVitaProjTab[0].id = 0; sVitaProjTab[0].valid = true;
+    }
+    ++sVitaProjUseClock;
+    int victim = 0;
+    for (int i = 0; i < 8; ++i) {
+        VitaProjIntern& e = sVitaProjTab[i];
+        if (e.valid && memcmp(e.m, m, sizeof(e.m)) == 0) { e.lastUse = sVitaProjUseClock; return e.id; }
+        if (!e.valid) victim = i;
+        else if (sVitaProjTab[victim].valid && e.lastUse < sVitaProjTab[victim].lastUse) victim = i;
+    }
+    VitaProjIntern& e = sVitaProjTab[victim];
+    memcpy(e.m, m, sizeof(e.m));
+    e.id = ++sVitaProjNextId;
+    e.lastUse = sVitaProjUseClock;
+    e.valid = true;
+    return e.id;
+}
+#endif
+
 void pc_gfx_set_projection(const Mtx44 mtx, GXProjectionType type) {
     (void)type;
     if (mtx) {
@@ -1942,7 +2795,11 @@ void pc_gfx_set_projection(const Mtx44 mtx, GXProjectionType type) {
                 sProjMatrix[column * 4 + row] = mtx[row][column];
             }
         }
+#ifdef __vita__
+        sProjMtxGen = vita_proj_intern(sProjMatrix);
+#else
         ++sProjMtxGen;
+#endif
     }
 }
 
@@ -1952,26 +2809,93 @@ void pc_gfx_set_current_mtx(u32 id) {
 
 void pc_gfx_set_viewport(f32 xOrig, f32 yOrig, f32 wd, f32 ht, f32 nearZ, f32 farZ) {
     (void)nearZ; (void)farZ;
+    sGxViewport[0] = xOrig; sGxViewport[1] = yOrig; sGxViewport[2] = wd; sGxViewport[3] = ht;
     GLint x, y; GLsizei width, height;
     map_gx_rect(xOrig, yOrig, wd, ht, x, y, width, height);
     static GLint lastX = 0, lastY = 0;
     static GLsizei lastWidth = 0, lastHeight = 0;
-    if (x == lastX && y == lastY && width == lastWidth && height == lastHeight) return;
+    static unsigned lastEpoch = 0;
+    if (lastEpoch == sTargetEpoch && x == lastX && y == lastY && width == lastWidth && height == lastHeight) return;
+    lastEpoch = sTargetEpoch;
     lastX = x; lastY = y; lastWidth = width; lastHeight = height;
     pc_gfx_note_gl_state_change();
     glViewport(x, y, width, height);
 }
 
+// Scissor to the whole panel.
+void pc_gfx_set_scissor_panel(void) {
+    const bool was = sSectionClip43;
+    sSectionClip43 = false;
+    pc_gfx_set_scissor(0, 0, 640, 480);
+    sSectionClip43 = was;
+}
+// Scissor to the interface box.
+void pc_gfx_set_scissor_ui_box(void) {
+    if (sSectionClip43) {
+        pc_gfx_set_scissor(0, 0, 640, 480);
+    } else {
+        int bx, bw;
+        pc_gfx_ui_box(&bx, &bw);
+        pc_gfx_set_scissor(u32(bx), 0, u32(bw), 480);
+    }
+}
 void pc_gfx_set_scissor(u32 xOrig, u32 yOrig, u32 wd, u32 ht) {
+    sGxScissor[0] = xOrig; sGxScissor[1] = yOrig; sGxScissor[2] = wd; sGxScissor[3] = ht;
     GLint x, y; GLsizei width, height;
-    map_gx_rect((float)xOrig, (float)yOrig, (float)wd, (float)ht, x, y, width, height);
+    float gx = (float)xOrig, gw = (float)wd;
+    if (sSectionClip43) {
+        // 4:3 menu section: rect inside the interface box.
+        int bx, bw;
+        pc_gfx_ui_box(&bx, &bw);
+        const float sx = float(bw) / 640.0f;
+        gx = float(bx) + gx * sx;
+        gw = gw * sx;
+    }
+    map_gx_rect(gx, (float)yOrig, gw, (float)ht, x, y, width, height);
     static GLint lastX = -1, lastY = -1;
     static GLsizei lastWidth = -1, lastHeight = -1;
-    if (x == lastX && y == lastY && width == lastWidth && height == lastHeight) return;
+    static unsigned lastEpoch = 0;
+    if (lastEpoch == sTargetEpoch && x == lastX && y == lastY && width == lastWidth && height == lastHeight) return;
+    lastEpoch = sTargetEpoch;
     lastX = x; lastY = y; lastWidth = width; lastHeight = height;
     pc_gfx_note_gl_state_change();
     glScissor(x, y, width, height);
-    glEnable(GL_SCISSOR_TEST);
+    if (!glIsEnabled(GL_SCISSOR_TEST)) glEnable(GL_SCISSOR_TEST);
+}
+
+// 4:3 menu section clip.
+void pc_gfx_set_section_clip_43(int on) { sSectionClip43 = on != 0; }
+static bool sMovieLinearPlanes = false;   // attract movie packs its planes linear
+void pc_gfx_set_movie_planes_linear(int on) { sMovieLinearPlanes = on != 0; }
+
+// Line width in panel pixels.
+static float sLineWidthPx = 1.0f;
+void pc_gfx_set_line_width(u8 width) {
+    const float targetH = sNativeFramebufferReady ? float(sRenderHeight) : float(sDrawableHeight);
+    float px = float(width) / 6.0f * (targetH / 480.0f);
+    if (px < 1.0f) px = 1.0f;
+    if (px == sLineWidthPx) return;
+    sLineWidthPx = px;
+    pc_gfx_note_gl_state_change();
+    glLineWidth(px);
+}
+int pc_gfx_get_section_clip_43(void) { return sSectionClip43 ? 1 : 0; }
+
+void pc_gfx_ui_box(int* x0, int* w) {
+    const float sx = pc_gfx_ui_projection_scale_x();
+    if (x0) *x0 = int(320.0f * (1.0f - sx) + 0.5f);
+    if (w)  *w  = int(640.0f * sx + 0.5f);
+}
+
+float pc_gfx_ui_full_width_extent(void) {
+    const float ui = 4.0f / 3.0f;
+    if (sCurrentAspectRatio <= ui) return 0.0f;
+    return (sCurrentAspectRatio / ui - 1.0f) * 640.0f * 0.5f;
+}
+
+float pc_gfx_ui_projection_scale_x(void) {
+    const float ui = 4.0f / 3.0f;
+    return sCurrentAspectRatio > ui ? ui / sCurrentAspectRatio : 1.0f;
 }
 
 void pc_gfx_load_pos_mtx(const Mtx mtx, u32 id) {
@@ -2021,11 +2945,18 @@ void pc_gfx_set_z_mode(GXBool compareEnable, GXCompare func, GXBool updateEnable
     static GXCompare lastFunc = GX_NEVER;
     if (valid && lastCompare == compareEnable && lastFunc == func && lastUpdate == updateEnable) return;
     valid = true; lastCompare = compareEnable; lastFunc = func; lastUpdate = updateEnable;
+#ifdef __vita__
+    sVitaZWriteOn = updateEnable != GX_FALSE;
+#endif
     pc_gfx_note_gl_state_change();
-    if (compareEnable) {
-        glEnable(GL_DEPTH_TEST);
+    // Depth state last sent to GL (-1: nothing yet).
+    static int glDepthTestSent = -1, glDepthMaskSent = -1;
+    static GLenum glDepthFuncSent = GLenum(~0u);
+    // Depth write without compare is GL_ALWAYS.
+    if (compareEnable || updateEnable) {
+        if (glDepthTestSent != 1) { glEnable(GL_DEPTH_TEST); glDepthTestSent = 1; }
         GLenum glfunc = GL_LEQUAL;
-        switch (func) {
+        switch (compareEnable ? func : GX_ALWAYS) {
             case GX_NEVER: glfunc = GL_NEVER; break;
             case GX_LESS: glfunc = GL_LESS; break;
             case GX_EQUAL: glfunc = GL_EQUAL; break;
@@ -2035,11 +2966,13 @@ void pc_gfx_set_z_mode(GXBool compareEnable, GXCompare func, GXBool updateEnable
             case GX_GEQUAL: glfunc = GL_GEQUAL; break;
             case GX_ALWAYS: glfunc = GL_ALWAYS; break;
         }
-        glDepthFunc(glfunc);
-    } else {
+        if (glDepthFuncSent != glfunc) { glDepthFunc(glfunc); glDepthFuncSent = glfunc; }
+    } else if (glDepthTestSent != 0) {
         glDisable(GL_DEPTH_TEST);
+        glDepthTestSent = 0;
     }
-    glDepthMask(updateEnable ? GL_TRUE : GL_FALSE);
+    const int mask = updateEnable ? 1 : 0;
+    if (glDepthMaskSent != mask) { glDepthMask(mask ? GL_TRUE : GL_FALSE); glDepthMaskSent = mask; }
 }
 
 void pc_gfx_set_blend_mode(GXBlendMode type, GXBlendFactor srcFactor, GXBlendFactor dstFactor, GXLogicOp op) {
@@ -2049,9 +2982,15 @@ void pc_gfx_set_blend_mode(GXBlendMode type, GXBlendFactor srcFactor, GXBlendFac
     static GXLogicOp lastOp = GX_LO_CLEAR;
     if (valid && lastType == type && lastSrc == srcFactor && lastDst == dstFactor && lastOp == op) return;
     valid = true; lastType = type; lastSrc = srcFactor; lastDst = dstFactor; lastOp = op;
+    sVitaBlendType = int(type); sVitaBlendSrc = int(srcFactor); sVitaBlendDst = int(dstFactor);
     pc_gfx_note_gl_state_change();
+#ifndef __vita__
     glDisable(GL_COLOR_LOGIC_OP);
-    glBlendEquation_ptr(GL_FUNC_ADD);
+#endif
+    static GLenum glBlendEquationSent = GLenum(~0u);   // nothing sent yet
+    // GX subtract is destination - source.
+    const GLenum equation = type == GX_BM_SUBTRACT ? GL_FUNC_REVERSE_SUBTRACT : GL_FUNC_ADD;
+    if (glBlendEquationSent != equation) { glBlendEquation_ptr(equation); glBlendEquationSent = equation; }
     if (type == GX_BM_BLEND) {
         glEnable(GL_BLEND);
         GLenum s = GL_ONE, d = GL_ZERO;
@@ -2078,11 +3017,12 @@ void pc_gfx_set_blend_mode(GXBlendMode type, GXBlendFactor srcFactor, GXBlendFac
         glBlendFunc(s, d);
     } else if (type == GX_BM_SUBTRACT) {
         glEnable(GL_BLEND);
-        glBlendEquation_ptr(GL_FUNC_SUBTRACT);
         glBlendFunc(GL_ONE, GL_ONE);
     } else if (type == GX_BM_LOGIC) {
         glDisable(GL_BLEND);
+#ifndef __vita__
         glEnable(GL_COLOR_LOGIC_OP);
+#endif
         static const GLenum logicOps[] = {
             GL_CLEAR, GL_AND, GL_AND_REVERSE, GL_COPY, GL_AND_INVERTED, GL_NOOP,
             GL_XOR, GL_OR, GL_NOR, GL_EQUIV, GL_INVERT, GL_OR_REVERSE,
@@ -2095,11 +3035,12 @@ void pc_gfx_set_blend_mode(GXBlendMode type, GXBlendFactor srcFactor, GXBlendFac
     }
 }
 
+// GX cull mode as last set.
+static bool sGxCullValid = false;
+static GXCullMode sGxCullMode = GX_CULL_NONE;
 void pc_gfx_set_cull_mode(GXCullMode mode) {
-    static bool valid = false;
-    static GXCullMode lastMode = GX_CULL_NONE;
-    if (valid && lastMode == mode) return;
-    valid = true; lastMode = mode;
+    if (sGxCullValid && sGxCullMode == mode) return;
+    sGxCullValid = true; sGxCullMode = mode;
     pc_gfx_note_gl_state_change();
     if (mode == GX_CULL_NONE) {
         glDisable(GL_CULL_FACE);
@@ -2137,6 +3078,7 @@ void pc_gfx_set_chan_ctrl(GXChannelID chan, GXBool enable, GXColorSrc ambSrc, GX
     if (chan == GX_COLOR0 || chan == GX_ALPHA0 || chan == GX_COLOR0A0) ch = &sChannels[0];
     else if (chan == GX_COLOR1 || chan == GX_ALPHA1 || chan == GX_COLOR1A1) ch = &sChannels[1];
     if (!ch) return;
+    const GfxChannel old = *ch;
     if (chan == GX_COLOR0 || chan == GX_COLOR1 || chan == GX_COLOR0A0 || chan == GX_COLOR1A1) {
         ch->enabled = enable;
         ch->matSrc = matSrc;
@@ -2153,17 +3095,27 @@ void pc_gfx_set_chan_ctrl(GXChannelID chan, GXBool enable, GXColorSrc ambSrc, GX
         ch->alphaDiffFn = diffFn;
         ch->alphaAttnFn = attnFn;
     }
+    if (memcmp(&old, ch, sizeof(*ch)) != 0) {
+        vita_key_dirty(kKeyChan);
+        if (old.matSrc != ch->matSrc || old.alphaMatSrc != ch->alphaMatSrc) sChanSrcDirty = true;
+    }
 }
 
+// Any active TEV stage reads colour channel 1.
+static inline bool vita_chan1_read() {
+    const int stages = sNumTevStages < GX_MAXTEVSTAGE ? sNumTevStages : GX_MAXTEVSTAGE;
+    for (int i = 0; i < stages; ++i) if (sTevStages[i].rasChannel == 1) return true;
+    return false;
+}
 void pc_gfx_set_chan_amb_color(GXChannelID chan, GXColor color) {
     GfxChannel* ch = nullptr;
     if (chan == GX_COLOR0 || chan == GX_ALPHA0 || chan == GX_COLOR0A0) ch = &sChannels[0];
     else if (chan == GX_COLOR1 || chan == GX_ALPHA1 || chan == GX_COLOR1A1) ch = &sChannels[1];
     if (!ch) return;
-    ch->ambColor[0] = color.r / 255.0f;
-    ch->ambColor[1] = color.g / 255.0f;
-    ch->ambColor[2] = color.b / 255.0f;
-    ch->ambColor[3] = color.a / 255.0f;
+    const float c[4] = { color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, color.a / 255.0f };
+    const bool changed = memcmp(ch->ambColor, c, sizeof(c)) != 0;
+    memcpy(ch->ambColor, c, sizeof(c));
+    if (changed && (ch->enabled || ch->alphaEnabled) && (ch == &sChannels[0] || vita_chan1_read())) vita_key_dirty(kKeyChan);
 }
 
 void pc_gfx_set_chan_mat_color(GXChannelID chan, GXColor color) {
@@ -2171,10 +3123,10 @@ void pc_gfx_set_chan_mat_color(GXChannelID chan, GXColor color) {
     if (chan == GX_COLOR0 || chan == GX_ALPHA0 || chan == GX_COLOR0A0) ch = &sChannels[0];
     else if (chan == GX_COLOR1 || chan == GX_ALPHA1 || chan == GX_COLOR1A1) ch = &sChannels[1];
     if (!ch) return;
-    ch->matColor[0] = color.r / 255.0f;
-    ch->matColor[1] = color.g / 255.0f;
-    ch->matColor[2] = color.b / 255.0f;
-    ch->matColor[3] = color.a / 255.0f;
+    const float c[4] = { color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, color.a / 255.0f };
+    const bool changed = memcmp(ch->matColor, c, sizeof(c)) != 0;
+    memcpy(ch->matColor, c, sizeof(c));
+    if (changed && (ch->matSrc == GX_SRC_REG || ch->alphaMatSrc == GX_SRC_REG) && (ch == &sChannels[0] || vita_chan1_read())) vita_key_dirty(kKeyChan);
 }
 
 // ── Light management ──
@@ -2219,8 +3171,18 @@ void pc_gfx_init_light_attn_k(void* ltObj, f32 k0, f32 k1, f32 k2) {
 void pc_gfx_init_specular_dir(void* ltObj, f32 x, f32 y, f32 z) {
     if (!ltObj) return;
     u8* raw = static_cast<u8*>(ltObj);
+    // Specular direction: half-angle vector in the direction, scaled direction in the position.
+    f32 vx = -x, vy = -y, vz = -z + 1.0f;
+    const f32 mag = std::sqrt(vx * vx + vy * vy + vz * vz);
+    if (mag > 1e-6f) { const f32 inv = 1.0f / mag; vx *= inv; vy *= inv; vz *= inv; }
+    else { vx = 0.0f; vy = 0.0f; vz = 1.0f; }   // light straight at the eye
     f32* ldir = reinterpret_cast<f32*>(raw + 0x34);
-    ldir[0] = x; ldir[1] = y; ldir[2] = z;
+    ldir[0] = vx; ldir[1] = vy; ldir[2] = vz;
+    const f32 kSpecularPosScale = 1024.0f * 1024.0f;
+    f32* lpos = reinterpret_cast<f32*>(raw + 0x28);
+    lpos[0] = -x * kSpecularPosScale;
+    lpos[1] = -y * kSpecularPosScale;
+    lpos[2] = -z * kSpecularPosScale;
 }
 void pc_gfx_load_light(void* ltObj, u32 lightMask) {
     if (!ltObj) return;
@@ -2416,42 +3378,170 @@ void pc_gfx_set_tev_swap_mode_table(GXTevSwapSel table, GXTevColorChan red, GXTe
     }
 }
 
-// ── Texture Decoding & Binding ──
-void pc_gfx_init_tex_obj(GXTexObj* obj, void* imagePtr, u16 width, u16 height, GXTexFmt format, GXTexWrapMode wrapS, GXTexWrapMode wrapT, GXBool mipmap) {
-    (void)mipmap;
-    if (!obj || !imagePtr || width == 0 || height == 0) return;
-
-    uintptr_t key = (uintptr_t)obj;
-    const PcTextureSignature signature {
-        imagePtr, width, height, static_cast<u32>(format), wrapS, wrapT, false, 0
-    };
-    const auto signatureIt = sTextureSignatures.find(key);
-    if (signatureIt != sTextureSignatures.end() && signatureIt->second == signature
-        && sTextureCache.find(key) != sTextureCache.end()) {
+#ifdef __vita__
+// Same-shape re-upload as a sub-upload (desktop).
+static void upload_2d(GLuint texId, GLint internal, int w, int h, GLenum fmt, GLenum type, const void* data) {
+#ifndef __vita__
+    auto it = sTexShape.find(texId);
+    if (it != sTexShape.end() && it->second.w == w && it->second.h == h && it->second.fmt == fmt && it->second.type == type) {
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, fmt, type, data);
         return;
     }
+#else
+    // Vita: always a full glTexImage2D.
+#endif
+    glTexImage2D(GL_TEXTURE_2D, 0, internal, w, h, 0, fmt, type, data);
+    PcTexShape& sh = sTexShape[texId];
+    sh.w = w; sh.h = h; sh.fmt = fmt; sh.type = type;
+}
+static GLuint sUploadTexId = 0;   // the object the native path is filling (set by the caller)
 
-    GLuint texId = 0;
-
-    auto it = sTextureCache.find(key);
-    if (it != sTextureCache.end()) {
-        texId = it->second;
-    } else {
-        glGenTextures(1, &texId);
-        sTextureCache[key] = texId;
-    }
-
-    pc_gfx_flush_batch();  // about to rebind and rewrite texture unit 0
-    glActiveTexture_ptr(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, texId);
-    sBoundTextures[0] = texId;
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrapS == GX_REPEAT ? GL_REPEAT : GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrapT == GX_REPEAT ? GL_REPEAT : GL_CLAMP_TO_EDGE);
-
-    std::vector<u8> rgba(width * height * 4, 255);
+static bool vita_upload_native_texture(const void* imagePtr, int width, int height, GXTexFmt format, u8* minAlphaOut) {
     const u8* source = static_cast<const u8*>(imagePtr);
+    static std::vector<u8> out;
+    u8 mn = 255;
+    vita_grid_reset();
+    if (format == GX_TF_CMPR) {
+        if ((width & 3) || (height & 3)) return false;
+        const int bw = width / 4, bh = height / 4;
+        out.resize(size_t(bw) * size_t(bh) * 8u);
+        size_t tileOffset = 0;
+        for (int tileY = 0; tileY < height; tileY += 8) {
+            for (int tileX = 0; tileX < width; tileX += 8, tileOffset += 32) {
+                for (int b = 0; b < 4; ++b) {
+                    const int bx = tileX / 4 + (b & 1), by = tileY / 4 + (b >> 1);
+                    if (bx >= bw || by >= bh) continue;
+                    const u8* src = source + tileOffset + b * 8;
+                    {
+                        // c0 <= c1: 3-colour + transparent mode, selector 3 is alpha 0.
+                        const u16 c0 = u16((src[0] << 8) | src[1]), c1 = u16((src[2] << 8) | src[3]);
+                        if (c0 <= c1) {
+                            bool transparent = false;
+                            for (int r = 0; r < 4 && !transparent; ++r)
+                                for (int p = 0; p < 4; ++p) if (((src[4 + r] >> (6 - p * 2)) & 3) == 3) { transparent = true; break; }
+                            if (transparent) { mn = 0; vita_grid_min_rect(bx * 4, by * 4, bx * 4 + 3, by * 4 + 3, width, height, 0); }
+                        }
+                    }
+                    u8* dst = &out[(size_t(by) * size_t(bw) + size_t(bx)) * 8u];
+                    dst[0] = src[1]; dst[1] = src[0];   // c0, c1: big-endian to little-endian
+                    dst[2] = src[3]; dst[3] = src[2];
+                    for (int r = 0; r < 4; ++r) {
+                        const u8 s = src[4 + r];
+                        dst[4 + r] = u8(((s >> 6) & 3) | (((s >> 4) & 3) << 2) | (((s >> 2) & 3) << 4) | ((s & 3) << 6));
+                    }
+                }
+            }
+        }
+        glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, width, height, 0, GLsizei(out.size()), out.data());
+        *minAlphaOut = mn;
+        return true;
+    }
+#ifdef __vita__
+    // Attract movie planes, linear.
+    if (sMovieLinearPlanes && ((format == GX_TF_I8 && width == 640 && height == 480) || (format == GX_TF_IA8 && width == 320 && height == 240))) {
+        const size_t count = size_t(width) * size_t(height);
+        out.resize(count * 2u);
+        uint8x16_t vmin = vdupq_n_u8(255);
+        if (format == GX_TF_I8) {
+            for (size_t k = 0; k < count; k += 16) {
+                const uint8x16_t y = vld1q_u8(source + k);
+                vmin = vminq_u8(vmin, y);
+                uint8x16x2_t la; la.val[0] = y; la.val[1] = y;
+                vst2q_u8(out.data() + k * 2, la);
+            }
+        } else {
+            for (size_t k = 0; k < count; k += 16) {
+                const uint8x16x2_t uv = vld2q_u8(source + k * 2);   // val[0] = U (the GX alpha byte), val[1] = V
+                vmin = vminq_u8(vmin, uv.val[0]);
+                uint8x16x2_t la; la.val[0] = uv.val[1]; la.val[1] = uv.val[0];
+                vst2q_u8(out.data() + k * 2, la);
+            }
+        }
+        uint8_t mins[16]; vst1q_u8(mins, vmin);
+        for (int k = 0; k < 16; ++k) if (mins[k] < mn) mn = mins[k];
+        for (int cy = 0; cy < 16; ++cy) for (int cx = 0; cx < 16; ++cx) sVitaUploadGrid.cell[cy][cx] = mn;
+        upload_2d(sUploadTexId, GL_LUMINANCE_ALPHA, width, height, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, out.data());
+        *minAlphaOut = mn;
+        return true;
+    }
+#endif
+    if (format == GX_TF_I4 || format == GX_TF_I8 || format == GX_TF_IA4 || format == GX_TF_IA8) {
+        const int tileWidth = (format == GX_TF_IA8) ? 4 : 8;
+        const int tileHeight = (format == GX_TF_I4) ? 8 : 4;
+        out.resize(size_t(width) * size_t(height) * 2u);
+        size_t tileOffset = 0;
+        for (int tileY = 0; tileY < height; tileY += tileHeight) {
+            for (int tileX = 0; tileX < width; tileX += tileWidth, tileOffset += 32) {
+                for (int y = 0; y < tileHeight; ++y) {
+                    if (tileY + y >= height) break;
+                    for (int x = 0; x < tileWidth; ++x) {
+                        if (tileX + x >= width) break;
+                        const int index = y * tileWidth + x;
+                        u8 l = 255, a = 255;
+                        if (format == GX_TF_I4) {
+                            const u8 packed = source[tileOffset + index / 2];
+                            l = a = u8((((index & 1) ? packed : packed >> 4) & 0x0f) * 17);
+                        } else if (format == GX_TF_I8) {
+                            l = a = source[tileOffset + index];
+                        } else if (format == GX_TF_IA4) {
+                            const u8 packed = source[tileOffset + index];
+                            a = u8((packed >> 4) * 17); l = u8((packed & 0x0f) * 17);
+                        } else {
+                            // GX IA8: alpha first, then intensity.
+                            a = source[tileOffset + index * 2]; l = source[tileOffset + index * 2 + 1];
+                        }
+                        u8* dst = &out[(size_t(tileY + y) * size_t(width) + size_t(tileX + x)) * 2u];
+                        dst[0] = l; dst[1] = a;
+                        if (a < mn) mn = a;
+                    }
+                }
+            }
+        }
+        vita_grid_from_alpha(out.data() + 1, 2, width, height);
+        upload_2d(sUploadTexId, GL_LUMINANCE_ALPHA, width, height, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, out.data());
+        *minAlphaOut = mn;
+        return true;
+    }
+    if (format == GX_TF_RGB565 || format == GX_TF_RGB5A3) {
+        out.resize(size_t(width) * size_t(height) * 2u);
+        bool allOpaque555 = true;
+        size_t tileOffset = 0;
+        for (int tileY = 0; tileY < height; tileY += 4) {
+            for (int tileX = 0; tileX < width; tileX += 4, tileOffset += 32) {
+                for (int y = 0; y < 4; ++y) {
+                    if (tileY + y >= height) break;
+                    for (int x = 0; x < 4; ++x) {
+                        if (tileX + x >= width) break;
+                        const int index = y * 4 + x;
+                        u16 value = u16((source[tileOffset + index * 2] << 8) | source[tileOffset + index * 2 + 1]);
+                        if (format == GX_TF_RGB5A3) {
+                            if (!(value & 0x8000)) { allOpaque555 = false; break; }
+                            value = u16(((value & 0x7fff) << 1) | 1u);   // 1RRRRRGGGGGBBBBB to RRRRRGGGGGBBBBB1
+                        }
+                        u8* dst = &out[(size_t(tileY + y) * size_t(width) + size_t(tileX + x)) * 2u];
+                        dst[0] = u8(value & 0xff); dst[1] = u8(value >> 8);   // little-endian for the GPU
+                    }
+                    if (!allOpaque555) break;
+                }
+                if (!allOpaque555) break;
+            }
+            if (!allOpaque555) break;
+        }
+        if (!allOpaque555) return false;   // mixed 555/4443 pixels
+        if (format == GX_TF_RGB565)
+            upload_2d(sUploadTexId, GL_RGB, width, height, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, out.data());
+        else
+            upload_2d(sUploadTexId, GL_RGBA, width, height, GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1, out.data());
+        *minAlphaOut = 255;
+        return true;
+    }
+    return false;
+}
+#endif
+
+// Texture decoding and binding.
+static void pc_decode_gx_tiles(const u8* source, int width, int height, GXTexFmt format,
+                               int tileWidth, int tileHeight, int bytesPerTile, std::vector<u8>& rgba) {
     auto writePixel = [&](int x, int y, u8 r, u8 g, u8 b, u8 a) {
         if (x >= width || y >= height) return;
         size_t offset = (static_cast<size_t>(y) * width + x) * 4;
@@ -2460,52 +3550,7 @@ void pc_gfx_init_tex_obj(GXTexObj* obj, void* imagePtr, u16 width, u16 height, G
     };
     auto expand5 = [](u16 value) -> u8 { return (value << 3) | (value >> 2); };
     auto expand6 = [](u16 value) -> u8 { return (value << 2) | (value >> 4); };
-
-    int tileWidth = 1, tileHeight = 1, bytesPerTile = 0;
-    switch (format) {
-        case GX_TF_I4: tileWidth = 8; tileHeight = 8; bytesPerTile = 32; break;
-        case GX_TF_I8: case GX_TF_IA4: tileWidth = 8; tileHeight = 4; bytesPerTile = 32; break;
-        case GX_TF_IA8: case GX_TF_RGB565: case GX_TF_RGB5A3:
-            tileWidth = 4; tileHeight = 4; bytesPerTile = 32; break;
-        case GX_TF_RGBA8: tileWidth = 4; tileHeight = 4; bytesPerTile = 64; break;
-        case GX_TF_CMPR: tileWidth = 8; tileHeight = 8; bytesPerTile = 32; break;
-        default: break;
-    }
-
-    if (bytesPerTile == 0) {
-        // El búfer se inicializa a blanco opaco, así que un formato que no se
-        // decodifique acaba en pantalla como un cuadrado blanco sólido y sin
-        // que nada lo señale. Se avisa una vez por formato para que deje de ser
-        // invisible durante la depuración.
-        static u32 reportedFormats = 0;
-        const u32 formatBit = format < 32 ? (1u << format) : 0x80000000u;
-        const bool firstTime = (reportedFormats & formatBit) == 0;
-        reportedFormats |= formatBit;
-
-        // Los formatos Z son un caso conocido y distinto: el juego los usa para
-        // texturas que se rellenan copiando el framebuffer (mapMgr crea el
-        // «internalLightmap» de 320x240 con TEX_FMT_Z8), y en el port GXCopyTex
-        // es un stub vacío, así que esos píxeles nunca llegan a escribirse.
-        // Decodificarlos leería memoria sin inicializar. El blanco es además el
-        // valor neutro para cómo se combinan, así que se conserva.
-        const bool isDepthFormat = format == GX_TF_Z8 || format == GX_TF_Z16
-                                || format == GX_TF_Z24X8;
-        if (firstTime) {
-            printf("[PC GX Warning] Formato de textura no decodificado 0x%X (%dx%d): %s\n",
-                   static_cast<unsigned>(format), width, height,
-                   isDepthFormat
-                       ? "formato Z, su origen (GXCopyTex) es un stub; se deja neutro"
-                       : "se dibujará transparente en vez de blanco");
-            fflush(stdout);
-        }
-        if (!isDepthFormat) {
-            // Transparente estropea mucho menos la escena que un cuadrado
-            // blanco opaco encima de ella.
-            std::fill(rgba.begin(), rgba.end(), static_cast<u8>(0));
-        }
-    }
-
-    if (bytesPerTile) {
+    {
         size_t tileOffset = 0;
         for (int tileY = 0; tileY < height; tileY += tileHeight) {
             for (int tileX = 0; tileX < width; tileX += tileWidth, tileOffset += bytesPerTile) {
@@ -2523,6 +3568,7 @@ void pc_gfx_init_tex_obj(GXTexObj* obj, void* imagePtr, u16 width, u16 height, G
                             u8 packed = source[tileOffset + index];
 							a = (packed >> 4) * 17; r = g = b = (packed & 0x0f) * 17;
                         } else if (format == GX_TF_IA8) {
+                            // Alpha first, intensity second.
 							a = source[tileOffset + index * 2];
 							r = g = b = source[tileOffset + index * 2 + 1];
                         } else if (format == GX_TF_RGB565 || format == GX_TF_RGB5A3) {
@@ -2578,10 +3624,292 @@ void pc_gfx_init_tex_obj(GXTexObj* obj, void* imagePtr, u16 width, u16 height, G
         }
     }
 
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
-    ++sPerfTextureUploads;
-    sTextureSignatures[key] = signature;
 }
+
+// Tile geometry of a GX texture format: 0 bytes per tile = not decodable here.
+static void pc_gx_tile_geometry(GXTexFmt format, int& tileWidth, int& tileHeight, int& bytesPerTile) {
+    tileWidth = 1; tileHeight = 1; bytesPerTile = 0;
+    switch (format) {
+        case GX_TF_I4: tileWidth = 8; tileHeight = 8; bytesPerTile = 32; break;
+        case GX_TF_I8: case GX_TF_IA4: tileWidth = 8; tileHeight = 4; bytesPerTile = 32; break;
+        case GX_TF_IA8: case GX_TF_RGB565: case GX_TF_RGB5A3:
+            tileWidth = 4; tileHeight = 4; bytesPerTile = 32; break;
+        case GX_TF_RGBA8: tileWidth = 4; tileHeight = 4; bytesPerTile = 64; break;
+        case GX_TF_CMPR: tileWidth = 8; tileHeight = 8; bytesPerTile = 32; break;
+        default: break;
+    }
+}
+
+// Content sample: nine 32-bit words spread over a tiled GX image.
+static uint64_t pc_tex_content_sample(const void* image, int width, int height, int tileW, int tileH, int bytesPerTile) {
+    if (!image || tileW <= 0 || tileH <= 0 || bytesPerTile <= 0) return 0;
+    const size_t bytes = size_t((width + tileW - 1) / tileW) * size_t((height + tileH - 1) / tileH) * size_t(bytesPerTile);
+    const size_t words = bytes / 4;
+    if (words == 0) return 0;
+    const u8* p = static_cast<const u8*>(image);
+    uint64_t h = 1469598103934665603ull;
+    for (int i = 0; i <= 8; ++i) {
+        const size_t w = (words - 1) * size_t(i) / 8u;
+        u32 v;
+        memcpy(&v, p + w * 4, 4);
+        h ^= v; h *= 1099511628211ull;
+    }
+    return h;
+}
+
+void pc_gfx_init_tex_obj(GXTexObj* obj, void* imagePtr, u16 width, u16 height, GXTexFmt format, GXTexWrapMode wrapS, GXTexWrapMode wrapT, GXBool mipmap) {
+    (void)mipmap;
+    if (!obj || !imagePtr || width == 0 || height == 0) return;
+    {
+        // GXCopyTex destination: bind the copy's texture.
+        auto ct = sCopyTargets.find(imagePtr);
+        if (ct != sCopyTargets.end()) {
+            const uintptr_t k = (uintptr_t)obj;
+            sTextureCache[k] = ct->second.tex;
+            sTextureSignatures[k] = PcTextureSignature { imagePtr, width, height, static_cast<u32>(format), wrapS, wrapT, false, 0 };
+#ifdef __vita__
+            ++sTexCacheGen;
+#endif
+            return;
+        }
+    }
+
+    uintptr_t key = (uintptr_t)obj;
+    int sTileW = 1, sTileH = 1, sTileBytes = 0;
+    pc_gx_tile_geometry(format, sTileW, sTileH, sTileBytes);
+    const PcTextureSignature signature {
+        imagePtr, width, height, static_cast<u32>(format), wrapS, wrapT, false, 0,
+        pc_tex_content_sample(imagePtr, width, height, sTileW, sTileH, sTileBytes)
+    };
+    const auto signatureIt = sTextureSignatures.find(key);
+    if (signatureIt != sTextureSignatures.end() && signatureIt->second == signature
+        && sTextureCache.find(key) != sTextureCache.end()) {
+        return;
+    }
+
+    // Same image already uploaded under another obj.
+    {
+        auto sit = sTexBySignature.find(texture_signature_hash(signature));
+        if (sit != sTexBySignature.end() && sit->second.sig == signature && sit->second.tex) {
+            
+#ifdef __vita__
+        ++sTexCacheGen;
+#endif
+        sTextureCache[key] = sit->second.tex;
+            
+#ifdef __vita__
+    ++sTexCacheGen;
+#endif
+    sTextureSignatures[key] = signature;
+            return;
+        }
+    }
+
+    GLuint texId = 0;
+
+    auto it = sTextureCache.find(key);
+    if (it != sTextureCache.end()) {
+        texId = it->second;
+        // Drop the content-index entry for the old signature.
+        if (signatureIt != sTextureSignatures.end()) {
+            auto old = sTexBySignature.find(texture_signature_hash(signatureIt->second));
+            if (old != sTexBySignature.end() && old->second.tex == texId) sTexBySignature.erase(old);
+        }
+    } else {
+        glGenTextures(1, &texId);
+        
+#ifdef __vita__
+        ++sTexCacheGen;
+#endif
+        sTextureCache[key] = texId;
+    }
+
+    pc_tex_mip_forget(texId);   // a new level 0 replaces any chain
+    pc_gfx_flush_batch();
+    glActiveTexture_ptr(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, texId);
+    sBoundTextures[0] = texId;
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, pc_gx_wrap_to_gl(wrapS));
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, pc_gx_wrap_to_gl(wrapT));
+
+    bool nativeDone = false;
+    u8 texMinAlpha = 0;
+#ifdef __vita__
+    sUploadTexId = texId;
+    nativeDone = vita_upload_native_texture(imagePtr, width, height, format, &texMinAlpha);
+#endif
+    if (!nativeDone) {
+    std::vector<u8> rgba(width * height * 4, 255);
+    const u8* source = static_cast<const u8*>(imagePtr);
+    auto writePixel = [&](int x, int y, u8 r, u8 g, u8 b, u8 a) {
+        if (x >= width || y >= height) return;
+        size_t offset = (static_cast<size_t>(y) * width + x) * 4;
+        rgba[offset] = r; rgba[offset + 1] = g;
+        rgba[offset + 2] = b; rgba[offset + 3] = a;
+    };
+    auto expand5 = [](u16 value) -> u8 { return (value << 3) | (value >> 2); };
+    auto expand6 = [](u16 value) -> u8 { return (value << 2) | (value >> 4); };
+
+    int tileWidth = 1, tileHeight = 1, bytesPerTile = 0;
+    switch (format) {
+        case GX_TF_I4: tileWidth = 8; tileHeight = 8; bytesPerTile = 32; break;
+        case GX_TF_I8: case GX_TF_IA4: tileWidth = 8; tileHeight = 4; bytesPerTile = 32; break;
+        case GX_TF_IA8: case GX_TF_RGB565: case GX_TF_RGB5A3:
+            tileWidth = 4; tileHeight = 4; bytesPerTile = 32; break;
+        case GX_TF_RGBA8: tileWidth = 4; tileHeight = 4; bytesPerTile = 64; break;
+        case GX_TF_CMPR: tileWidth = 8; tileHeight = 8; bytesPerTile = 32; break;
+        default: break;
+    }
+
+    if (bytesPerTile == 0) {
+        // Unsupported format warning, once per format.
+        static u32 reportedFormats = 0;
+        const u32 formatBit = format < 32 ? (1u << format) : 0x80000000u;
+        const bool firstTime = (reportedFormats & formatBit) == 0;
+        reportedFormats |= formatBit;
+
+        // Z formats.
+        const bool isDepthFormat = format == GX_TF_Z8 || format == GX_TF_Z16
+                                || format == GX_TF_Z24X8;
+        if (firstTime) {
+            printf("[PC GX Warning] Formato de textura no decodificado 0x%X (%dx%d): %s\n",
+                   static_cast<unsigned>(format), width, height,
+                   isDepthFormat
+                       ? "formato Z, su origen (GXCopyTex) es un stub; se deja neutro"
+                       : "se dibujará transparente en vez de blanco");
+            fflush(stdout);
+        }
+        if (!isDepthFormat) {
+            std::fill(rgba.begin(), rgba.end(), static_cast<u8>(0));
+        }
+    }
+
+    if (bytesPerTile) pc_decode_gx_tiles(source, width, height, format, tileWidth, tileHeight, bytesPerTile, rgba);
+
+    upload_2d(texId, GL_RGBA, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    { u8 mn = 255; for (size_t i = 3; i < rgba.size(); i += 4) if (rgba[i] < mn) mn = rgba[i]; texMinAlpha = mn; }
+#ifdef __vita__
+    vita_grid_reset();
+    vita_grid_from_alpha(rgba.data() + 3, 4, width, height);
+#endif
+    }   // !nativeDone
+    apply_texture_filtering(texMinAlpha, width, height);
+#ifdef __vita__
+    
+#ifdef __vita__
+    ++sTexCacheGen;
+#endif
+    sTexMinAlpha[texId] = texMinAlpha;
+    {
+        uint8_t mn = 255;
+        for (int cy = 0; cy < 16; ++cy) for (int cx = 0; cx < 16; ++cx) if (sVitaUploadGrid.cell[cy][cx] < mn) mn = sVitaUploadGrid.cell[cy][cx];
+        sVitaUploadGrid.minAll = mn;
+    }
+    sTexAlphaGrid[texId] = sVitaUploadGrid;
+    ++sActiveTexAlphaGen;
+#endif
+    ++sPerfTextureUploads;
+    
+#ifdef __vita__
+    ++sTexCacheGen;
+#endif
+    sTextureSignatures[key] = signature;
+    sTexBySignature[texture_signature_hash(signature)] = PcTexBySignature { signature, texId };
+    sTexLastUsed[texId] = sTexFrame;
+    if (sVitaDumpActive)
+        printf("[VDUMP] TEXUPLOAD obj=%p img=%p %ux%u fmt=%u -> tex %u\n", (void*)obj, imagePtr,
+               (unsigned)width, (unsigned)height, (unsigned)format, (unsigned)texId);
+}
+
+// GXInitTexObjLOD mip chains.
+static std::unordered_map<GLuint, uint64_t> sTexMipSig;   // GL texture to the image and LOD settings of its chain
+void pc_gfx_init_tex_obj_lod(GXTexObj* obj, GXTexFilter minFilt, GXTexFilter magFilt, f32 minLOD, f32 maxLOD, f32 lodBias) {
+    (void)magFilt; (void)minLOD;
+    if (!obj) return;
+    GLenum glMin = 0;
+    switch (minFilt) {
+        case GX_NEAR_MIP_NEAR: glMin = GL_NEAREST_MIPMAP_NEAREST; break;
+        case GX_LIN_MIP_NEAR:  glMin = GL_LINEAR_MIPMAP_NEAREST; break;
+        case GX_NEAR_MIP_LIN:  glMin = GL_NEAREST_MIPMAP_LINEAR; break;
+        case GX_LIN_MIP_LIN:   glMin = GL_LINEAR_MIPMAP_LINEAR; break;
+        default: return;   // no mip filtering
+    }
+    const uintptr_t key = (uintptr_t)obj;
+    auto sigIt = sTextureSignatures.find(key);
+    auto texIt = sTextureCache.find(key);
+    if (sigIt == sTextureSignatures.end() || texIt == sTextureCache.end()) return;
+    const PcTextureSignature sig = sigIt->second;
+    if (sig.indexed || !sig.image) return;
+    const GLuint texId = texIt->second;
+    const uint64_t want = texture_signature_hash(sig) ^ (uint64_t(uint32_t(lroundf(maxLOD * 16.0f))) << 48)
+                        ^ (uint64_t(uint32_t(lroundf(lodBias * 256.0f) & 0xFFFF)) << 32) ^ uint64_t(glMin);
+    auto done = sTexMipSig.find(texId);
+    if (done != sTexMipSig.end() && done->second == want) return;
+    int tw = 1, th = 1, bpt = 0;
+    pc_gx_tile_geometry((GXTexFmt)sig.format, tw, th, bpt);
+    const int w0 = sig.width, h0 = sig.height;
+    const bool po2 = w0 > 0 && h0 > 0 && (w0 & (w0 - 1)) == 0 && (h0 & (h0 - 1)) == 0;
+    int levels = int(maxLOD);
+    while (levels > 0 && ((w0 >> levels) < 1 || (h0 >> levels) < 1)) --levels;
+    if (!bpt || !po2 || levels < 1) return;
+
+    pc_gfx_flush_batch();
+    glActiveTexture_ptr(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, texId);
+    sBoundTextures[0] = texId;
+    const u8* src = static_cast<const u8*>(sig.image);
+    std::vector<u8> rgba;
+#ifdef __vita__
+    std::vector<u8> chain;   // every level, packed, for vglTexImage2DMipChain
+#endif
+    u8 minA = 255;
+    size_t offset = 0;
+    for (int l = 0; l <= levels; ++l) {
+        const int w = std::max(1, w0 >> l), h = std::max(1, h0 >> l);
+        rgba.assign(size_t(w) * size_t(h) * 4, 255);
+        pc_decode_gx_tiles(src + offset, w, h, (GXTexFmt)sig.format, tw, th, bpt, rgba);
+        for (size_t i = 3; i < rgba.size(); i += 4) if (rgba[i] < minA) minA = rgba[i];
+#ifdef __vita__
+        chain.insert(chain.end(), rgba.begin(), rgba.end());
+#else
+        if (l == 0) upload_2d(texId, GL_RGBA, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+        else glTexImage2D(GL_TEXTURE_2D, l, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+#endif
+        offset += size_t((w + tw - 1) / tw) * size_t((h + th - 1) / th) * size_t(bpt);
+    }
+#ifdef __vita__
+    rec_tex_mipchain(texId, w0, h0, levels + 1, chain.data(), uint32_t(chain.size()));
+#endif
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, glMin);
+#ifdef __vita__
+    // LOD bias in eighths of a level.
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, int(lroundf(lodBias * 8.0f)));
+#else
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, levels);
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, lodBias);
+#endif
+#ifdef __vita__
+    // Minimum alpha over every level.
+    {
+        auto ma = sTexMinAlpha.find(texId);
+        if (ma == sTexMinAlpha.end() || minA < ma->second) sTexMinAlpha[texId] = minA;
+        auto gr = sTexAlphaGrid.find(texId);
+        if (gr != sTexAlphaGrid.end()) {
+            uint8_t mn = 255;
+            for (int cy = 0; cy < 16; ++cy) for (int cx = 0; cx < 16; ++cx) {
+                if (minA < gr->second.cell[cy][cx]) gr->second.cell[cy][cx] = minA;
+                if (gr->second.cell[cy][cx] < mn) mn = gr->second.cell[cy][cx];
+            }
+            gr->second.minAll = mn;
+        }
+        ++sActiveTexAlphaGen;
+    }
+#endif
+    sTexMipSig[texId] = want;
+}
+static void pc_tex_mip_forget(GLuint tex) { sTexMipSig.erase(tex); }
 
 void pc_gfx_init_tlut_obj(GXTlutObj* obj, void* lut, GXTlutFmt format, u16 numEntries) {
     if (!obj || !lut || numEntries == 0) return;
@@ -2623,6 +3951,27 @@ void pc_gfx_load_tlut(GXTlutObj* obj, u32 tlutName) {
     if (it != sTlutObjects.end()) sLoadedTluts[tlutName] = it->second;
 }
 
+// Minification filtering for opaque textures.
+static void apply_texture_filtering(u8 minAlpha, int width, int height) {
+#ifdef __vita__
+    (void)minAlpha; (void)width; (void)height;
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+#else
+    // Power of two only.
+    const bool po2 = width > 0 && height > 0 && (width & (width - 1)) == 0 && (height & (height - 1)) == 0;
+    bool wantMips = minAlpha == 255 && po2 && width >= 8 && height >= 8;
+    if (!glGenerateMipmap_ptr) wantMips = false;
+    if (wantMips) {
+        glGenerateMipmap_ptr(GL_TEXTURE_2D);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    } else {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    }
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+#endif
+}
+
 static bool upload_ci_texture(GXTexObj* obj, const PcCiTexture& ci) {
     auto paletteIt = sLoadedTluts.find(ci.tlutName);
     if (!obj || !ci.image || paletteIt == sLoadedTluts.end() || paletteIt->second.rgba.empty()) return false;
@@ -2662,20 +4011,35 @@ static bool upload_ci_texture(GXTexObj* obj, const PcCiTexture& ci) {
     auto textureIt = sTextureCache.find(key);
     if (textureIt == sTextureCache.end()) {
         glGenTextures(1, &texId);
+        
+#ifdef __vita__
+        ++sTexCacheGen;
+#endif
         sTextureCache[key] = texId;
     } else {
         texId = textureIt->second;
     }
+    pc_tex_mip_forget(texId);   // a new level 0 replaces any chain
     pc_gfx_flush_batch();  // about to rebind and rewrite texture unit 0
     glActiveTexture_ptr(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, texId);
     sBoundTextures[0] = texId;
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, ci.wrapS == GX_REPEAT ? GL_REPEAT : GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, ci.wrapT == GX_REPEAT ? GL_REPEAT : GL_CLAMP_TO_EDGE);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, ci.width, ci.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, pc_gx_wrap_to_gl(ci.wrapS));
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, pc_gx_wrap_to_gl(ci.wrapT));
+    upload_2d(texId, GL_RGBA, ci.width, ci.height, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    { u8 mn = 255; for (size_t i = 3; i < rgba.size(); i += 4) if (rgba[i] < mn) mn = rgba[i];
+      apply_texture_filtering(mn, ci.width, ci.height); }
+#ifdef __vita__
+    { u8 mn = 255; for (size_t i = 3; i < rgba.size(); i += 4) if (rgba[i] < mn) mn = rgba[i]; 
+#ifdef __vita__
+    ++sTexCacheGen;
+#endif
+    sTexMinAlpha[texId] = mn; ++sActiveTexAlphaGen; }
+#endif
     ++sPerfTextureUploads;
+    sTexLastUsed[texId] = sTexFrame;
     return true;
 }
 
@@ -2684,8 +4048,12 @@ void pc_gfx_init_tex_obj_ci(GXTexObj* obj, void* imagePtr, u16 width, u16 height
     (void)mipmap;
     if (!obj || !imagePtr || width == 0 || height == 0) return;
     const uintptr_t key = reinterpret_cast<uintptr_t>(obj);
+    // C4 8x8, C8 8x4, C14X2 4x4 texels per 32-byte tile.
+    const int ciTileW = format == GX_TF_C14X2 ? 4 : 8;
+    const int ciTileH = format == GX_TF_C4 ? 8 : 4;
     const PcTextureSignature signature {
-        imagePtr, width, height, static_cast<u32>(format), wrapS, wrapT, true, tlutName
+        imagePtr, width, height, static_cast<u32>(format), wrapS, wrapT, true, tlutName,
+        pc_tex_content_sample(imagePtr, width, height, ciTileW, ciTileH, 32)
     };
     const auto signatureIt = sTextureSignatures.find(key);
     if (signatureIt != sTextureSignatures.end() && signatureIt->second == signature
@@ -2696,26 +4064,86 @@ void pc_gfx_init_tex_obj_ci(GXTexObj* obj, void* imagePtr, u16 width, u16 height
     PcCiTexture ci { static_cast<const u8*>(imagePtr), width, height, format, wrapS, wrapT, tlutName };
     sCiTextures[key] = ci;
     if (upload_ci_texture(obj, ci)) {
-        sTextureSignatures[key] = signature;
+        
+#ifdef __vita__
+    ++sTexCacheGen;
+#endif
+    sTextureSignatures[key] = signature;
     }
 }
 
+#ifdef __vita__
+// Alpha description of the texture on one map.
+struct VitaTexAlphaWatch {
+    int id; const VitaTexAlphaGrid* grid; uint16_t w, h; uint8_t minA, ws, wt;
+    explicit VitaTexAlphaWatch(int m) : id(m), grid(sActiveTexGrid[m]), w(sActiveTexW[m]), h(sActiveTexH[m]),
+        minA(sActiveTexMinAlpha[m]), ws(sActiveTexWrapS[m]), wt(sActiveTexWrapT[m]) {}
+    ~VitaTexAlphaWatch() {
+        if (grid != sActiveTexGrid[id] || w != sActiveTexW[id] || h != sActiveTexH[id] || minA != sActiveTexMinAlpha[id]
+            || ws != sActiveTexWrapS[id] || wt != sActiveTexWrapT[id]) ++sActiveTexAlphaGen;
+    }
+};
+#endif
 void pc_gfx_load_tex_obj(GXTexObj* obj, GXTexMapID id) {
     if (id < GX_TEXMAP0 || id >= GX_MAX_TEXMAP) return;
+#ifdef __vita__
+    const VitaTexAlphaWatch alphaWatch(int(id));
+#endif
     if (!obj) {
         sHasActiveTextures[id] = false;
         return;
     }
 
     uintptr_t key = (uintptr_t)obj;
+#ifdef __vita__
+    VitaTexLoadMemo& memo = sTexLoadMemo[(key >> 4) & 1023u];
+    if (memo.obj == key && memo.gen == sTexCacheGen) {
+        sActiveGLTextures[id] = memo.tex;
+        sHasActiveTextures[id] = true;
+        sActiveTexMinAlpha[id] = memo.minAlpha;
+        sActiveTexGrid[id] = memo.grid;
+        sActiveTexW[id] = memo.w; sActiveTexH[id] = memo.h;
+        sActiveTexWrapS[id] = memo.wrapS; sActiveTexWrapT[id] = memo.wrapT;
+        if (memo.frame != sTexFrame) { sTexLastUsed[memo.tex] = sTexFrame; memo.frame = sTexFrame; }
+        return;
+    }
+#endif
     auto it = sTextureCache.find(key);
     if (it == sTextureCache.end()) {
         auto ci = sCiTextures.find(key);
         if (ci != sCiTextures.end() && upload_ci_texture(obj, ci->second)) it = sTextureCache.find(key);
     }
+    if (it == sTextureCache.end()) {
+        // Evicted: re-upload from the init parameters.
+        auto sig = sTextureSignatures.find(key);
+        if (sig != sTextureSignatures.end() && !sig->second.indexed && sig->second.image) {
+            const PcTextureSignature sg = sig->second;
+            pc_gfx_init_tex_obj(obj, const_cast<void*>(sg.image), sg.width, sg.height,
+                                static_cast<GXTexFmt>(sg.format), sg.wrapS, sg.wrapT, GX_FALSE);
+            it = sTextureCache.find(key);
+        }
+    }
     if (it != sTextureCache.end()) {
         sActiveGLTextures[id] = it->second;
         sHasActiveTextures[id] = true;
+#ifdef __vita__
+        { auto ma = sTexMinAlpha.find(it->second); sActiveTexMinAlpha[id] = ma != sTexMinAlpha.end() ? ma->second : 0; }
+        {
+            auto g = sTexAlphaGrid.find(it->second);
+            auto sg = sTextureSignatures.find(key);
+            if (g != sTexAlphaGrid.end() && sg != sTextureSignatures.end()) {
+                sActiveTexGrid[id] = &g->second;
+                sActiveTexW[id] = sg->second.width; sActiveTexH[id] = sg->second.height;
+                sActiveTexWrapS[id] = uint8_t(sg->second.wrapS); sActiveTexWrapT[id] = uint8_t(sg->second.wrapT);
+            } else {
+                sActiveTexGrid[id] = nullptr;
+            }
+        }
+        memo.obj = key; memo.gen = sTexCacheGen; memo.tex = it->second; memo.grid = sActiveTexGrid[id];
+        memo.w = sActiveTexW[id]; memo.h = sActiveTexH[id]; memo.minAlpha = sActiveTexMinAlpha[id];
+        memo.wrapS = sActiveTexWrapS[id]; memo.wrapT = sActiveTexWrapT[id]; memo.frame = sTexFrame;
+#endif
+        sTexLastUsed[it->second] = sTexFrame;
     } else {
         // Hasta ahora esto era mudo, y una textura que nunca llegó a subirse
         // se manifestaba solo como un artefacto en pantalla.
@@ -2771,31 +4199,68 @@ void pc_gfx_dump_vtx_desc_history(const char* why) {
 }
 
 void pc_gfx_clear_vtx_desc(void) {
-    for (int i = 0; i < GX_VA_MAX_ATTR; ++i) sVtxDesc[i] = GX_NONE;
+    for (int i = 0; i < GX_VA_MAX_ATTR; ++i) {
+#ifdef __vita__
+        if (sVtxDesc[i] != GX_NONE) sVitaDescDirty = true;
+#endif
+        sVtxDesc[i] = GX_NONE;
+    }
     log_vtx_desc(0, 0, true);
 }
 void pc_gfx_set_vtx_desc(GXAttr attr, GXAttrType type) {
-    if (attr >= 0 && attr < GX_VA_MAX_ATTR) sVtxDesc[attr] = type;
+    if (attr >= 0 && attr < GX_VA_MAX_ATTR) {
+#ifdef __vita__
+        if (sVtxDesc[attr] != type) sVitaDescDirty = true;
+#endif
+        sVtxDesc[attr] = type;
+    }
     log_vtx_desc(int(attr), int(type), false);
 }
 void pc_gfx_set_vtx_attr_fmt(GXVtxFmt fmt, GXAttr attr, GXCompCnt cnt, GXCompType type, u8 frac) {
     if (fmt >= 0 && fmt < GX_MAX_VTXFMT && attr >= 0 && attr < GX_VA_MAX_ATTR) {
+#ifdef __vita__
+        const VertexFormatState& cur = sVtxFormats[fmt][attr];
+        if (cur.count != cnt || cur.type != type || cur.frac != frac) sVitaVatDirty = true;
+#endif
         sVtxFormats[fmt][attr] = { cnt, type, frac };
     }
 }
 void pc_gfx_set_array(GXAttr attr, void* basePtr, u8 stride) {
     if (attr >= 0 && attr < GX_VA_MAX_ATTR) {
+#ifdef __vita__
+        if (sVtxArrays[attr].base != static_cast<const u8*>(basePtr) || sVtxArrays[attr].stride != stride)
+            sVitaDescDirty = true;
+#endif
         sVtxArrays[attr] = { static_cast<const u8*>(basePtr), stride };
         sArraySetFrame[attr]  = sFrameSerial;
         sArraySetSerial[attr] = ++sArraySetCounter;
     }
 }
 
+#ifdef __vita__
+// Volatile arrays (GXSetArray).
+static uint32_t sVitaArrayVolatileMask = 0;
+extern "C" void pc_gfx_note_array_volatile(int attr, bool contentsChange) {
+    if (attr < 0 || attr >= 32) return;
+    if (contentsChange) sVitaArrayVolatileMask |= 1u << attr;
+    else sVitaArrayVolatileMask &= ~(1u << attr);
+}
+static bool vita_dl_arrays_volatile() {
+    if (!sVitaArrayVolatileMask) return false;
+    for (int a = 0; a < 32 && a < GX_VA_MAX_ATTR; ++a) {
+        if ((sVitaArrayVolatileMask >> a & 1u) && sVtxDesc[a] == GX_INDEX8) return true;
+        if ((sVitaArrayVolatileMask >> a & 1u) && sVtxDesc[a] == GX_INDEX16) return true;
+    }
+    return false;
+}
+#endif
+
 static Vertex sCurVertex = {};
 
 // ── Drawing & FIFO Stream Parser ──
 void pc_gfx_begin(GXPrimitive type, GXVtxFmt vtxfmt, u16 nverts) {
-    (void)vtxfmt;
+    sCurVtxFmt = vtxfmt;
+    sRawPush.clear();
     sCurrentPrimType = type;
     sExpectedVerts = nverts;
     sVertexStream.clear();
@@ -2803,10 +4268,17 @@ void pc_gfx_begin(GXPrimitive type, GXVtxFmt vtxfmt, u16 nverts) {
     sInPrimitive = true;
     sHaveVertex = false;
     sVerticesPretransformed = false;
+#ifdef __vita__
+    sVitaNeedPalette = false;
+    sVitaPaletteSlots = 1;
+#endif
     sCurVertex.r = 1.0f;
     sCurVertex.g = 1.0f;
     sCurVertex.b = 1.0f;
     sCurVertex.a = 1.0f;
+#ifdef __vita__
+    sCurVertex.mtxIdx = 0.0f;
+#endif
     sCurVertex.nx = 0.0f;
     sCurVertex.ny = 0.0f;
     sCurVertex.nz = 1.0f;
@@ -2852,12 +4324,122 @@ void pc_gfx_push_f32(f32 val) {
     sAttrStep++;
 }
 
-void pc_gfx_push_u8(u8 val) { (void)val; }
-void pc_gfx_push_u16(u16 val) { (void)val; }
-void pc_gfx_push_u32(u32 val) { (void)val; }
-void pc_gfx_push_s8(s8 val) { (void)val; }
-void pc_gfx_push_s16(s16 val) { (void)val; }
-void pc_gfx_push_s32(s32 val) { (void)val; }
+void pc_gfx_push_u8(u8 val) { raw_push_be(val, 1); }
+void pc_gfx_push_u16(u16 val) { raw_push_be(val, 2); }
+void pc_gfx_push_u32(u32 val) { raw_push_be(val, 4); }
+void pc_gfx_push_s8(s8 val) { raw_push_be(u8(val), 1); }
+void pc_gfx_push_s16(s16 val) { raw_push_be(u16(val), 2); }
+void pc_gfx_push_s32(s32 val) { raw_push_be(u32(val), 4); }
+
+// Transform one pushed vertex.
+static inline void vita_xform_into(Vertex& v, const float* M, const float* N) {
+    const float x = v.x, y = v.y, z = v.z;
+    v.x = M[0] * x + M[4] * y + M[8] * z + M[12];
+    v.y = M[1] * x + M[5] * y + M[9] * z + M[13];
+    v.z = M[2] * x + M[6] * y + M[10] * z + M[14];
+    const float nx = v.nx, ny = v.ny, nz = v.nz;
+    v.nx = N[0] * nx + N[3] * ny + N[6] * nz;
+    v.ny = N[1] * nx + N[4] * ny + N[7] * nz;
+    v.nz = N[2] * nx + N[5] * ny + N[8] * nz;
+}
+static inline void vita_push_transformed(const float* M, const float* N) {
+    Vertex v = sCurVertex;
+    vita_xform_into(v, M, N);
+    sVertexStream.push_back(v);
+}
+#ifdef __vita__
+// Fast stream decode.
+struct VitaImmLayout { unsigned stride, offC, offT, nv; };   // offC / offT: colour / texcoord tag offset, 0 when absent
+static bool vita_imm_layout(const unsigned char* s, unsigned bytes, VitaImmLayout& L) {
+    if (bytes < 13u || s[0] != 1) return false;
+    unsigned stride = 13, offC = 0, offT = 0;
+    if (stride < bytes && s[stride] == 2) { offC = stride; stride += 5; }
+    if (stride < bytes && s[stride] == 3) { offT = stride; stride += 9; }
+    if (bytes % stride != 0) return false;
+    const unsigned nv = bytes / stride;
+    for (unsigned k = 0; k < nv; ++k) {
+        const unsigned char* p = s + size_t(k) * stride;
+        if (p[0] != 1 || (offC && p[offC] != 2) || (offT && p[offT] != 3)) return false;
+    }
+    L.stride = stride; L.offC = offC; L.offT = offT; L.nv = nv;
+    return true;
+}
+static void vita_imm_decode_fast(const unsigned char* s, const VitaImmLayout& L, const float* M, const float* N,
+                                 PcVertexVec& out, Vertex& last) {
+    const Vertex t = sCurVertex;
+    out.clear();
+    out.resize(L.nv);
+    Vertex* d = out.data();
+    for (unsigned k = 0; k < L.nv; ++k) {
+        const unsigned char* p = s + size_t(k) * L.stride;
+        Vertex& v = d[k];
+        v = t;
+        memcpy(&v.x, p + 1, 12);
+        if (L.offC) {
+            const unsigned char* c = p + L.offC + 1;
+            v.r = sVitaU8F[c[0]]; v.g = sVitaU8F[c[1]]; v.b = sVitaU8F[c[2]]; v.a = sVitaU8F[c[3]];
+        }
+        if (L.offT) memcpy(v.tex[0], p + L.offT + 1, 8);
+        if (k + 1 == L.nv) last = v;
+        vita_xform_into(v, M, N);
+    }
+}
+static void vita_imm_chain_end(int flags, bool xf);
+#endif
+void pc_gfx_prim_stream(GXPrimitive type, GXVtxFmt vtxfmt, u16 nverts, const unsigned char* stream, unsigned bytes, int flags) {
+    if (flags & 1) pc_gfx_begin(type, vtxfmt, nverts);
+    const bool xf = sInPrimitive;
+    const u32 mtxId = sCurrentPosMtxId < 64 ? sCurrentPosMtxId : 0;
+    const float* M = sPosMatrix[mtxId];
+    const float* N = sNrmMatrix[mtxId];
+    bool decoded = false;
+#ifdef __vita__
+    // Single-chunk pretransformed primitive: fast decode.
+    if (flags == 3 && xf) {
+        VitaImmLayout lay;
+        if (vita_imm_layout(stream, bytes, lay)) {
+            vita_imm_decode_fast(stream, lay, M, N, sVertexStream, sCurVertex);
+            sHaveVertex = false;
+            decoded = true;
+        }
+    }
+#endif
+    if (!decoded) {
+        const unsigned char* r = stream;
+        const unsigned char* end = stream + bytes;
+        while (r < end) {
+            const unsigned char tag = *r++;
+            if (tag == 1) {
+                if (sInPrimitive) {
+                    if (sHaveVertex) { if (xf) vita_push_transformed(M, N); else sVertexStream.push_back(sCurVertex); }
+                    memcpy(&sCurVertex.x, r, 12);
+                    sHaveVertex = true;
+                }
+                r += 12;
+            } else if (tag == 2) {
+                sCurVertex.r = r[0] / 255.0f; sCurVertex.g = r[1] / 255.0f; sCurVertex.b = r[2] / 255.0f; sCurVertex.a = r[3] / 255.0f;
+                r += 4;
+            } else if (tag == 3) {
+                memcpy(sCurVertex.tex[0], r, 8);
+                r += 8;
+            } else if (tag == 4) {
+                float f; memcpy(&f, r, 4); r += 4;
+                pc_gfx_push_f32(f);
+            } else if (tag == 5) {
+                pc_gfx_push_u8(r[0]); r += 1;
+            } else break;
+        }
+        if (xf && sInPrimitive && sHaveVertex) { vita_push_transformed(M, N); sHaveVertex = false; }
+    }
+    if (flags & 2) {
+        if (xf) sVerticesPretransformed = true;
+#ifdef __vita__
+        vita_imm_chain_end(flags, xf);
+        return;
+#endif
+        pc_gfx_end();
+    }
+}
 
 
 // ── Specialised TEV programs ──
@@ -2868,10 +4450,17 @@ void pc_gfx_push_s32(s32 val) { (void)val; }
 // of materials. The ubershader stays as the fallback and as an A/B reference.
 
 struct TevProgramEntry {
+#ifndef __vita__
     PcTevShaderKey key;
+#endif
     uint64_t hash = 0;
-    GLuint program = 0;
+    GLuint fragShader = 0;         // config fragment shader object
+    GLuint program = 0;            // ten-slot matrix palette
     ProgramLocations locations;
+#ifndef __vita__
+    GLuint programSingle = 0;      // one-slot palette
+    ProgramLocations locationsSingle;
+#endif
 };
 
 static std::vector<TevProgramEntry> sTevPrograms;
@@ -2923,7 +4512,7 @@ static void build_tev_shader_key(PcTevShaderKey& key) {
     key.alphaTestOp      = uint8_t(sAlphaOp);
     key.useMaterialRgb   = uint8_t(sChannels[0].matSrc == GX_SRC_REG ? 1 : 0);
     key.useMaterialAlpha = uint8_t(sChannels[0].alphaMatSrc == GX_SRC_REG ? 1 : 0);
-    key.useMaterialRgb1  = uint8_t(sChannels[1].matSrc == GX_SRC_REG ? 1 : 0);
+    key.useMaterialRgb1  = uint8_t(sVitaColor1FromAttr ? 2 : (sChannels[1].matSrc == GX_SRC_REG ? 1 : 0));
 }
 
 // Compiles and links one specialised program. Returns 0 on failure, which
@@ -2978,7 +4567,611 @@ static GLuint compile_specialised_program(const PcTevShaderKey& key) {
 
 // Selects the program for the current TEV state and makes its uniform
 // locations active. Falls back to the ubershader whenever generation fails.
+#ifdef __vita__
+// Fallback programs.
+static GLuint sVitaFbNoatProg = 0, sVitaFbAtProg = 0;
+static ProgramLocations sVitaFbNoatLoc, sVitaFbAtLoc;
+static GLuint sVitaFbNoatProgS = 0, sVitaFbAtProgS = 0;
+static ProgramLocations sVitaFbNoatLocS, sVitaFbAtLocS;
+
+static GLuint vita_link_program(GLuint fs, GLuint vs) {
+    if (!fs || !vs) return 0;
+    GLuint p = glCreateProgram_ptr();
+    if (p == 0 || p >= GLuint(kVitaMaxPrograms)) {
+        static int reported = 0;
+        if (reported < 4) {
+            ++reported;
+            printf("[VITA GX] OUT OF PROGRAM HANDLES (glCreateProgram -> %u, cap %d). Raise MAX_CUSTOM_PROGRAMS in the vitaGL fork.\n", (unsigned)p, kVitaMaxPrograms);
+        }
+        return 0;
+    }
+    glAttachShader_ptr(p, vs);
+    glAttachShader_ptr(p, fs);
+    bind_fixed_attrib_locations(p);
+    glLinkProgram_ptr(p);
+    GLint status = 0;
+    if (glGetProgramiv_ptr) glGetProgramiv_ptr(p, GL_LINK_STATUS, &status);
+    if (status != GL_TRUE) {
+        printf("[VITA GX] program link failed for fs=%u\n", (unsigned)fs);
+        glDeleteProgram_ptr(p);
+        return 0;
+    }
+    return p;
+}
+
+// Baked per-config programs by hash.
+static std::unordered_map<uint64_t, int> sTevProgramByHash;
+// Program tables frozen after the build.
+static bool   sVitaProgramTablesFrozen = false;
+static void vita_program_tables_check(const char* where) {
+    if (!sVitaProgramTablesFrozen) return;
+    printf("[VITA GX] FATAL: program table grew after init (%s); cached location pointers would dangle\n", where);
+    fflush(stdout);
+    abort();
+}
+
+static void vita_build_pair_programs();
+
+static void vita_build_all_programs() {
+    sSharedVertexShaderSingle = vita_gx_vertex_shader_single();
+    sVitaFbNoatProg = vita_link_program(vita_gx_fallback_fragment(false), sSharedVertexShader);
+    if (sVitaFbNoatProg) query_program_locations(sVitaFbNoatProg, sVitaFbNoatLoc);
+    sVitaFbAtProg = vita_link_program(vita_gx_fallback_fragment(true), sSharedVertexShader);
+    if (sVitaFbAtProg) query_program_locations(sVitaFbAtProg, sVitaFbAtLoc);
+    sVitaFbNoatProgS = vita_link_program(vita_gx_fallback_fragment(false), sSharedVertexShaderSingle);
+    if (sVitaFbNoatProgS) query_program_locations(sVitaFbNoatProgS, sVitaFbNoatLocS);
+    sVitaFbAtProgS = vita_link_program(vita_gx_fallback_fragment(true), sSharedVertexShaderSingle);
+    if (sVitaFbAtProgS) query_program_locations(sVitaFbAtProgS, sVitaFbAtLocS);
+
+    sShaderProgram = sVitaFbNoatProg;
+    sLocP = &sVitaFbNoatLoc;
+    sUberLocations = sVitaFbNoatLoc;
+    sCurrentProgram = sShaderProgram;
+
+    const int n = vita_gx_config_count();
+    sTevPrograms.reserve(size_t(n));
+    sTevProgramByHash.reserve(size_t(n));
+    for (int i = 0; i < n; ++i) {
+        const GLuint frag = vita_gx_config_fragment(i);
+        GLuint prog = vita_link_program(frag, sSharedVertexShader);
+        if (!prog) continue;
+        TevProgramEntry e;
+        e.hash = vita_gx_config_hash(i);
+        e.fragShader = frag;
+        e.program = prog;
+        query_program_locations(prog, e.locations);
+        sTevProgramByHash[e.hash] = int(sTevPrograms.size());
+        vita_program_tables_check("config programs");
+        sTevPrograms.push_back(e);
+    }
+    vita_build_pair_programs();
+    sVitaProgramTablesFrozen = true;
+}
+
+
+// Program selection memo.
+struct VitaProgMemo {
+    uint64_t key     = 0;
+    uint64_t keyHash = 0;
+    int      progIdx = -3;   // >=0 baked index, -1 fbNoat, -2 fbAt, -3 empty
+};
+static VitaProgMemo sVitaProgMemo[2048];
+// Batch key of the current apply.
+static uint64_t sVitaApplyKey      = 0;
+static bool     sVitaApplyKeyValid = false;
+
+
+static inline uint64_t hash_bytes(uint64_t h, const void* data, size_t bytes);
+
+// Fingerprint of the state that selects a program.
+static inline uint64_t vita_mix64(uint64_t h, uint64_t w) { h = (h ^ w) * 1099511628211ull; return h ^ (h >> 29); }
+static inline uint64_t vita_tev_stage_word(int i) {
+    const uint64_t h = hash_bytes(0x243F6A8885A308D3ull, &sTevStages[i], sizeof(sTevStages[i]));
+    const int32_t sw[2] = { int32_t(sTevRasSwapSel[i]), int32_t(sTevTexSwapSel[i]) };
+    return hash_bytes(h, sw, sizeof(sw));
+}
+static inline int vita_fp_stage_count() { return sNumTevStages < GX_MAXTEVSTAGE ? (sNumTevStages < 1 ? 1 : sNumTevStages) : GX_MAXTEVSTAGE; }
+static inline uint64_t vita_fp_stage_tail(uint64_t h) {
+    h = hash_bytes(h, sTevSwapModes, sizeof(sTevSwapModes));
+    const uint8_t c1 = sVitaColor1FromAttr ? 1 : 0;
+    return hash_bytes(h, &c1, 1);
+}
+static inline uint64_t vita_fp_finish(uint64_t stagePart) {
+    const int32_t cmp[3] = { int32_t(sAlphaComp0), int32_t(sAlphaComp1), int32_t(sAlphaOp) };
+    const uint8_t mats[4] = {
+        (uint8_t)(sChannels[0].matSrc == GX_SRC_REG ? 1 : 0),
+        (uint8_t)(sChannels[0].alphaMatSrc == GX_SRC_REG ? 1 : 0),
+        (uint8_t)(sChannels[1].matSrc == GX_SRC_REG ? 1 : 0),
+        (uint8_t)(sVitaColor1FromAttr ? 1 : 0),
+    };
+    return hash_bytes(hash_bytes(stagePart, cmp, sizeof(cmp)), mats, sizeof(mats));
+}
+static uint64_t tev_config_fingerprint() {
+    const int n = vita_fp_stage_count();
+    uint64_t f = vita_mix64(14695981039346656037ull, uint64_t(n));
+    for (int i = 0; i < n; ++i) f = vita_mix64(f, vita_tev_stage_word(i));
+    return vita_fp_finish(vita_fp_stage_tail(f));
+}
+
+// Vertex-shader variants.
+static const float kVitaIdentity16[16] = { 1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0, 0, 0, 1 };
+
+// Vertex key memo.
+struct VitaVsKeyMemo { uint64_t chan, texgen; int slots; bool c1; bool valid; bool vhValid; VitaVsKey key; uint64_t vh; };
+static VitaVsKeyMemo sVitaVsKeyMemo[64];
+// Vertex key from the live state.
+static const uint8_t kVitaNibbleBits[16] = { 0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4 };
+static inline int vita_light_count4(u32 mask) {
+    const int n = kVitaNibbleBits[mask & 15u] + kVitaNibbleBits[(mask >> 4) & 15u];
+    return n < 4 ? n : 4;
+}
+static inline bool vita_texmtx_identity(u32 m) {
+    VitaTexMtxIdent& c = sVitaTexMtxIdent[m];
+    if (!c.valid || c.gen != sTexMtxGen[m]) {
+        c.ident = memcmp(sTexMatrices[m], kVitaIdentity16, sizeof(kVitaIdentity16)) == 0 ? 1 : 0;
+        c.gen = sTexMtxGen[m];
+        c.valid = 1;
+    }
+    return c.ident != 0;
+}
+static VitaVsKey vita_vs_key_miss() {
+    VitaVsKey k;
+    const int slots = sVitaPaletteSlots;
+    k.paletteSlots = uint8_t(slots <= 1 ? 1 : slots <= 3 ? 3 : slots <= 6 ? 6 : 10);
+    if (sChannels[0].enabled) {
+        k.chan0En = 1;
+        const int n = vita_light_count4(sChannels[0].lightMask);
+        k.numLights0 = uint8_t(n);
+        k.attn0 = (n > 0 && sChannels[0].attnFn != GX_AF_NONE) ? 1 : 0;
+    }
+    if (sChannels[1].enabled) {
+        k.chan1En = 1;
+        const int n = vita_light_count4(sChannels[1].lightMask);
+        if (n == 0)                                 k.chan1Mode = 2;   // ambient only
+        else if (sChannels[1].attnFn == GX_AF_SPEC) k.chan1Mode = 1;   // half-vector specular from light colour 0
+        else { k.chan1Mode = 0; k.numLights1 = uint8_t(n); k.attn1 = sChannels[1].attnFn != GX_AF_NONE ? 1 : 0; }
+    }
+    for (int slot = 0; slot < 4; ++slot) {
+        int mode = 0;
+        if (sTexCoordGen[slot].active) {
+            const GXTexGenSrc src = static_cast<GXTexGenSrc>(sTexCoordGen[slot].src);
+            if (src == GX_TG_POS) mode = 1;
+            else if (src == GX_TG_NRM) mode = 2;
+            else if (src >= GX_TG_TEX0 && src <= GX_TG_TEX7) mode = 3 + int(src - GX_TG_TEX0);
+            else if (src >= GX_TG_TEXCOORD0 && src <= GX_TG_TEXCOORD6) mode = 11 + int(src - GX_TG_TEXCOORD0);
+        }
+        if (mode >= 3 && mode <= 10) {
+            // Identity texture matrix.
+            u32 mtxIdx = sTexCoordGen[slot].mtxIdx;
+            if (mtxIdx >= 64) mtxIdx = 0;
+            if (vita_texmtx_identity(mtxIdx)) mode = 20 + (mode - 3);
+        }
+        k.tcMode[slot] = uint8_t(mode);
+    }
+    k.pad[0] = sVitaColor1FromAttr ? 1 : 0;   // register-1 fold
+    return k;
+}
+// Vertex key for the current state.
+static VitaVsKey vita_vs_key_lookup(uint64_t* vhOut) {
+    VitaVsKeyMemo& mm = sVitaVsKeyMemo[size_t((sKeyBlockChan ^ (sKeyBlockTexGen * 31u)) >> 7) & 63u];
+    if (sKeyDirty == 0 && mm.valid && mm.chan == sKeyBlockChan && mm.texgen == sKeyBlockTexGen
+        && mm.slots == sVitaPaletteSlots && mm.c1 == sVitaColor1FromAttr) {
+        if (vhOut) *vhOut = mm.vhValid ? mm.vh : vita_vs_hash_key(mm.key);
+        return mm.key;
+    }
+    const VitaVsKey k = vita_vs_key_miss();
+    const bool keep = sKeyDirty == 0;
+    const bool wantVh = vhOut || keep;
+    const uint64_t vh = wantVh ? vita_vs_hash_key(k) : 0;
+    if (keep) {
+        mm.valid = true; mm.chan = sKeyBlockChan; mm.texgen = sKeyBlockTexGen; mm.slots = sVitaPaletteSlots; mm.c1 = sVitaColor1FromAttr;
+        mm.key = k; mm.vh = vh; mm.vhValid = wantVh;
+    }
+    if (vhOut) *vhOut = vh;
+    return k;
+}
+static VitaVsKey vita_vs_key_from_state() { return vita_vs_key_lookup(nullptr); }
+static inline VitaVsKey vita_vs_key_and_hash(uint64_t* vh) { return vita_vs_key_lookup(vh); }
+
+struct VitaPairEntry { uint64_t tev = 0, vs = 0; GLuint program = 0; ProgramLocations loc; };
+static std::vector<VitaPairEntry> sVitaPairs;
+static std::unordered_map<uint64_t, int> sVitaPairByKey;
+static inline uint64_t vita_pair_key(uint64_t tev, uint64_t vs) { return tev ^ (vs * 0x9E3779B97F4A7C15ull) ^ (vs >> 7); }
+
+// One program per baked (TEV, VS) pair.
+static void vita_build_pair_programs() {
+    const int nvs = vita_gx_vs_count();
+    std::vector<GLuint> vsObj(size_t(nvs > 0 ? nvs : 0), 0);
+    std::unordered_map<uint64_t, int> vsIdx;
+    for (int i = 0; i < nvs; ++i) { vsObj[size_t(i)] = vita_gx_vs_shader(i); vsIdx[vita_gx_vs_hash(i)] = i; }
+    const int np = vita_gx_pair_count();
+    sVitaPairs.reserve(size_t(np > 0 ? np : 0));
+    sVitaPairByKey.reserve(size_t(np > 0 ? np : 0));
+    for (int i = 0; i < np; ++i) {
+        uint64_t th = 0, vh = 0, ph = 0;
+        vita_gx_pair(i, &th, &vh, &ph);
+        auto ft = sTevProgramByHash.find(th);
+        auto fv = vsIdx.find(ph);
+        if (ft == sTevProgramByHash.end()) continue;
+        if (fv == vsIdx.end() || !vsObj[size_t(fv->second)]) continue;
+        GLuint prog = vita_link_program(sTevPrograms[size_t(ft->second)].fragShader, vsObj[size_t(fv->second)]);
+        if (!prog) continue;
+        VitaPairEntry pe;
+        pe.tev = th; pe.vs = vh; pe.program = prog;
+        query_program_locations(prog, pe.loc);
+        sVitaPairByKey[vita_pair_key(th, vh)] = int(sVitaPairs.size());
+        vita_program_tables_check("pair programs");
+        sVitaPairs.push_back(pe);
+    }
+}
+
+// Program selection memo, keyed by fingerprint.
+struct VitaProgSel { uint64_t fp = 0, hash = 0; int progIdx = -3; int pair = -1; };   // progIdx: >=0 baked config, -1 fbNoat, -2 fbAt, -3 empty; pair: sVitaPairs index or -1
+static VitaProgSel sVitaProgSel[256];
+static inline VitaProgSel& vita_prog_sel(uint64_t fp) { return sVitaProgSel[size_t(fp ^ (fp >> 29) ^ (fp >> 47)) & 255]; }
+
+// Bind the program for a memo entry.
+static void vita_bind_program_for_index(int progIdx, int pairIdx) {
+    if (pairIdx >= 0) {
+        const VitaPairEntry& pe = sVitaPairs[size_t(pairIdx)];
+        if (sCurrentProgram != pe.program) {
+            glUseProgram_ptr(pe.program);
+            invalidate_uniform_cache_on_program_switch();
+            sCurrentProgram = pe.program;
+            sCheckProgram = pe.program;
+            sLocP = &pe.loc;
+        }
+        return;
+    }
+    GLuint prog = 0;
+    if (progIdx >= 0)       prog = sTevPrograms[size_t(progIdx)].program;
+    else if (progIdx == -1) prog = sVitaNeedPalette ? sVitaFbNoatProg : sVitaFbNoatProgS;
+    else                    prog = sVitaNeedPalette ? sVitaFbAtProg : sVitaFbAtProgS;
+    if (!prog || sCurrentProgram == prog) return;
+    glUseProgram_ptr(prog);
+    invalidate_uniform_cache_on_program_switch();
+    sCurrentProgram = prog;
+    sCheckProgram = prog;
+    if (progIdx >= 0)       sLocP = &sTevPrograms[size_t(progIdx)].locations;
+    else if (progIdx == -1) sLocP = sVitaNeedPalette ? &sVitaFbNoatLoc : &sVitaFbNoatLocS;
+    else                    sLocP = sVitaNeedPalette ? &sVitaFbAtLoc : &sVitaFbAtLocS;
+}
+
+// Alpha combiner interval analysis: 1 always passes, 2 always fails, 0 undecided.
+static VitaVsKey vita_vs_key_from_state();
+// Minimum alpha of the grid cells over [c0, c1].
+static uint8_t vita_grid_region_min(const VitaTexAlphaGrid* grid, const int c0[2], const int c1[2], uint8_t globalByte) {
+    uint8_t mn = 255;
+    if (c0[0] == 0 && c0[1] == 0 && c1[0] == 15 && c1[1] == 15) {
+        mn = grid->minAll;
+    } else {
+        for (int cy = c0[1]; cy <= c1[1] && mn > globalByte; ++cy)
+            for (int cx = c0[0]; cx <= c1[0]; ++cx) {
+                const uint8_t v = grid->cell[cy][cx];
+                if (v < mn) { mn = v; if (mn <= globalByte) break; }
+            }
+    }
+    return mn;
+}
+static float vita_stage_tex_alpha_lo(int texMap, int texCoordSlot, const VitaVsKey& vk, bool* usedRegion) {
+    const float global = sActiveTexMinAlpha[texMap] / 255.0f;
+    if (!sVitaListUvValid || texCoordSlot < 0 || texCoordSlot > 3) return global;
+    const VitaTexAlphaGrid* grid = sActiveTexGrid[texMap];
+    const int mode = vk.tcMode[texCoordSlot];
+    if (!grid || mode < 20 || mode > 27 || sActiveTexW[texMap] == 0 || sActiveTexH[texMap] == 0) return global;
+    const int attr = mode - 20;
+    if (attr > 3) return global;
+    int c0[2], c1[2];
+    for (int axis = 0; axis < 2; ++axis) {
+        const float texels = float(axis ? sActiveTexH[texMap] : sActiveTexW[texMap]);
+        float lo = sVitaListUvMin[attr][axis] - 1.0f / texels, hi = sVitaListUvMax[attr][axis] + 1.0f / texels;
+        if (!(lo <= hi) || hi - lo >= 1.0f) { lo = 0.0f; hi = 1.0f; }
+        const int wrap = axis ? sActiveTexWrapT[texMap] : sActiveTexWrapS[texMap];
+        if (wrap == int(GX_CLAMP)) {
+            lo = std::min(std::max(lo, 0.0f), 1.0f); hi = std::min(std::max(hi, 0.0f), 1.0f);
+        } else {
+            // Repeat: one period at most; mirror only inside the first period.
+            const float flo = floorf(lo), fhi = floorf(hi);
+            if (flo != fhi || (wrap == int(GX_MIRROR) && flo != 0.0f)) { lo = 0.0f; hi = 1.0f; }
+            else { lo -= flo; hi -= flo; }
+        }
+        c0[axis] = std::min(std::max(int(lo * 16.0f), 0), 15);
+        c1[axis] = std::min(std::max(int(hi * 16.0f), 0), 15);
+        if (c1[axis] < c0[axis]) c1[axis] = c0[axis];
+    }
+    const uint8_t mn = vita_grid_region_min(grid, c0, c1, sActiveTexMinAlpha[texMap]);
+    const float region = mn / 255.0f;
+    if (region > global && usedRegion) *usedRegion = true;
+    return std::max(global, region);
+}
+// Per-stage texture alpha bounds for the draw being applied.
+static void vita_alpha_env_refresh(const VitaVsKey* vkOpt) {
+    memset(sVitaStageLo, 0, sizeof(sVitaStageLo));
+    sVitaStageLoRegion = false;
+    if (sAlphaComp0 == GX_ALWAYS && sAlphaComp1 == GX_ALWAYS) return;
+    const VitaVsKey vk = vkOpt ? *vkOpt : vita_vs_key_from_state();
+    const int n = std::min<int>(sNumTevStages, GX_MAXTEVSTAGE);
+    for (int s = 0; s < n; ++s) {
+        const TevStageState& st = sTevStages[s];
+        if (!(st.textureEnabled && st.texMap >= GX_TEXMAP0 && st.texMap < GX_MAX_TEXMAP && sHasActiveTextures[int(st.texMap)])) continue;
+        const int slot = (int(st.texCoord) >= 0 && int(st.texCoord) <= 3) ? int(st.texCoord) : -1;
+        sVitaStageLo[s] = uint8_t(vita_stage_tex_alpha_lo(int(st.texMap), slot, vk, &sVitaStageLoRegion) * 255.0f + 0.5f);
+    }
+}
+// Alpha-test verdict inputs beyond the config fingerprint.
+static uint64_t vita_verdict_input_hash() {
+    uint64_t h = 0x3D1CEA11F0A1B2C3ull;
+    const float regA[4] = { sTevRegisters[0][3], sTevRegisters[1][3], sTevRegisters[2][3], sTevRegisters[3][3] };
+    h = hash_bytes(h, regA, sizeof(regA));
+    const int n = std::min<int>(sNumTevStages, GX_MAXTEVSTAGE);
+    if (n > 0) {
+        float konstA[GX_MAXTEVSTAGE];
+        for (int s = 0; s < n; ++s) { float k[4]; resolve_tev_konst(u8(s), k); konstA[s] = k[3]; }
+        h = hash_bytes(h, konstA, sizeof(konstA[0]) * size_t(n));
+    }
+    {
+        const GfxChannel& ch = sChannels[0];
+        const bool regSrc = ch.alphaMatSrc == GX_SRC_REG;
+        const float matA = regSrc ? ch.matColor[3] : 0.0f;
+        const int32_t src = int32_t(ch.alphaMatSrc);
+        h = hash_bytes(h, &src, sizeof(src));
+        h = hash_bytes(h, &matA, sizeof(matA));
+    }
+    const float refs[2] = { sAlphaRef0, sAlphaRef1 };
+    const int32_t cmp[3] = { int32_t(sAlphaComp0), int32_t(sAlphaComp1), int32_t(sAlphaOp) };
+    h = hash_bytes(h, refs, sizeof(refs));
+    h = hash_bytes(h, cmp, sizeof(cmp));
+    h = hash_bytes(h, &sVitaRasAlphaMin, sizeof(sVitaRasAlphaMin));
+    h = hash_bytes(h, sVitaStageLo, sizeof(sVitaStageLo));
+    return h;
+}
+// Alpha test that only rejects alpha 0.
+static bool vita_alpha_test_rejects_zero_only() {
+    auto nz = [](GXCompare c, float ref) {
+        return (c == GX_GREATER && ref < 0.5f / 255.0f) || (c == GX_GEQUAL && ref > 0.5f / 255.0f && ref < 1.5f / 255.0f);
+    };
+    auto always = [](GXCompare c, float ref) {
+        return c == GX_ALWAYS || (c == GX_LEQUAL && ref >= 1.0f - 0.5f / 255.0f) || (c == GX_GEQUAL && ref < 0.5f / 255.0f);
+    };
+    auto never = [](GXCompare c, float ref) {
+        return c == GX_NEVER || (c == GX_GREATER && ref >= 1.0f - 0.5f / 255.0f) || (c == GX_LESS && ref < 0.5f / 255.0f);
+    };
+    const bool nz0 = nz(sAlphaComp0, sAlphaRef0), nz1 = nz(sAlphaComp1, sAlphaRef1);
+    const bool al0 = always(sAlphaComp0, sAlphaRef0), al1 = always(sAlphaComp1, sAlphaRef1);
+    const bool nv0 = never(sAlphaComp0, sAlphaRef0), nv1 = never(sAlphaComp1, sAlphaRef1);
+    if (sAlphaOp == GX_AOP_AND) return (nz0 && al1) || (al0 && nz1) || (nz0 && nz1);
+    if (sAlphaOp == GX_AOP_OR)  return (nz0 && nv1) || (nv0 && nz1) || (nz0 && nz1);
+    return false;
+}
+// Alpha-test variant bits: bit 0 soft test, bit 1 zero-only elision.
+static unsigned vita_alpha_variant_bits() {
+    const bool tested = !(sAlphaComp0 == GX_ALWAYS && sAlphaComp1 == GX_ALWAYS);
+    if (!tested || sVitaZWriteOn) return 0;
+    // Soft alpha test.
+    const bool soft = (sVitaBlendType == int(GX_BM_BLEND)
+                       && (sVitaBlendDst == int(GX_BL_ONE) || sVitaBlendDst == int(GX_BL_INVSRCALPHA) || sVitaBlendDst == int(GX_BL_INVDSTCOL)))
+                      || sVitaBlendType == int(GX_BM_SUBTRACT);
+    // Zero-only alpha test elision.
+    const bool zeroOnly = sVitaBlendType == int(GX_BM_BLEND)
+        && sVitaBlendSrc == int(GX_BL_SRCALPHA) && (sVitaBlendDst == int(GX_BL_INVSRCALPHA) || sVitaBlendDst == int(GX_BL_ONE))
+        && vita_alpha_test_rejects_zero_only();
+    return (soft ? 1u : 0u) | (zeroOnly ? 2u : 0u);
+}
+static int vita_alpha_test_verdict(float* outLo, float* outHi) {
+    if (outLo) *outLo = 0.0f;
+    if (outHi) *outHi = 1.0f;
+    if (sAlphaComp0 == GX_ALWAYS && sAlphaComp1 == GX_ALWAYS) return 1;
+    float lo[4], hi[4];
+    for (int r = 0; r < 4; ++r) lo[r] = hi[r] = sTevRegisters[r][3];
+    const GfxChannel& ch = sChannels[0];
+    float rasLo = sVitaRasAlphaMin, rasHi = 1.0f;
+    if (ch.alphaMatSrc == GX_SRC_REG) rasLo = rasHi = ch.matColor[3];
+    const int n = std::min<int>(sNumTevStages, GX_MAXTEVSTAGE);
+    for (int s = 0; s < n; ++s) {
+        const TevStageState& st = sTevStages[s];
+        float texLo = 0.0f, texHi = 1.0f;
+        if (st.textureEnabled && st.texMap >= GX_TEXMAP0 && st.texMap < GX_MAX_TEXMAP && sHasActiveTextures[int(st.texMap)])
+            texLo = sVitaStageLo[s] / 255.0f;   // whole texture, or the sampled region of it
+        if (sTevSwapModes[int(sTevTexSwapSel[s]) & 3].alpha != GX_CH_ALPHA) texLo = 0.0f;
+        float sRasLo = rasLo, sRasHi = rasHi;
+        if (sTevSwapModes[int(sTevRasSwapSel[s]) & 3].alpha != GX_CH_ALPHA) { sRasLo = 0.0f; sRasHi = 1.0f; }
+        float k[4]; resolve_tev_konst(u8(s), k);
+        auto arg = [&](int id, float& a, float& b) {
+            switch (id) {
+            case 0: case 1: case 2: case 3: a = lo[id]; b = hi[id]; break;   // APREV, A0, A1, A2
+            case 4: a = texLo; b = texHi; break;                              // TEXA
+            case 5: a = sRasLo; b = sRasHi; break;                            // RASA
+            case 6: a = k[3]; b = k[3]; break;                                // KONST
+            default: a = 0.0f; b = 0.0f; break;                               // ZERO
+            }
+        };
+        float aLo, aHi, bLo, bHi, cLo, cHi, dLo, dHi;
+        arg(int(st.alphaIn[0]), aLo, aHi); arg(int(st.alphaIn[1]), bLo, bHi);
+        arg(int(st.alphaIn[2]), cLo, cHi); arg(int(st.alphaIn[3]), dLo, dHi);
+        float rLo, rHi;
+        if (int(st.alphaOp) >= 8) {   // compare ops: d + (cond ? c : 0)
+            rLo = dLo + std::min(0.0f, cLo); rHi = dHi + std::max(0.0f, cHi);
+        } else {
+            float mLo = 1.0e30f, mHi = -1.0e30f;
+            for (int corner = 0; corner < 8; ++corner) {
+                const float a = (corner & 1) ? aHi : aLo, b = (corner & 2) ? bHi : bLo, c = (corner & 4) ? cHi : cLo;
+                const float v = a * (1.0f - c) + b * c;
+                mLo = std::min(mLo, v); mHi = std::max(mHi, v);
+            }
+            if (int(st.alphaOp) == 0) { rLo = dLo + mLo; rHi = dHi + mHi; }
+            else                      { rLo = dLo - mHi; rHi = dHi - mLo; }
+            const float bias  = st.alphaBias == GX_TB_ADDHALF ? 0.5f : st.alphaBias == GX_TB_SUBHALF ? -0.5f : 0.0f;
+            const float scale = st.alphaScale == GX_CS_SCALE_2 ? 2.0f : st.alphaScale == GX_CS_SCALE_4 ? 4.0f
+                              : st.alphaScale == GX_CS_DIVIDE_2 ? 0.5f : 1.0f;
+            rLo = (rLo + bias) * scale; rHi = (rHi + bias) * scale;
+        }
+        const float cl = st.alphaClamp ? 0.0f : -4.0f, cu = st.alphaClamp ? 1.0f : 4.0f;
+        rLo = std::min(std::max(rLo, cl), cu); rHi = std::min(std::max(rHi, cl), cu);
+        const int out = int(st.alphaOutReg) & 3;
+        lo[out] = rLo; hi[out] = rHi;
+    }
+    const float pl = lo[0], ph = hi[0];   // final alpha is TEVPREV's
+    if (outLo) *outLo = pl;
+    if (outHi) *outHi = ph;
+    // 8-bit rounding plus a half-precision margin, except at 0 and 1.
+    const float half8 = 0.5f / 255.0f, m = 1.5f / 255.0f;
+    const float mLo = (pl <= 0.0f || pl >= 1.0f) ? 0.0f : m;
+    const float mHi = (ph <= 0.0f || ph >= 1.0f) ? 0.0f : m;
+    auto judge = [&](GXCompare c, float ref, int& pass, int& fail) {
+        pass = fail = 0;
+        switch (int(c)) {
+        case GX_NEVER:   fail = 1; break;
+        case GX_ALWAYS:  pass = 1; break;
+        case GX_GEQUAL:  if (pl >= ref - half8 + mLo) pass = 1; else if (ph < ref - half8 - mHi) fail = 1; break;
+        case GX_GREATER: if (pl >= ref + half8 + mLo) pass = 1; else if (ph < ref + half8 - mHi) fail = 1; break;
+        case GX_LESS:    if (ph < ref - half8 - mHi) pass = 1; else if (pl >= ref - half8 + mLo) fail = 1; break;
+        case GX_LEQUAL:  if (ph < ref + half8 - mHi) pass = 1; else if (pl >= ref + half8 + mLo) fail = 1; break;
+        default: break;   // EQUAL / NEQUAL: undecided
+        }
+    };
+    int p0, f0, p1, f1;
+    judge(sAlphaComp0, sAlphaRef0, p0, f0);
+    judge(sAlphaComp1, sAlphaRef1, p1, f1);
+    switch (int(sAlphaOp)) {
+    case GX_AOP_AND: if (p0 && p1) return 1; if (f0 || f1) return 2; return 0;
+    case GX_AOP_OR:  if (p0 || p1) return 1; if (f0 && f1) return 2; return 0;
+    default: return 0;
+    }
+}
+
+static void use_program_for_current_state_vita() {
+    uint64_t vh;
+    const VitaVsKey vk = vita_vs_key_and_hash(&vh);
+    const uint64_t ident = (sKeyDirty & (kKeyTev | kKeyChan | kKeyAlpha)) ? tev_config_fingerprint() : sKeyBlockTevIdent;
+    if (!(sVitaStageLoKeyCall == sKeyCalls && sKeyDirty == 0 && !sChanSrcDirty)) vita_alpha_env_refresh(&vk);
+    const unsigned variant = vita_alpha_variant_bits();
+    const bool soft = (variant & 1u) != 0;
+    const bool tested = !(sAlphaComp0 == GX_ALWAYS && sAlphaComp1 == GX_ALWAYS);
+    const bool zeroOnly = (variant & 2u) != 0;
+    uint64_t env = 0;
+    if (tested) {
+        const int n = std::min<int>(sNumTevStages, GX_MAXTEVSTAGE);
+        for (int s = 0; s < n; ++s) env = env * 257u + sVitaStageLo[s];
+        env = (env * 257u + uint64_t(sVitaRasAlphaMin * 255.0f)) * 0x9E3779B97F4A7C15ull;
+        if (zeroOnly) env ^= 0x2E7A5C1D9B3F0481ull;
+        env ^= vita_verdict_input_hash() * 0xC2B2AE3D27D4EB4Full;
+    }
+    if (sTevRegisters[GX_TEVREG0][0] < 0.0f) env ^= 0x6D0F1E5A3C2B4987ull;
+    const uint64_t fp = ident ^ (vh * 0x9E3779B97F4A7C15ull) ^ (soft ? kVitaSoftAlphaTag : 0ull) ^ env;
+    VitaProgSel& sel = vita_prog_sel(fp);
+    const size_t selIdx = size_t(&sel - sVitaProgSel);
+    if (sel.progIdx != -3 && sel.fp == fp) {
+        const uint8_t kind = sVitaProgSelKind[selIdx];
+        sVitaDrawRejected = kind == 3;
+        sVitaCurAlphaKind = tested ? kind : 0xFF;
+        vita_bind_program_for_index(sel.progIdx, sel.pair);
+        sVitaLastKeyHash = sel.hash;
+        return;
+    }
+    PcTevShaderKey key;
+    build_tev_shader_key(key);
+    const uint64_t hash = pc_tev_hash_key(key);
+    vita_gx_capture_key(key, hash);
+    const int verdict = tested ? vita_alpha_test_verdict(nullptr, nullptr) : 0;
+    const bool elide = verdict == 1 || zeroOnly;
+    sVitaDrawRejected = verdict == 2;
+    sVitaProgSelKind[selIdx] = uint8_t(verdict == 2 ? 3 : elide ? 2 : soft ? 1 : 0);
+    sVitaCurAlphaKind = tested ? sVitaProgSelKind[selIdx] : 0xFF;
+    const uint64_t lookup = elide ? (hash ^ kVitaElideAlphaTag) : soft ? (hash ^ kVitaSoftAlphaTag) : hash;
+    sVitaLastKeyHash = lookup;
+
+    // Baked pair.
+    auto pit = sVitaPairByKey.find(vita_pair_key(lookup, vh));
+    if (pit != sVitaPairByKey.end()) {
+        vita_bind_program_for_index(0, pit->second);
+        sel.fp = fp; sel.hash = lookup; sel.progIdx = 0; sel.pair = pit->second;
+        return;
+    }
+    // Unbaked pair: capture it and use the ubershader vertex program.
+    vita_gx_capture_vs_pair(hash, vk);
+    {
+        // Missing pairs already reported.
+        static uint64_t reportedPairs[64][2]; static unsigned nPairs = 0;
+        bool known = false;
+        for (unsigned i = 0; i < nPairs; ++i) if (reportedPairs[i][0] == lookup && reportedPairs[i][1] == vh) { known = true; break; }
+        if (!known && nPairs < 64) {
+            reportedPairs[nPairs][0] = lookup; reportedPairs[nPairs][1] = vh; ++nPairs;
+            printf("[VITA VS] pair (config %llu, vertex %llu) NOT BAKED -> ubershader vertex program\n",
+                   (unsigned long long)lookup, (unsigned long long)vh);
+        }
+    }
+
+    // Baked per-config program.
+    auto found = sTevProgramByHash.find(lookup);
+    if (found != sTevProgramByHash.end()) {
+        TevProgramEntry& entry = sTevPrograms[size_t(found->second)];
+        const GLuint want = entry.program;
+        if (sCurrentProgram != want) {
+            glUseProgram_ptr(want);
+            invalidate_uniform_cache_on_program_switch();
+            sCurrentProgram = want;
+            sCheckProgram = want;
+            sLocP = &entry.locations;
+        }
+        sel.fp = fp; sel.hash = lookup; sel.progIdx = found->second; sel.pair = -1;
+        return;
+    }
+
+    // Unbaked config: fallback program.
+    {
+        static uint64_t reported[64]; static unsigned nReported = 0;
+        bool known = false;
+        for (unsigned i = 0; i < nReported; ++i) if (reported[i] == hash) { known = true; break; }
+        if (!known && nReported < 64) {
+            reported[nReported++] = hash;
+            printf("[VITA TEV] config %llu NOT BAKED -> ubershader (stages=%u)\n",
+                   (unsigned long long)hash, (unsigned)key.numStages);
+        }
+    }
+    const bool at = vita_gx_key_has_alpha_test(key);
+    GLuint prog = sVitaNeedPalette ? (at ? sVitaFbAtProg : sVitaFbNoatProg)
+                                   : (at ? sVitaFbAtProgS : sVitaFbNoatProgS);
+    if (prog && sCurrentProgram != prog) {
+        glUseProgram_ptr(prog);
+        invalidate_uniform_cache_on_program_switch();
+        sCurrentProgram = prog;
+        sCheckProgram = prog;
+        sLocP = sVitaNeedPalette ? (at ? &sVitaFbAtLoc : &sVitaFbNoatLoc)
+                                 : (at ? &sVitaFbAtLocS : &sVitaFbNoatLocS);
+    }
+    if (prog) { sel.fp = fp; sel.hash = hash; sel.progIdx = at ? -2 : -1; sel.pair = -1; }
+}
+#endif // __vita__
+
+
+#ifndef __vita__
+// Desktop TEV config capture (NECTAR_TEV_CAPTURE).
+static void pc_tev_capture(const PcTevShaderKey& key, uint64_t hash) {
+    static const char* path = std::getenv("NECTAR_TEV_CAPTURE");
+    if (!path) return;
+    static std::unordered_set<uint64_t> seen;
+    if (!seen.insert(hash).second) return;
+    FILE* f = fopen(path, "ab");
+    if (!f) return;
+    const uint16_t n = (uint16_t)sizeof(PcTevShaderKey);
+    fwrite(&hash, sizeof(hash), 1, f);
+    fwrite(&n, sizeof(n), 1, f);
+    fwrite(&key, n, 1, f);
+    fclose(f);
+    fprintf(stderr, "[PC TEV] captured config %llu stages=%u (%u unique so far)\n",
+            (unsigned long long)hash, (unsigned)key.numStages, (unsigned)seen.size());
+}
+#endif
+
 static void use_program_for_current_state() {
+#ifdef __vita__
+    use_program_for_current_state_vita();
+#else
+    if (std::getenv("NECTAR_TEV_CAPTURE")) {
+        PcTevShaderKey capKey;
+        build_tev_shader_key(capKey);
+        pc_tev_capture(capKey, pc_tev_hash_key(capKey));
+    }
     if (!sSpecialiseShaders || sSpecialiseFailed
         || int(sNumTevStages) > sSpecialiseMaxStages) {
         if (sCurrentProgram != sShaderProgram) {
@@ -2998,6 +5191,7 @@ static void use_program_for_current_state() {
         return;
     }
     const uint64_t hash = pc_tev_hash_key(key);
+    sVitaLastKeyHash = hash;
 
     for (TevProgramEntry& entry : sTevPrograms) {
         if (entry.hash != hash || !(entry.key == key)) continue;
@@ -3061,6 +5255,7 @@ static void use_program_for_current_state() {
     sLoc = entry.locations;
     sLastTevKey = key;
     sLastTevKeyValid = true;
+#endif
 }
 
 void pc_gfx_set_shader_specialisation(bool enabled) {
@@ -3076,23 +5271,6 @@ size_t pc_gfx_get_specialised_program_count(void) {
     return sTevPrograms.size();
 }
 
-// Per-frame submission cost, accumulated across every GX primitive and handed
-// to the tick profiler once per frame. Only touched when PIKMIN_TICK_STATS is
-// on: three clock reads per draw would otherwise be the very overhead under
-// investigation.
-static double sSubmitUniformMs = 0.0;
-static double sSubmitVboMs     = 0.0;
-static double sSubmitDrawMs    = 0.0;
-static uint32_t sSubmitDraws   = 0;
-static uint64_t sSubmitVerts   = 0;
-static uint32_t sSubmitPrims   = 0;  // GX primitives, i.e. draws before batching
-// Display-list parse failures this frame. The individual messages report once
-// and then go quiet, which hides whether a fault happened at startup or is
-// recurring every frame -- the difference between a cosmetic warning and a
-// parser that is desynced and drawing garbage.
-static uint32_t sDlDesyncs   = 0;
-static uint32_t sBadMtxIdx   = 0;
-static uint32_t sWildVerts   = 0;
 // Captured at the position fetch so a wild vertex can say which of the three
 // inputs to `base + index * stride` was wrong.
 static u16      sLastPosIndex  = 0;
@@ -3137,16 +5315,6 @@ static void report_desync(const char* what, const void* list, size_t offset, u32
     fprintf(stderr, "  stride=%u bytes\n", stride);
 }
 
-// Consecutive draws that share every piece of state a batch would have to
-// share. sRunKey is the previous draw's key; a run ends when it differs.
-static uint64_t sRunKey        = 0;
-static bool     sHaveRunKey    = false;
-static uint32_t sRunCurrent    = 0;  // draws in the run being built
-static uint32_t sRunLongest    = 0;
-static uint32_t sRunCount      = 0;  // runs closed this frame
-static uint32_t sRunGlBreaks   = 0;  // of which, broken by GL pipeline state
-static uint64_t sRunEpoch      = 0;  // GL epoch the current run was opened at
-
 // Eight bytes per round rather than one. This runs for every GX primitive --
 // 25.000 times in a heavy frame -- because the batcher, not just the profiler,
 // depends on it: a byte-at-a-time FNV over the ~2 KB of live state measured
@@ -3174,6 +5342,65 @@ static inline uint64_t hash_bytes(uint64_t h, const void* data, size_t bytes) {
 // primitive class. Deliberately over-inclusive: a key that is too coarse would
 // report runs that a real batcher could not merge, which is the one error that
 // would make this measurement worse than useless.
+// TEV constants the active stages read.
+static inline unsigned vita_tev_stage_reads(const TevStageState& st) {
+    unsigned m = 0;
+    for (int a = 0; a < 4; ++a) {
+        switch (st.colorIn[a]) {
+        case GX_CC_C0: case GX_CC_A0: m |= 1u; break;
+        case GX_CC_C1: case GX_CC_A1: m |= 2u; break;
+        case GX_CC_C2: case GX_CC_A2: m |= 4u; break;
+        case GX_CC_KONST:             m |= 8u; break;
+        default: break;
+        }
+        switch (st.alphaIn[a]) {
+        case GX_CA_A0:    m |= 1u; break;
+        case GX_CA_A1:    m |= 2u; break;
+        case GX_CA_A2:    m |= 4u; break;
+        case GX_CA_KONST: m |= 8u; break;
+        default: break;
+        }
+    }
+    return m;
+}
+static unsigned vita_tev_reads_mask() {
+    unsigned m = 0;
+    const int stages = sNumTevStages < GX_MAXTEVSTAGE ? sNumTevStages : GX_MAXTEVSTAGE;
+    for (int i = 0; i < stages; ++i) m |= vita_tev_stage_reads(sTevStages[i]);
+    return m;
+}
+static uint64_t hash_tev_constants_m(uint64_t h, unsigned m) {
+    h = hash_bytes(h, &m, sizeof(m));
+    h = hash_bytes(h, sTevRegisters[GX_TEVPREV], sizeof(sTevRegisters[GX_TEVPREV]));
+    if (m & 1u) h = hash_bytes(h, sTevRegisters[GX_TEVREG0], sizeof(sTevRegisters[GX_TEVREG0]));
+    if (m & 2u) h = hash_bytes(h, sTevRegisters[GX_TEVREG1], sizeof(sTevRegisters[GX_TEVREG1]));
+    if (m & 4u) h = hash_bytes(h, sTevRegisters[GX_TEVREG2], sizeof(sTevRegisters[GX_TEVREG2]));
+    if (m & 8u) h = hash_bytes(h, sKonstColors, sizeof(sKonstColors));
+    return h;
+}
+static uint64_t hash_tev_constants(uint64_t h) { return hash_tev_constants_m(h, vita_tev_reads_mask()); }
+#ifdef __vita__
+// Canonical batch key.
+static unsigned sVitaUsedMapMask = 0xFFu;   // maps an enabled stage samples
+static bool     sVitaChanBlockC1 = false;   // channel block hashed with channel 1 read
+static inline uint8_t vita_palette_bucket(int slots) { return uint8_t(slots <= 1 ? 1 : slots <= 3 ? 3 : slots <= 6 ? 6 : 10); }
+static inline unsigned vita_used_map_mask_live() {
+    unsigned m = 0;
+    for (u8 stage = 0; stage < sNumTevStages && stage < GX_MAXTEVSTAGE; ++stage) {
+        const TevStageState& st = sTevStages[stage];
+        if (st.textureEnabled && st.texMap >= GX_TEXMAP0 && st.texMap < 8) m |= 1u << unsigned(st.texMap);
+    }
+    return m;
+}
+static inline void vita_key_textures(GLuint tex[8], uint8_t has[8], unsigned mask) {
+    for (int i = 0; i < 8; ++i) {
+        const bool keep = (mask >> i) & 1u;
+        tex[i] = keep ? sActiveGLTextures[i] : 0;
+        has[i] = (keep && sHasActiveTextures[i]) ? 1 : 0;
+    }
+}
+#endif
+#ifndef __vita__
 static uint64_t compute_batch_state_key() {
     uint64_t h = 14695981039346656037ull;
     h = hash_bytes(h, &sCurrentProgram, sizeof(sCurrentProgram));
@@ -3202,8 +5429,7 @@ static uint64_t compute_batch_state_key() {
     h = hash_bytes(h, &sAlphaOp, sizeof(sAlphaOp));
     h = hash_bytes(h, &sAlphaRef0, sizeof(sAlphaRef0));
     h = hash_bytes(h, &sAlphaRef1, sizeof(sAlphaRef1));
-    h = hash_bytes(h, sTevRegisters, sizeof(sTevRegisters));
-    h = hash_bytes(h, sKonstColors, sizeof(sKonstColors));
+    h = hash_tev_constants(h);
     h = hash_bytes(h, &sNumTevStages, sizeof(sNumTevStages));
     const int stages = sNumTevStages < GX_MAXTEVSTAGE ? sNumTevStages : GX_MAXTEVSTAGE;
     for (int i = 0; i < stages; ++i) {
@@ -3212,6 +5438,7 @@ static uint64_t compute_batch_state_key() {
         h = hash_bytes(h, &sTevTexSwapSel[i], sizeof(sTevTexSwapSel[i]));
     }
     h = hash_bytes(h, sTevSwapModes, sizeof(sTevSwapModes));
+    { const uint8_t c1 = sVitaColor1FromAttr ? 1 : 0; h = hash_bytes(h, &c1, 1); }
     for (int slot = 0; slot < 8; ++slot) {
         h = hash_bytes(h, &sTexCoordGen[slot], sizeof(sTexCoordGen[slot]));
         if (sTexCoordGen[slot].active) {
@@ -3233,11 +5460,189 @@ static uint64_t compute_batch_state_key() {
     h = hash_bytes(h, &primClass, sizeof(primClass));
     return h;
 }
+#else
+// Block-cached batch key.
+struct VitaKeyParts {
+    uint64_t tev, chan, alpha, texgen, mtx;
+    uint64_t fog;           // sFogHash
+    uint32_t proj;
+    GLuint   tex[8];
+    uint8_t  has[8];
+    int      primClass;
+    uint8_t  pretransformed, palette, pad[2];
+    uint8_t  stageLo[16];   // per-stage texture alpha lower bounds
+    uint8_t  alphaVariant;  // soft / zero-only alpha test bits
+    uint8_t  reg0Neg;       // register 0 negative
+    uint8_t  pad2[2];
+    uint32_t rasBits;       // vertex alpha bound float bits, tested draws only
+};
 
-// Called once per draw while PIKMIN_TICK_STATS is on. Splits run breaks by
-// cause: a break that a batcher could never avoid (GL pipeline state changed
-// outside our reach) counts differently from one caused by material state.
-static inline double submit_clock_ms();
+// Fast path inputs.
+struct VitaDrawInputs { uint32_t proj; uint64_t mtx; GLuint tex[8]; uint8_t has[8]; int primClass; uint8_t pretransformed, palette, rasLo, pad;
+                        uint64_t fog, uv; uint8_t alphaVariant, reg0Neg, pad2[2]; uint32_t texAlphaGen, rasBits; };
+static VitaDrawInputs sVitaLastIn;
+// Key from its parts.
+static inline uint64_t vita_key_fold(const VitaKeyParts& k) {
+    uint64_t a = 0x9E3779B97F4A7C15ull, b = 0xC2B2AE3D27D4EB4Full;
+    uint64_t t[4], sl[2], has;
+    memcpy(t, k.tex, sizeof(t));
+    memcpy(sl, k.stageLo, sizeof(sl));
+    memcpy(&has, k.has, sizeof(has));
+    static_assert(sizeof(k.tex) == sizeof(t) && sizeof(k.stageLo) == sizeof(sl) && sizeof(k.has) == sizeof(has), "key fold word layout");
+    a = vita_mix64(a, k.tev);    b = vita_mix64(b, k.chan);
+    a = vita_mix64(a, k.alpha);  b = vita_mix64(b, k.texgen);
+    a = vita_mix64(a, k.mtx);    b = vita_mix64(b, k.fog);
+    a = vita_mix64(a, t[0]);     b = vita_mix64(b, t[1]);
+    a = vita_mix64(a, t[2]);     b = vita_mix64(b, t[3]);
+    a = vita_mix64(a, has);      b = vita_mix64(b, sl[0]);
+    a = vita_mix64(a, sl[1]);
+    b = vita_mix64(b, (uint64_t(k.proj) << 32) | (uint64_t(uint8_t(k.primClass)) << 24) | (uint64_t(k.pretransformed) << 16)
+                      | (uint64_t(k.palette) << 8) | uint64_t(k.pad[0]));
+    a = vita_mix64(a, (uint64_t(k.rasBits) << 32) | (uint64_t(k.pad[1]) << 16) | (uint64_t(k.alphaVariant) << 8) | uint64_t(k.reg0Neg));
+    return vita_mix64(vita_mix64(a, b), 0x94D049BB133111EBull);
+}
+static uint64_t sVitaLastFast = 0;
+static bool sVitaLastFastValid = false;
+static uint64_t compute_batch_state_key() {
+    ++sKeyCalls;
+    // Fast path: nothing moved, same key.
+    VitaDrawInputs in;
+    memset(&in, 0, sizeof(in));
+    in.proj = sProjMtxGen;
+    if (!sVerticesPretransformed) {
+        const u32 id = sCurrentPosMtxId < 64 ? sCurrentPosMtxId : 0;
+        in.mtx = (uint64_t(id) << 40) ^ (uint64_t(sPosMtxGen[id]) << 20) ^ uint64_t(sNrmMtxGen[id]);
+    }
+    vita_key_textures(in.tex, in.has, sVitaUsedMapMask);
+    switch (sCurrentPrimType) {
+        case GX_LINES: case GX_LINESTRIP: in.primClass = 1; break;
+        case GX_POINTS:                   in.primClass = 2; break;
+        default:                          in.primClass = 0; break;
+    }
+    const bool elisionReads = !(sAlphaComp0 == GX_ALWAYS && sAlphaComp1 == GX_ALWAYS);
+    in.pretransformed = sVerticesPretransformed ? 1 : 0;
+    in.palette = vita_palette_bucket(sVitaPaletteSlots);
+    in.rasLo = elisionReads ? uint8_t(sVitaRasAlphaMin * 255.0f) : 0;
+    if (elisionReads) { memcpy(&in.rasBits, &sVitaRasAlphaMin, 4); in.texAlphaGen = sActiveTexAlphaGen; }
+    in.fog = sFogHash;
+    in.alphaVariant = uint8_t(vita_alpha_variant_bits());
+    in.reg0Neg = sTevRegisters[GX_TEVREG0][0] < 0.0f ? 1 : 0;
+    if (sVitaListUvValid && elisionReads) in.uv = sVitaListUvHash;
+    if (sVitaLastFastValid && sKeyDirty == 0 && !sChanSrcDirty && memcmp(&in, &sVitaLastIn, sizeof(in)) == 0) return sVitaLastFast;
+    bool tevFresh = false;
+    uint64_t tevStagePart = 0;
+    if (sKeyDirty & kKeyTev) {
+        // One walk over the stages.
+        bool c1Read = false;
+        const int n = sNumTevStages < GX_MAXTEVSTAGE ? int(sNumTevStages) : GX_MAXTEVSTAGE;
+        const int fpN = vita_fp_stage_count();   // >= n: the fingerprint always covers stage 0
+        uint64_t h = vita_mix64(14695981039346656037ull, uint64_t(sNumTevStages));
+        uint64_t f = vita_mix64(14695981039346656037ull, uint64_t(fpN));
+        unsigned reads = 0, used = 0;
+        for (int i = 0; i < fpN; ++i) {
+            const uint64_t w = vita_tev_stage_word(i);
+            f = vita_mix64(f, w);
+            if (i >= n) continue;
+            const TevStageState& st = sTevStages[i];
+            h = vita_mix64(h, w);
+            // konst selectors
+            h = vita_mix64(h, (uint64_t(uint32_t(sKonstColorSel[i])) << 32) | uint64_t(uint32_t(sKonstAlphaSel[i])));
+            reads |= vita_tev_stage_reads(st);
+            if (st.textureEnabled && st.texMap >= GX_TEXMAP0 && st.texMap < 8) used |= 1u << unsigned(st.texMap);
+            if (st.rasChannel == 1) c1Read = true;
+        }
+        h = vita_fp_stage_tail(h);   // swap tables and the register-1 flag
+        sKeyBlockTev = hash_tev_constants_m(h, reads);
+        sVitaUsedMapMask = used;
+        tevStagePart = vita_fp_stage_tail(f);
+        tevFresh = true;
+        if (c1Read != sVitaChanBlockC1) sKeyDirty |= kKeyChan;
+    }
+    if (sKeyDirty & kKeyChan) {
+        uint64_t h = 0x9E3779B97F4A7C15ull;
+        // Channel state that reaches the pixels.
+        GfxChannel canon[2];
+        memcpy(canon, sChannels, sizeof(canon));
+        {
+            bool chan1Read = false;
+            const int stages = std::min<int>(sNumTevStages, GX_MAXTEVSTAGE);
+            for (int i = 0; i < stages; ++i) if (sTevStages[i].rasChannel == 1) { chan1Read = true; break; }
+            sVitaChanBlockC1 = chan1Read;
+            if (!chan1Read) canon[1] = GfxChannel();
+            for (int ch = 0; ch < 2; ++ch) {
+                GfxChannel& c = canon[ch];
+                if (!c.enabled) { c.ambSrc = GX_SRC_REG; c.lightMask = 0; c.diffFn = GX_DF_NONE; c.attnFn = GX_AF_NONE; c.ambColor[0] = c.ambColor[1] = c.ambColor[2] = 0.0f; }
+                if (!c.alphaEnabled) { c.alphaAmbSrc = GX_SRC_REG; c.alphaLightMask = 0; c.alphaDiffFn = GX_DF_NONE; c.alphaAttnFn = GX_AF_NONE; c.ambColor[3] = 0.0f; }
+                if (c.matSrc == GX_SRC_VTX) c.matColor[0] = c.matColor[1] = c.matColor[2] = 1.0f;
+                if (c.alphaMatSrc == GX_SRC_VTX) c.matColor[3] = 1.0f;
+            }
+        }
+        h = hash_bytes(h, canon, sizeof(canon));
+        for (int ch = 0; ch < 2; ++ch) {
+            if (!canon[ch].enabled) continue;
+            const u32 mask = canon[ch].lightMask;
+            for (int i = 0; i < 8; ++i) {
+                if (mask & (1u << i)) h = hash_bytes(h, &sLights[i], sizeof(sLights[i]));
+            }
+        }
+        sKeyBlockChan = h;
+    }
+    if (sKeyDirty & kKeyAlpha) {
+        uint64_t h = 0xC2B2AE3D27D4EB4Full;
+        h = hash_bytes(h, &sAlphaComp0, sizeof(sAlphaComp0));
+        h = hash_bytes(h, &sAlphaComp1, sizeof(sAlphaComp1));
+        h = hash_bytes(h, &sAlphaOp, sizeof(sAlphaOp));
+        h = hash_bytes(h, &sAlphaRef0, sizeof(sAlphaRef0));
+        h = hash_bytes(h, &sAlphaRef1, sizeof(sAlphaRef1));
+        sKeyBlockAlpha = h;
+    }
+    if (sKeyDirty & kKeyTexGen) {
+        uint64_t h = 0x51A3B7C9D2E4F601ull;
+        for (int slot = 0; slot < 8; ++slot) {
+            h = hash_bytes(h, &sTexCoordGen[slot], sizeof(sTexCoordGen[slot]));
+            if (sTexCoordGen[slot].active) {
+                const u32 m = sTexCoordGen[slot].mtxIdx < 64 ? sTexCoordGen[slot].mtxIdx : 0;
+                const uint64_t texRevision = (uint64_t(m) << 32) ^ uint64_t(sTexMtxGen[m]);
+                h = hash_bytes(h, &texRevision, sizeof(texRevision));
+            }
+        }
+        sKeyBlockTexGen = h;
+    }
+    // Program identity refresh.
+    if ((sKeyDirty & (kKeyTev | kKeyAlpha)) || sChanSrcDirty) {
+        sKeyBlockTevIdent = tevFresh ? vita_fp_finish(tevStagePart) : tev_config_fingerprint();
+        sChanSrcDirty = false;
+    }
+    sKeyDirty = 0;
+
+    VitaKeyParts k;
+    memset(&k, 0, sizeof(k));
+    k.tev = sKeyBlockTev; k.chan = sKeyBlockChan; k.alpha = sKeyBlockAlpha; k.texgen = sKeyBlockTexGen;
+    if (!sVerticesPretransformed) {
+        const u32 id = sCurrentPosMtxId < 64 ? sCurrentPosMtxId : 0;
+        k.mtx = (uint64_t(id) << 40) ^ (uint64_t(sPosMtxGen[id]) << 20) ^ uint64_t(sNrmMtxGen[id]);
+    }
+    k.fog = in.fog;
+    k.alphaVariant = in.alphaVariant;
+    k.reg0Neg = in.reg0Neg;
+    k.proj = sProjMtxGen;
+    vita_key_textures(in.tex, in.has, sVitaUsedMapMask);
+    memcpy(k.tex, in.tex, sizeof(k.tex));
+    memcpy(k.has, in.has, sizeof(k.has));
+    k.primClass = in.primClass;
+    k.pretransformed = in.pretransformed;
+    k.palette = in.palette;
+    k.pad[0] = in.rasLo;      // alpha-test elision input
+    k.rasBits = in.rasBits;
+    vita_alpha_env_refresh(nullptr);
+    sVitaStageLoKeyCall = sKeyCalls;
+    memcpy(k.stageLo, sVitaStageLo, sizeof(k.stageLo) < sizeof(sVitaStageLo) ? sizeof(k.stageLo) : sizeof(sVitaStageLo));
+    const uint64_t fast = vita_key_fold(k);
+    sVitaLastIn = in; sVitaLastFast = fast; sVitaLastFastValid = true;
+    return fast;
+}
+#endif
+
 
 // ── Primitive batching (PERF-NATIVE-002) ────────────────────────────────────
 //
@@ -3254,7 +5659,8 @@ static inline double submit_clock_ms();
 // be flushed before any GL mutation, and drawn *before* the next batch's
 // uniforms are written. Material state needs no flush of its own: it is
 // covered by the state key, which is compared on every primitive.
-static std::vector<Vertex> sBatchVerts;
+// Batch vertices.
+static PcVertexVec sBatchVerts;
 static bool     sBatchOpen = false;
 static uint64_t sBatchKey  = 0;
 static GLenum   sBatchMode = GL_TRIANGLES;
@@ -3264,9 +5670,55 @@ static uint32_t sBatchPrims = 0;   // primitives merged into the open batch
 // of different topologies can still share one draw. Order is preserved
 // exactly, and so is winding: a strip's odd triangles keep the swap that
 // GL_TRIANGLE_STRIP would have applied, or every other face would flip.
+#ifdef __vita__
+// Vertex count the batch expansion appends.
+static inline size_t vita_expand_count(GXPrimitive type, size_t n) {
+    switch (type) {
+    case GX_TRIANGLES: case GX_LINES: case GX_POINTS: return n;
+    case GX_TRIANGLESTRIP: case GX_TRIANGLEFAN:       return n > 2 ? (n - 2) * 3 : 0;
+    case GX_QUADS:                                    return (n / 4) * 6;
+    case GX_LINESTRIP:                                return n > 1 ? (n - 1) * 2 : 0;
+    default:                                          return 0;
+    }
+}
+static void vita_expand_into(GXPrimitive type, const Vertex* v, size_t n, Vertex* d) {
+    switch (type) {
+    case GX_TRIANGLES: case GX_LINES: case GX_POINTS:
+        if (n) memcpy(d, v, n * sizeof(Vertex));
+        break;
+    case GX_TRIANGLESTRIP:
+        for (size_t i = 2; i < n; ++i, d += 3) {
+            if ((i & 1) == 0) { d[0] = v[i - 2]; d[1] = v[i - 1]; }
+            else              { d[0] = v[i - 1]; d[1] = v[i - 2]; }
+            d[2] = v[i];
+        }
+        break;
+    case GX_TRIANGLEFAN:
+        for (size_t i = 2; i < n; ++i, d += 3) { d[0] = v[0]; d[1] = v[i - 1]; d[2] = v[i]; }
+        break;
+    case GX_QUADS:
+        for (size_t i = 0; i + 3 < n; i += 4, d += 6) {
+            d[0] = v[i]; d[1] = v[i + 1]; d[2] = v[i + 2];
+            d[3] = v[i]; d[4] = v[i + 2]; d[5] = v[i + 3];
+        }
+        break;
+    case GX_LINESTRIP:
+        for (size_t i = 1; i < n; ++i, d += 2) { d[0] = v[i - 1]; d[1] = v[i]; }
+        break;
+    default:
+        break;
+    }
+}
+#endif
 static void append_primitive_to_batch() {
-    const std::vector<Vertex>& v = sVertexStream;
+    const PcVertexVec& v = sVertexStream;
     const size_t n = v.size();
+#ifdef __vita__
+    const size_t cnt = vita_expand_count(sCurrentPrimType, n);
+    const size_t base = sBatchVerts.size();
+    sBatchVerts.resize(base + cnt);
+    vita_expand_into(sCurrentPrimType, v.data(), n, sBatchVerts.data() + base);
+#else
     switch (sCurrentPrimType) {
     case GX_TRIANGLES:
         sBatchVerts.insert(sBatchVerts.end(), v.begin(), v.end());
@@ -3290,16 +5742,18 @@ static void append_primitive_to_batch() {
             sBatchVerts.push_back(v[i]);
         }
         break;
-    case GX_QUADS:
-        for (size_t i = 0; i + 3 < n; i += 4) {
-            sBatchVerts.push_back(v[i]);
-            sBatchVerts.push_back(v[i + 1]);
-            sBatchVerts.push_back(v[i + 2]);
-            sBatchVerts.push_back(v[i]);
-            sBatchVerts.push_back(v[i + 2]);
-            sBatchVerts.push_back(v[i + 3]);
+    case GX_QUADS: {
+        // Six copies per quad.
+        const size_t quads = n / 4;
+        const size_t base = sBatchVerts.size();
+        sBatchVerts.resize(base + quads * 6);
+        Vertex* d = sBatchVerts.data() + base;
+        for (size_t i = 0; i + 3 < n; i += 4, d += 6) {
+            d[0] = v[i]; d[1] = v[i + 1]; d[2] = v[i + 2];
+            d[3] = v[i]; d[4] = v[i + 2]; d[5] = v[i + 3];
         }
         break;
+    }
     case GX_LINES:
         sBatchVerts.insert(sBatchVerts.end(), v.begin(), v.end());
         break;
@@ -3313,6 +5767,7 @@ static void append_primitive_to_batch() {
         sBatchVerts.insert(sBatchVerts.end(), v.begin(), v.end());
         break;
     }
+#endif
 }
 
 // PIKMIN_BATCH=0 draws every primitive on its own, exactly as before this
@@ -3336,6 +5791,86 @@ static GLenum batch_mode_for(GXPrimitive prim) {
     }
 }
 
+#ifdef __vita__
+// Vita vertex submission: VBO ring.
+static int      sVitaSeg = 0;           // segment written this frame
+static size_t   sVitaSegWrite = 0;      // bytes written into it so far
+
+// Next VBO ring segment.
+static void vita_rotate_vbo_segment() {
+    sVitaSeg = (sVitaSeg + 1) % kVitaVboSegs;
+    sVitaSegWrite = 0;
+}
+
+// GXM fast path.
+static GLuint      sVitaGxmBound[8] = {};            // textures set via sceGxmSetFragmentTexture
+// Reset the GXM texture shadow after the frame's first draw.
+static inline void vita_gxm_shadow_after_first_draw() {
+    for (int m = 0; m < 8; ++m) sVitaGxmBound[m] = 0;
+}
+static void vita_gxm_shadow_invalidate() { for (int m = 0; m < 8; ++m) sVitaGxmBound[m] = 0; }
+const size_t kVitaAttrOff[8] = {
+    offsetof(Vertex, x), offsetof(Vertex, r), offsetof(Vertex, nx),
+    offsetof(Vertex, tex), offsetof(Vertex, tex) + 8, offsetof(Vertex, tex) + 16, offsetof(Vertex, tex) + 24,
+    offsetof(Vertex, mtxIdx) };
+const GLint kVitaAttrSize[8] = { 3, 4, 3, 2, 2, 2, 2, 1 };
+
+// Indexed draw from a cached display list.
+static void vita_fast_draw_indexed(GLuint vbo, GLuint ibo, GLsizei firstIndex, GLsizei indexCount) {
+    if (indexCount <= 0) return;
+    vita_img_flush(sCurrentProgram);
+    if (sVitaFrameFirstDraw) {
+        // First draw of the frame: vitaGL normal path.
+        glBindBuffer_ptr(GL_ARRAY_BUFFER, vbo);
+        for (int i = 0; i < 8; ++i)
+            glVertexAttribPointer_ptr(GLuint(i), kVitaAttrSize[i], GL_FLOAT, GL_FALSE, sizeof(Vertex),
+                                      static_cast<const char*>(nullptr) + kVitaAttrOff[i]);
+        glBindBuffer_ptr(GL_ELEMENT_ARRAY_BUFFER, ibo);
+        sVitaFrameFirstDraw = false;
+        rec_fast_mode(0);
+        glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_SHORT, static_cast<const char*>(nullptr) + size_t(firstIndex) * 2u);
+        rec_fast_mode(1);
+        vita_gxm_shadow_after_first_draw();
+        return;
+    }
+    rec_fast_draw_indexed(vbo, ibo, indexCount, firstIndex);
+}
+
+// Draw count vertices whose vertex 0 is at byteOffset in vbo and at gpuBase.
+static void vita_fast_draw(GLuint vbo, size_t byteOffset, const char* gpuBase, GLenum mode, GLsizei count) {
+    vita_img_flush(sCurrentProgram);
+    if (!sVitaFrameFirstDraw) {
+        for (GLsizei start = 0; start < count; start += kVitaMaxDrawVerts) {
+            const GLsizei n = (count - start) < kVitaMaxDrawVerts ? (count - start) : kVitaMaxDrawVerts;
+            const size_t rel = size_t(start) * sizeof(Vertex);
+            const char* vaoBase = (vbo ? static_cast<const char*>(nullptr) + byteOffset : gpuBase) + rel;
+            rec_fast_draw_arrays(vbo, vaoBase, gpuBase + rel, mode, n);
+        }
+        return;
+    }
+    glBindBuffer_ptr(GL_ARRAY_BUFFER, vbo);
+    for (GLsizei start = 0; start < count; start += kVitaMaxDrawVerts) {
+        const GLsizei n = (count - start) < kVitaMaxDrawVerts ? (count - start) : kVitaMaxDrawVerts;
+        const size_t rel = size_t(start) * sizeof(Vertex);
+        const char* vaoBase = (vbo ? static_cast<const char*>(nullptr) + byteOffset : gpuBase) + rel;
+        for (int i = 0; i < 8; ++i)
+            glVertexAttribPointer_ptr(GLuint(i), kVitaAttrSize[i], GL_FLOAT, GL_FALSE, sizeof(Vertex), vaoBase + kVitaAttrOff[i]);
+        if (sVitaFrameFirstDraw) {
+            sVitaFrameFirstDraw = false;
+            rec_fast_mode(0);
+            glDrawArrays(mode, 0, n);
+            rec_fast_mode(1);
+            vita_gxm_shadow_after_first_draw();
+            continue;
+        }
+        for (int i = 0; i < 8; ++i)
+            rec_gxm_vertex_stream_abs(unsigned(i), gpuBase + rel + kVitaAttrOff[i]);
+        glDrawArrays(mode, 0, n);
+    }
+}
+#endif
+
+
 // Draws whatever has accumulated. Safe to call at any time: a no-op when no
 // batch is open, which is what makes it cheap to place at every flush point.
 void pc_gfx_flush_batch(void) {
@@ -3346,10 +5881,58 @@ void pc_gfx_flush_batch(void) {
         return;
     }
 
-    const bool profiling = pc_tick_profiler_enabled();
-    const double t0 = profiling ? submit_clock_ms() : 0.0;
-
     const size_t vertexBytes = sBatchVerts.size() * sizeof(Vertex);
+#ifndef __vita__
+    if (sVitaDumpActive) {
+        float aMin = 1.0f, aMax = 0.0f, rMin = 1.0f, rMax = 0.0f;
+        float xMin = 1e30f, xMax = -1e30f, yMin = 1e30f, yMax = -1e30f, zMin = 1e30f, zMax = -1e30f;
+        for (const Vertex& v : sBatchVerts) {
+            if (v.a < aMin) aMin = v.a; if (v.a > aMax) aMax = v.a;
+            if (v.r < rMin) rMin = v.r; if (v.r > rMax) rMax = v.r;
+            if (v.x < xMin) xMin = v.x; if (v.x > xMax) xMax = v.x;
+            if (v.y < yMin) yMin = v.y; if (v.y > yMax) yMax = v.y;
+            if (v.z < zMin) zMin = v.z; if (v.z > zMax) zMax = v.z;
+        }
+        const char* scope = (sPerfCurrentScope >= 0 && sPerfScopes[sPerfCurrentScope].name)
+                            ? sPerfScopes[sPerfCurrentScope].name : "-";
+        const Vertex& v0 = sBatchVerts[0];
+        printf("[VDUMP] #%u mode=%s n=%u blend=%d(%d,%d) key=%llu alpha=[%.2f..%.2f] red=[%.2f..%.2f] "
+               "pos=[%.1f..%.1f %.1f..%.1f %.1f..%.1f] v0=(%.2f %.2f %.2f) tex0=%u model=%s\n",
+               sVitaDumpDraw++, sBatchMode == GL_TRIANGLES ? "tri" : sBatchMode == GL_LINES ? "LINE" : "pt",
+               (unsigned)sBatchVerts.size(), sVitaBlendType, sVitaBlendSrc, sVitaBlendDst,
+               (unsigned long long)sVitaLastKeyHash, aMin, aMax, rMin, rMax,
+               xMin, xMax, yMin, yMax, zMin, zMax, v0.x, v0.y, v0.z,
+               (unsigned)sActiveGLTextures[0], scope);
+    }
+#endif
+#ifdef __vita__
+    // VBO ring.
+    const bool useRing = vertexBytes <= kVitaVboSeg - sVitaSegWrite;
+    // Lift culling around line and point batches.
+    const bool cullLift = sBatchMode != GL_TRIANGLES && sGxCullValid && sGxCullMode != GX_CULL_NONE;
+    if (cullLift) glDisable(GL_CULL_FACE);
+    if (useRing) {
+        const size_t off = size_t(sVitaSeg) * kVitaVboSeg + sVitaSegWrite;   // multiple of sizeof(Vertex)
+        glBindBuffer_ptr(GL_ARRAY_BUFFER, sVBO);
+        glBufferSubData_ptr(GL_ARRAY_BUFFER, off, vertexBytes, sBatchVerts.data());
+        vita_fast_draw(sVBO, off, sVitaRingGpu + off, sBatchMode, (GLsizei)sBatchVerts.size());
+        sVitaSegWrite += vertexBytes;
+    } else {
+        // Overflow: vitaGL scratch pool.
+        vita_img_flush(sCurrentProgram);
+        if (sVitaFrameFirstDraw) {
+            // First draw of the frame: vitaGL normal path.
+            sVitaFrameFirstDraw = false;
+            rec_fast_mode(0);
+            rec_draw_client(sBatchMode, (GLsizei)sBatchVerts.size(), sBatchVerts.data(), vertexBytes);
+            rec_fast_mode(1);
+            vita_gxm_shadow_after_first_draw();
+        } else {
+            rec_draw_client(sBatchMode, (GLsizei)sBatchVerts.size(), sBatchVerts.data(), vertexBytes);
+        }
+    }
+    if (cullLift) glEnable(GL_CULL_FACE);
+#else
     if (vertexBytes > sVboCapacity - sVboWriteOffset) {
         if (vertexBytes > sVboCapacity) {
             while (sVboCapacity < vertexBytes) sVboCapacity *= 2;
@@ -3360,25 +5943,18 @@ void pc_gfx_flush_batch(void) {
     }
     glBufferSubData_ptr(GL_ARRAY_BUFFER, sVboWriteOffset, vertexBytes, sBatchVerts.data());
 
-    const double t1 = profiling ? submit_clock_ms() : 0.0;
-    if (profiling) sSubmitVboMs += t1 - t0;
-
     gl_error_checkpoint("batch upload");
     const GLint firstVertex = static_cast<GLint>(sVboWriteOffset / sizeof(Vertex));
     glDrawArrays(sBatchMode, firstVertex, (GLsizei)sBatchVerts.size());
     gl_error_checkpoint("batch draw");
 
-    if (profiling) {
-        sSubmitDrawMs += submit_clock_ms() - t1;
-        ++sSubmitDraws;
-        sSubmitVerts += sBatchVerts.size();
-    }
     ++sPerfDraws;
     sPerfVertices += sBatchVerts.size();
     if (sPerfCurrentScope >= 0) {
         ++sPerfScopes[sPerfCurrentScope].draws;
         sPerfScopes[sPerfCurrentScope].vertices += sBatchVerts.size();
     }
+#endif
     sVboWriteOffset += vertexBytes;
 
     sBatchVerts.clear();
@@ -3386,143 +5962,447 @@ void pc_gfx_flush_batch(void) {
     sBatchPrims = 0;
 }
 
-static void note_batch_run(uint64_t materialKey, uint64_t epoch) {
-    const uint64_t key = hash_bytes(materialKey, &epoch, sizeof(epoch));
-    if (sHaveRunKey && key == sRunKey) {
-        ++sRunCurrent;
-        return;
+#ifdef __vita__
+static uint64_t sVitaAppliedKey = 0;        // batch-state key whose uniforms/textures are bound
+static bool     sVitaAppliedKeyValid = false;
+static bool     sVitaApplyingForCache = false;   // apply_batch_state runs with no CPU vertices
+static void vita_upload_palette_slot0(const float* posColMajor4x4, const float* nrmColMajor3x3);
+
+// Apply memo: two ways per set, most recently used first.
+struct VitaApplyMemo {
+    uint64_t key = 0; uint64_t keyHash = 0; GLuint program = 0; bool valid = false;
+    const ProgramLocations* loc = nullptr;
+    bool rejected = false; uint8_t alphaKind = 0xFF;   // alpha-test verdict for this key
+};
+static VitaApplyMemo sVitaApplyMemo[1024][2];
+static inline VitaApplyMemo* vita_apply_memo_set(uint64_t key) { return sVitaApplyMemo[size_t(key ^ (key >> 29)) & 1023u]; }
+static VitaApplyMemo* vita_apply_memo_find(uint64_t key) {
+    VitaApplyMemo* set = vita_apply_memo_set(key);
+    if (set[0].valid && set[0].key == key && set[0].program) return &set[0];
+    if (set[1].valid && set[1].key == key && set[1].program) {
+        std::swap(set[0], set[1]);   // most recently used first
+        return &set[0];
     }
-    if (sHaveRunKey) {
-        if (sRunCurrent > sRunLongest) sRunLongest = sRunCurrent;
-        ++sRunCount;
-        // Attribute the break: did the GL epoch move, or only the material?
-        if (epoch != sRunEpoch) ++sRunGlBreaks;
+    return nullptr;
+}
+static void vita_apply_memo_store(uint64_t key) {
+    VitaApplyMemo* set = vita_apply_memo_set(key);
+    if (!(set[0].valid && set[0].key == key)) {
+        if (set[1].valid && set[1].key == key) std::swap(set[0], set[1]);
+        else set[1] = set[0];
     }
-    sRunKey     = key;
-    sRunEpoch   = epoch;
-    sHaveRunKey = true;
-    sRunCurrent = 1;
+    VitaApplyMemo& m = set[0];
+    m.valid = true; m.key = key; m.keyHash = sVitaLastKeyHash; m.program = sCurrentProgram; m.loc = sLocP;
+    m.rejected = sVitaDrawRejected; m.alphaKind = sVitaCurAlphaKind;
+}
+// Bind what the memo holds for a key.
+static void vita_apply_memo_bind(const VitaApplyMemo& m) {
+    if (sCurrentProgram != m.program) {
+        glUseProgram_ptr(m.program);
+        sCurrentProgram = m.program;
+        sCheckProgram = m.program;
+    }
+    sLocP = m.loc;
+    sVitaLastKeyHash = m.keyHash;
+    sVitaDrawRejected = m.rejected;
+    sVitaCurAlphaKind = m.alphaKind;
+}
+// Memo hit on a program that no longer holds the key's uniforms.
+#else
+static constexpr bool sVitaApplyingForCache = false;
+#endif
+
+// Live GX state for the section writers.
+static inline void pc_gx_src_live(VgxSrc& g) {
+    g.proj = sProjMatrix;
+    g.numStages = int32_t(sNumTevStages);
+    g.fastPath = 0;
+    g.swapModes = sTevSwapModes;
+    g.st = sTevStages;
+    g.rasSwap = sTevRasSwapSel;
+    g.texSwap = sTevTexSwapSel;
+    g.kc = sKonstColorSel;
+    g.ka = sKonstAlphaSel;
+    g.reg = sTevRegisters;
+    g.konst = sKonstColors;
+    g.af = nullptr;
+    g.ch = sChannels;
+    g.light = sLights;
+    g.tg = sTexCoordGen;
+    g.texMtx = sTexMatrices;
+}
+// TEV section alpha and fog scalars.
+static inline void pc_gx_alpha_fog(VgxAlphaFog& af) {
+    af.comp0 = int32_t(sAlphaComp0);
+    af.comp1 = int32_t(sAlphaComp1);
+    af.op = int32_t(sAlphaOp);
+    af.fogImg = 1;
+#ifdef __vita__
+    af.ref0 = vita_alpha_ref_for_shader(int(sAlphaComp0), sAlphaRef0);
+    af.ref1 = vita_alpha_ref_for_shader(int(sAlphaComp1), sAlphaRef1);
+    af.fog[0] = sFogK0; af.fog[1] = sFogK1; af.fog[2] = 0.0f; af.fog[3] = 0.0f;
+    af.fogA = sFogOn ? 1.0f : 0.0f;
+#else
+    af.ref0 = sAlphaRef0;
+    af.ref1 = sAlphaRef1;
+    af.fog[0] = sFogStart; af.fog[1] = sFogEnd; af.fog[2] = sFogNear; af.fog[3] = sFogFar;
+    af.fogA = 1.0f;
+#endif
+    af.fogColour[0] = sFogColour[0]; af.fogColour[1] = sFogColour[1]; af.fogColour[2] = sFogColour[2];
 }
 
-static inline double submit_clock_ms() {
-    return std::chrono::duration<double, std::milli>(
-               std::chrono::steady_clock::now().time_since_epoch())
-        .count();
+#ifdef __vita__
+// Uniform sections on the render thread (rtunif).
+struct VitaShipValid {
+    bool     proj, hdr, swap, reg, konst, af, chan, tg;
+    uint8_t  stN, rasN, texN, kcN, kaN;   // prefix blocks: entries [0, n) held
+    uint8_t  light;                      // bit i: light i held
+    uint64_t texMtx, pos, nrm;           // bit m: matrix m held
+};
+// posGen / nrmGen / texGen: generation of each committed matrix block
+struct VitaShipModel { VgxMirror m; VitaShipValid v; uint32_t posGen[64], nrmGen[64], texGen[64]; };
+static VitaShipModel sVitaShip;          // nothing held
+static bool     sVitaRtGxXlatFailed = false;  // translator-side error: rtunif off at the present
+
+// Blocks of one record.
+struct VitaShipList {
+    int n;
+    uint32_t bytes;   // blocks with their 4-byte headers
+    bool overflow;
+    uint8_t id[64], idx[64];
+    uint16_t len[64];
+    const void* src[64];
+};
+static inline void vita_ship_add(VitaShipList& L, uint8_t id, uint8_t idx, const void* src, uint32_t len) {
+    if (L.n >= 64) { L.overflow = true; return; }
+    L.id[L.n] = id; L.idx[L.n] = idx; L.len[L.n] = uint16_t(len); L.src[L.n] = src;
+    ++L.n; L.bytes += 4u + len;
+}
+static inline void vita_ship_single(VitaShipList& L, bool held, const void* model, const void* live, uint32_t len, uint8_t id) {
+    if (held && memcmp(model, live, len) == 0) return;
+    vita_ship_add(L, id, 0, live, len);
+}
+static inline void vita_ship_prefix(VitaShipList& L, uint8_t heldN, const void* model, const void* live, uint32_t elem, int n, uint8_t id) {
+    if (n <= 0) return;
+    if (n <= int(heldN) && memcmp(model, live, uint32_t(n) * elem) == 0) return;
+    vita_ship_add(L, id, uint8_t(n), live, uint32_t(n) * elem);
+}
+static inline void vita_ship_indexed(VitaShipList& L, uint64_t heldBits, const void* model, const void* live, uint32_t len, uint8_t id, u32 idx) {
+    if (((heldBits >> idx) & 1u) && memcmp(model, live, len) == 0) return;
+    vita_ship_add(L, id, uint8_t(idx), live, len);
+}
+// Matrix block, held by generation.
+static inline void vita_ship_matrix(VitaShipList& L, uint64_t heldBits, uint32_t* modelGen, const uint32_t* liveGen,
+                                    const void* model, const void* live, uint32_t len, uint8_t id, u32 idx) {
+    if ((heldBits >> idx) & 1u) {
+        if (modelGen[idx] == liveGen[idx]) return;
+        if (memcmp(model, live, len) == 0) {
+            modelGen[idx] = liveGen[idx];
+            return;
+        }
+    }
+    vita_ship_add(L, id, uint8_t(idx), live, len);
+}
+// Commit a shipped record to the model.
+static void vita_ship_commit(const VitaShipList& L) {
+    VitaShipModel& M = sVitaShip;
+    for (int i = 0; i < L.n; ++i) {
+        const uint8_t id = L.id[i], idx = L.idx[i];
+        void* dst = vgx_block_dst(M.m, id, idx, L.len[i]);
+        if (!dst) continue;
+        memcpy(dst, L.src[i], L.len[i]);
+        switch (id) {
+        case kVgxBlkProj:      M.v.proj = true; break;
+        case kVgxBlkTevHdr:    M.v.hdr = true; break;
+        case kVgxBlkSwapModes: M.v.swap = true; break;
+        case kVgxBlkStages:    if (idx > M.v.stN) M.v.stN = idx; break;
+        case kVgxBlkRasSwap:   if (idx > M.v.rasN) M.v.rasN = idx; break;
+        case kVgxBlkTexSwap:   if (idx > M.v.texN) M.v.texN = idx; break;
+        case kVgxBlkKSelC:     if (idx > M.v.kcN) M.v.kcN = idx; break;
+        case kVgxBlkKSelA:     if (idx > M.v.kaN) M.v.kaN = idx; break;
+        case kVgxBlkReg:       M.v.reg = true; break;
+        case kVgxBlkKonst:     M.v.konst = true; break;
+        case kVgxBlkAlphaFog:  M.v.af = true; break;
+        case kVgxBlkChan:      M.v.chan = true; break;
+        case kVgxBlkLight:     M.v.light |= uint8_t(1u << idx); break;
+        case kVgxBlkTexGen:    M.v.tg = true; break;
+        case kVgxBlkTexMtx:    M.v.texMtx |= 1ull << idx; M.texGen[idx] = sTexMtxGen[idx]; break;   // idx < 64: vgx_block_dst
+        case kVgxBlkPos:       M.v.pos |= 1ull << idx; M.posGen[idx] = sPosMtxGen[idx]; break;
+        case kVgxBlkNrm:       M.v.nrm |= 1ull << idx; M.nrmGen[idx] = sNrmMtxGen[idx]; break;
+        default: break;
+        }
+    }
+}
+static inline uint8_t* vita_ship_write_blocks(const VitaShipList& L, uint8_t* p) {
+    for (int i = 0; i < L.n; ++i) {
+        p[0] = L.id[i]; p[1] = L.idx[i];
+        memcpy(p + 2, &L.len[i], 2);
+        memcpy(p + 4, L.src[i], L.len[i]);
+        p += 4u + L.len[i];
+    }
+    return p;
+}
+// Location flags of the table this record is written with.
+static uint8_t vita_rtgx_loc_flags(const ProgramLocations& loc) {
+    if (vita_rtgx_loc_is(sCurrentProgram, &loc)) return 0;
+    if (!sVitaRtGxXlatFailed)
+        printf("[VITA RTUNIF] ERROR: program %u is bound with a location table it never registered; that record carries the "
+               "table, and rtunif turns off at the next present\n", (unsigned)sCurrentProgram);
+    sVitaRtGxXlatFailed = true;
+    return kVgxRecInlineLoc;
 }
 
-void pc_gfx_flush_submit_stats(void) {
-    pc_gfx_flush_batch();
-    ++sFrameSerial;
-    if (!pc_tick_profiler_enabled()) return;
-    pc_tick_profiler_record(kPcTickGfxUniforms, sSubmitUniformMs);
-    pc_tick_profiler_record(kPcTickGfxVbo, sSubmitVboMs);
-    pc_tick_profiler_record(kPcTickGfxDraw, sSubmitDrawMs);
-    pc_tick_profiler_record(kPcTickGfxDrawCount, static_cast<double>(sSubmitDraws));
-    pc_tick_profiler_record(kPcTickGfxPrimCount, static_cast<double>(sSubmitPrims));
-    pc_tick_profiler_record(kPcTickGfxVertsPerDraw,
-                            sSubmitDraws ? static_cast<double>(sSubmitVerts) / sSubmitDraws : 0.0);
-    sSubmitUniformMs = sSubmitVboMs = sSubmitDrawMs = 0.0;
-    // Close the run still open at the frame boundary so it is counted.
-    if (sHaveRunKey) {
-        if (sRunCurrent > sRunLongest) sRunLongest = sRunCurrent;
-        ++sRunCount;
+// One apply's record.
+static void vita_rtgx_ship_apply(const ProgramLocations& loc, unsigned sections, uint8_t slot0, u32 slot0Idx, const VgxSrc& g) {
+    const uint8_t flags = vita_rtgx_loc_flags(loc);
+    VitaShipModel& M = sVitaShip;
+    VitaShipList L;
+    L.n = 0; L.bytes = 0; L.overflow = false;
+    VgxTevHdr hdr;
+    if (sections & kVgxSecProj)
+        vita_ship_single(L, M.v.proj, M.m.proj, g.proj, sizeof(M.m.proj), kVgxBlkProj);
+    if ((sections & kVgxSecSlot0) && slot0 == 2) {
+        vita_ship_matrix(L, M.v.pos, M.posGen, sPosMtxGen, M.m.pos[slot0Idx], sPosMatrix[slot0Idx], sizeof(M.m.pos[0]), kVgxBlkPos, slot0Idx);
+        vita_ship_matrix(L, M.v.nrm, M.nrmGen, sNrmMtxGen, M.m.nrm[slot0Idx], sNrmMatrix[slot0Idx], sizeof(M.m.nrm[0]), kVgxBlkNrm, slot0Idx);
     }
-    pc_tick_profiler_record(kPcTickGfxRunLength,
-                            sRunCount ? static_cast<double>(sSubmitPrims) / sRunCount : 0.0);
-    pc_tick_profiler_record(kPcTickGfxRunLongest, static_cast<double>(sRunLongest));
-    pc_tick_profiler_record(kPcTickGfxGlBreakPct,
-                            sRunCount ? 100.0 * sRunGlBreaks / sRunCount : 0.0);
-    pc_tick_profiler_record(kPcTickGxDlDesync, static_cast<double>(sDlDesyncs));
-    pc_tick_profiler_record(kPcTickGxBadMtxIdx, static_cast<double>(sBadMtxIdx));
-    pc_tick_profiler_record(kPcTickGxWildVerts, static_cast<double>(sWildVerts));
-    sWildVerts = 0;
-    sDlDesyncs = 0;
-    sBadMtxIdx = 0;
-    sSubmitDraws     = 0;
-    sSubmitVerts     = 0;
-    sSubmitPrims     = 0;
-    sHaveRunKey      = false;
-    sRunCurrent      = 0;
-    sRunLongest      = 0;
-    sRunCount        = 0;
-    sRunGlBreaks     = 0;
+    if (sections & kVgxSecTev) {
+        hdr.numStages = g.numStages; hdr.fastPath = g.fastPath;
+        vita_ship_single(L, M.v.hdr, &M.m.hdr, &hdr, sizeof(hdr), kVgxBlkTevHdr);
+        vita_ship_single(L, M.v.swap, M.m.swapModes, g.swapModes, sizeof(M.m.swapModes), kVgxBlkSwapModes);
+        // Stages the section walks.
+        const int n = g.numStages < GX_MAXTEVSTAGE ? g.numStages : GX_MAXTEVSTAGE;
+        vita_ship_prefix(L, M.v.stN, M.m.st, g.st, sizeof(TevStageState), n, kVgxBlkStages);
+        vita_ship_prefix(L, M.v.rasN, M.m.rasSwap, g.rasSwap, sizeof(GXTevSwapSel), n, kVgxBlkRasSwap);
+        vita_ship_prefix(L, M.v.texN, M.m.texSwap, g.texSwap, sizeof(GXTevSwapSel), n, kVgxBlkTexSwap);
+        vita_ship_prefix(L, M.v.kcN, M.m.kc, g.kc, sizeof(GXTevKColorSel), n, kVgxBlkKSelC);
+        vita_ship_prefix(L, M.v.kaN, M.m.ka, g.ka, sizeof(GXTevKAlphaSel), n, kVgxBlkKSelA);
+        vita_ship_single(L, M.v.reg, M.m.reg, g.reg, sizeof(M.m.reg), kVgxBlkReg);
+        vita_ship_single(L, M.v.konst, M.m.konst, g.konst, sizeof(M.m.konst), kVgxBlkKonst);
+        vita_ship_single(L, M.v.af, &M.m.af, g.af, sizeof(M.m.af), kVgxBlkAlphaFog);
+    }
+    if (sections & kVgxSecChan) {
+        vita_ship_single(L, M.v.chan, M.m.ch, g.ch, sizeof(M.m.ch), kVgxBlkChan);
+        // Lights an enabled channel's mask selects.
+        const u32 lights = (g.ch[0].enabled ? g.ch[0].lightMask : 0u) | (g.ch[1].enabled ? g.ch[1].lightMask : 0u);
+        for (u32 i = 0; i < 8; ++i)
+            if (lights & (1u << i))
+                vita_ship_indexed(L, M.v.light, &M.m.light[i], &g.light[i], sizeof(GfxLight), kVgxBlkLight, i);
+    }
+    if (sections & kVgxSecTexGen) {
+        vita_ship_single(L, M.v.tg, M.m.tg, g.tg, sizeof(M.m.tg), kVgxBlkTexGen);
+        uint64_t queued = 0;   // matrices already queued
+        for (int slot = 0; slot < 8; ++slot) {
+            if (vgx_texgen_mode(g.tg[slot]) == 0 || loc.tcMtx[slot] == -1) continue;
+            u32 m = g.tg[slot].mtxIdx;
+            if (m >= 64) m = 0;
+            if ((queued >> m) & 1u) continue;
+            queued |= 1ull << m;
+            vita_ship_matrix(L, M.v.texMtx, M.texGen, sTexMtxGen, M.m.texMtx[m], g.texMtx[m], sizeof(M.m.texMtx[0]), kVgxBlkTexMtx, m);
+        }
+    }
+    if (L.overflow) {
+        if (!sVitaRtGxXlatFailed) printf("[VITA RTUNIF] ERROR: a record outgrew its block list; rtunif turns off at the next present\n");
+        sVitaRtGxXlatFailed = true;
+        return;
+    }
+    const bool inl = (flags & kVgxRecInlineLoc) != 0;
+    const uint32_t total = uint32_t(sizeof(VgxApplyRec)) + L.bytes + (inl ? uint32_t(sizeof(ProgramLocations)) : 0u);
+    uint8_t* p = static_cast<uint8_t*>(vita_rt_emit(RT_GX_APPLY, total));
+    if (!p) {
+        if (!sVitaRtGxXlatFailed) printf("[VITA RTUNIF] ERROR: the ring refused an apply record; rtunif turns off at the next present\n");
+        sVitaRtGxXlatFailed = true;
+        return;
+    }
+    VgxApplyRec h;
+    h.program = uint32_t(sCurrentProgram); h.sections = uint8_t(sections); h.slot0 = slot0; h.slot0Idx = uint8_t(slot0Idx);
+    h.flags = flags; h.nBlocks = uint16_t(L.n); h.pad = 0;
+    memcpy(p, &h, sizeof(h));
+    p = vita_ship_write_blocks(L, p + sizeof(h));
+    if (inl) memcpy(p, &loc, sizeof(ProgramLocations));
+    vita_ship_commit(L);
 }
 
-void pc_gfx_end(void) {
-    if (sInPrimitive && sHaveVertex) {
-        sVertexStream.push_back(sCurVertex);
-        sHaveVertex = false;
+// Cached list palette upload record.
+static bool vita_rtgx_ship_palette(int slots, bool useCurrentMatrix) {
+    const ProgramLocations& loc = sLoc;
+    const uint8_t flags = vita_rtgx_loc_flags(loc);
+    VitaShipModel& M = sVitaShip;
+    VitaShipList L;
+    L.n = 0; L.bytes = 0; L.overflow = false;
+    const u32 current = sCurrentPosMtxId;
+    uint64_t queued = 0;
+    for (int s = 0; s < slots && s < kVgxMaxPalSlots; ++s) {
+        u32 gx = useCurrentMatrix ? current : u32(s) * 3;
+        if (gx >= 64) gx = 0;
+        if ((queued >> gx) & 1u) continue;
+        queued |= 1ull << gx;
+        vita_ship_matrix(L, M.v.pos, M.posGen, sPosMtxGen, M.m.pos[gx], sPosMatrix[gx], sizeof(M.m.pos[0]), kVgxBlkPos, gx);
+        vita_ship_matrix(L, M.v.nrm, M.nrmGen, sNrmMtxGen, M.m.nrm[gx], sNrmMatrix[gx], sizeof(M.m.nrm[0]), kVgxBlkNrm, gx);
     }
-    if (!sInPrimitive || sVertexStream.empty()) {
-        sInPrimitive = false;
+    if (L.overflow) {
+        if (!sVitaRtGxXlatFailed) printf("[VITA RTUNIF] ERROR: a palette record outgrew its block list; rtunif turns off at the next present\n");
+        sVitaRtGxXlatFailed = true;
+        return false;
+    }
+    const bool inl = (flags & kVgxRecInlineLoc) != 0;
+    const uint32_t total = uint32_t(sizeof(VgxPaletteRec)) + L.bytes + (inl ? uint32_t(sizeof(ProgramLocations)) : 0u);
+    uint8_t* p = static_cast<uint8_t*>(vita_rt_emit(RT_GX_PALETTE, total));
+    if (!p) {
+        if (!sVitaRtGxXlatFailed) printf("[VITA RTUNIF] ERROR: the ring refused a palette record; rtunif turns off at the next present\n");
+        sVitaRtGxXlatFailed = true;
+        return false;
+    }
+    VgxPaletteRec h;
+    h.program = uint32_t(sCurrentProgram); h.slots = uint8_t(slots < 0 ? 0 : slots > 255 ? 255 : slots);
+    h.useCurrent = useCurrentMatrix ? 1 : 0; h.flags = flags; h.pad = 0; h.current = current;
+    h.nBlocks = uint16_t(L.n); h.pad2 = 0;
+    memcpy(p, &h, sizeof(h));
+    p = vita_ship_write_blocks(L, p + sizeof(h));
+    if (inl) memcpy(p, &loc, sizeof(ProgramLocations));
+    vita_ship_commit(L);
+    return true;
+}
+
+// Turn rtunif off.
+static void vita_rtgx_fall_back(const char* why) {
+    vita_rt_emit(RT_GX_SYNC_BACK, 0);
+    vita_rt_sync();
+    sVitaRtUnif = false;
+    for (int p = 0; p < kVitaMaxPrograms; ++p) {
+        sVitaProgApplied[p].valid = false;
+        sVitaProgramAppliedKeyValid[p] = 0;
+        VitaUniformImage& im = sVitaImg[p];
+        im.lo[0] = im.lo[1] = UINT32_MAX;
+        im.hi[0] = im.hi[1] = 0;
+    }
+    sVitaAppliedKeyValid = false;
+    sVitaPalProvValid = false;
+    vita_palprog_forget_all();
+    invalidate_uniform_cache();
+    printf("[VITA RTUNIF] ERROR: %s: the translator writes its own uniforms from here on\n", why);
+}
+// rtunif per-present step.
+static void vita_rtgx_present() {
+    if (!sVitaRtUnif) return;
+    if (vita_rtgx_failed() || sVitaRtGxXlatFailed) {
+        vita_rtgx_fall_back(sVitaRtGxXlatFailed ? "a record could not be shipped" : "the render thread lost a record");
         return;
     }
+    if ((++sVitaPalProgPresents & 0xFFFFu) == 0) vita_palprog_forget_all();
+    memset(&sVitaShip.v, 0, sizeof(sVitaShip.v));
+}
 
-    // Capture immutable packet before emitting to OpenGL (disabled - use display list capture)
-    // captureCurrentPacket();
+// Translator image of one program stage.
+uint8_t* vita_gx_xlat_image(GLuint prog, int stage, uint32_t* size) {
+    if (prog == 0 || prog >= GLuint(kVitaMaxPrograms) || stage < 0 || stage > 1) { if (size) *size = 0; return nullptr; }
+    VitaUniformImage& im = sVitaImg[prog];
+    if (size) *size = im.img[stage] ? im.size[stage] : 0;
+    return im.img[stage];
+}
 
-    const bool profilingSubmit = pc_tick_profiler_enabled();
-    const double submitT0      = profilingSubmit ? submit_clock_ms() : 0.0;
-
-    // The state key decides everything: identical state means this primitive
-    // joins the open batch and no GL call is made at all. The hash is charged
-    // to gl:uniforms on purpose, so the uniform cost it replaces is never
-    // flattered by moving work out of the measured span.
-    const uint64_t stateKey  = compute_batch_state_key();
-    const GLenum   batchMode = batch_mode_for(sCurrentPrimType);
-    ++sSubmitPrims;
-    if (profilingSubmit) note_batch_run(stateKey, sGlStateEpoch);
-
-    if (sBatchOpen && batching_enabled() && stateKey == sBatchKey && batchMode == sBatchMode) {
-        append_primitive_to_batch();
-        ++sBatchPrims;
-        sInPrimitive = false;
-        sAttrStep = 0;
-        if (profilingSubmit) sSubmitUniformMs += submit_clock_ms() - submitT0;
+// Register one (program, table) with the render thread.
+static bool vita_rtgx_register_one(GLuint prog, const ProgramLocations& loc) {
+    if (prog == 0 || prog >= GLuint(kVitaMaxPrograms)) return true;
+    const VitaUniformImage& im = sVitaImg[prog];
+    const uint32_t size[2] = { im.img[0] ? im.size[0] : 0u, im.img[1] ? im.size[1] : 0u };
+    return vita_rtgx_register(prog, &loc, size);
+}
+static void vita_rtgx_init() {
+    sVitaRtUnif = false;
+    bool ok = true;
+    ok = ok && vita_rtgx_register_one(sVitaFbNoatProg, sVitaFbNoatLoc);
+    ok = ok && vita_rtgx_register_one(sVitaFbAtProg, sVitaFbAtLoc);
+    ok = ok && vita_rtgx_register_one(sVitaFbNoatProgS, sVitaFbNoatLocS);
+    ok = ok && vita_rtgx_register_one(sVitaFbAtProgS, sVitaFbAtLocS);
+    ok = ok && vita_rtgx_register_one(sShaderProgram, sUberLocations);
+    for (size_t i = 0; ok && i < sTevPrograms.size(); ++i) {
+        ok = vita_rtgx_register_one(sTevPrograms[i].program, sTevPrograms[i].locations);
+    }
+    for (size_t i = 0; ok && i < sVitaPairs.size(); ++i) ok = vita_rtgx_register_one(sVitaPairs[i].program, sVitaPairs[i].loc);
+    ok = ok && vita_rtgx_registry_ok();
+    ok = ok && vita_rtgx_configure(true, uniform_cache_disabled());
+    if (!ok) {
+        vita_rtgx_configure(false, uniform_cache_disabled());
+        printf("[VITA RTUNIF] ERROR: the uniform sections stay on the translator: the registration or its memory did not check out\n");
         return;
     }
+    sVitaRtUnif = true;
+}
+#endif // __vita__
 
-    // Different state: draw what is queued while the GPU still holds the
-    // uniforms it was built with, and only then reprogram for the new batch.
-    pc_gfx_flush_batch();
-
+// Program selection, uniforms and texture binds for the current material state.
+static void apply_batch_state(bool programBound = false) {
+#ifndef __vita__
+    const bool tevStats = sPerfStatsEnabled;
+#endif
+#ifdef __vita__
+    if (sKeyDirty) compute_batch_state_key();
+#endif
     // Pick the program for this material first: every uniform below is written
     // through sLoc, which describes whichever program is now bound.
-    use_program_for_current_state();
+    if (!programBound) use_program_for_current_state();
+    const ProgramLocations& loc = sLoc;
+#ifdef __vita__
+    // Block memo for the bound program.
+    if (sKeyDirty) compute_batch_state_key();
+    VitaProgApplied& pa = sVitaProgApplied[sCurrentProgram < GLuint(kVitaMaxPrograms) ? sCurrentProgram : 0];
+    const bool skipTev    = pa.valid && pa.tev == sKeyBlockTev && pa.alpha == sKeyBlockAlpha && pa.fog == sFogHash;
+    const bool skipChan   = pa.valid && pa.chan == sKeyBlockChan;
+    const bool skipTexGen = pa.valid && pa.texgen == sKeyBlockTexGen;
+    const bool skipProj   = pa.valid && pa.proj == sProjMtxGen;
+    const bool rtShip    = sVitaRtUnif;
+    const bool ownWrites = !sVitaRtUnif;
+    unsigned   rtSections = 0;
+    uint8_t    rtSlot0 = 0;   // 0 none, 1 identity, 2 matrix rtSlot0Idx
+    u32        rtSlot0Idx = 0;
+#else
+    const bool skipTev = false, skipChan = false, skipTexGen = false, skipProj = false;
+    const bool ownWrites = true;
+#endif
+    VgxSrc src;
+    pc_gx_src_live(src);
+    VgxAlphaFog alphaFog;
+    PcXlatSink xs;
 
-    glUniformMatrix4fv_ptr(sLoc.projMtx, 1, GL_FALSE, sProjMatrix);
+    if (!skipProj) {
+#ifdef __vita__
+        if (rtShip) rtSections |= kVgxSecProj;
+#endif
+        if (ownWrites) vgx_write_proj(src, loc, xs);
+    }
     static const float identity[16] = {
         1, 0, 0, 0,
         0, 1, 0, 0,
         0, 0, 1, 0,
         0, 0, 0, 1
     };
-    glUniformMatrix4fv_ptr(sLoc.posMtx, 1, GL_FALSE,
-                          sVerticesPretransformed ? identity : sPosMatrix[sCurrentPosMtxId]);
-    glUniform4f_ptr(sLoc.materialColor, sChannels[0].matColor[0], sChannels[0].matColor[1],
-                    sChannels[0].matColor[2], sChannels[0].matColor[3]);
-    glUniform1i_ptr(sLoc.useMaterialRgb, sChannels[0].matSrc == GX_SRC_REG ? 1 : 0);
-    glUniform1i_ptr(sLoc.useMaterialAlpha, sChannels[0].alphaMatSrc == GX_SRC_REG ? 1 : 0);
-    glUniform1i_ptr(sLoc.alphaComp0, static_cast<int>(sAlphaComp0));
-    glUniform1i_ptr(sLoc.alphaComp1, static_cast<int>(sAlphaComp1));
-    glUniform1i_ptr(sLoc.alphaOp, static_cast<int>(sAlphaOp));
-    glUniform1f_ptr(sLoc.alphaRef0, sAlphaRef0);
-    glUniform1f_ptr(sLoc.alphaRef1, sAlphaRef1);
-    glUniform4f_ptr(sLoc.tevPrev, sTevRegisters[GX_TEVPREV][0], sTevRegisters[GX_TEVPREV][1],
-                   sTevRegisters[GX_TEVPREV][2], sTevRegisters[GX_TEVPREV][3]);
-    glUniform4f_ptr(sLoc.tevReg0, sTevRegisters[GX_TEVREG0][0], sTevRegisters[GX_TEVREG0][1],
-                   sTevRegisters[GX_TEVREG0][2], sTevRegisters[GX_TEVREG0][3]);
-    glUniform4f_ptr(sLoc.tevReg1, sTevRegisters[GX_TEVREG1][0], sTevRegisters[GX_TEVREG1][1],
-                   sTevRegisters[GX_TEVREG1][2], sTevRegisters[GX_TEVREG1][3]);
-    glUniform4f_ptr(sLoc.tevReg2, sTevRegisters[GX_TEVREG2][0], sTevRegisters[GX_TEVREG2][1],
-                   sTevRegisters[GX_TEVREG2][2], sTevRegisters[GX_TEVREG2][3]);
-    for (int i = 0; i < 4; i++) {
-        glUniform4f_ptr(sLoc.konst[i], sKonstColors[i][0], sKonstColors[i][1],
-                        sKonstColors[i][2], sKonstColors[i][3]);
+#ifdef __vita__
+    // Palette slot 0, except for the display-list cache.
+    if (!sVitaApplyingForCache) {
+        const u32 mtxId = sCurrentPosMtxId < 64 ? sCurrentPosMtxId : 0;
+        if (rtShip) {
+            sVitaPalProvValid = false;
+            vita_palprog_forget(sCurrentProgram);
+            rtSections |= kVgxSecSlot0;
+            rtSlot0 = sVerticesPretransformed ? 1 : 2;
+            rtSlot0Idx = mtxId;
+        }
+        if (ownWrites)
+            vita_upload_palette_slot0(sVerticesPretransformed ? kVgxIdentity16 : sPosMatrix[mtxId],
+                                      sVerticesPretransformed ? kVgxIdentityNrm9 : sNrmMatrix[mtxId]);
     }
-    glUniform1i_ptr(sLoc.numStages, sNumTevStages);
+#else
+    glUniformMatrix4fv_ptr(loc.posMtx, 1, GL_FALSE,
+                          sVerticesPretransformed ? identity : sPosMatrix[sCurrentPosMtxId]);
+#endif
+    if (!skipTev) {
+    // TEV section fast path.
     int fastPath = 0;
-    if (sNumTevStages == 1) {
+#ifdef __vita__
+    if (sNumTevStages == 1 && loc.fastPath != -1) {
+#else
+    if (sNumTevStages == 1 && (loc.fastPath != -1 || tevStats)) {
+#endif
         const TevStageState& st = sTevStages[0];
         const bool simpleOp = st.colorOp == GX_TEV_ADD && st.alphaOp == GX_TEV_ADD
             && st.colorBias == GX_TB_ZERO && st.alphaBias == GX_TB_ZERO
@@ -3564,13 +6444,20 @@ void pc_gfx_end(void) {
         else if (simpleOp && directRaster) fastPath = 2;
         else if (simpleOp && modulateTextureRaster) fastPath = 3;
     }
-    glUniform1i_ptr(sLoc.fastPath, fastPath);
+    src.fastPath = fastPath;
+    pc_gx_alpha_fog(alphaFog);
+    src.af = &alphaFog;
+#ifdef __vita__
+    if (rtShip) rtSections |= kVgxSecTev;
+    if (ownWrites) vgx_write_tev(src, loc, xs);
+#else
+    vgx_write_tev(src, loc, xs);
     if (fastPath != 0) {
         ++sPerfFastDraws;
         ++sPerfFastPathDraws[fastPath];
         sPerfFastPathVertices[fastPath] += sVertexStream.size();
     }
-    if (sPerfStatsEnabled) {
+    if (tevStats) {
         sPerfTevStageDraws[std::min<int>(sNumTevStages, GX_MAXTEVSTAGE)]++;
         // One bounded snapshot of each title-scene pipeline is substantially
         // more useful than logging thousands of identical draws. It exposes
@@ -3580,7 +6467,7 @@ void pc_gfx_end(void) {
         u8* pipelineReportCount = !pipelineScope ? nullptr
                                 : sNumTevStages == 5 ? &pipelineScope->pipeline5ReportCount
                                 : sNumTevStages == 7 ? &pipelineScope->pipeline7ReportCount : nullptr;
-        if (pipelineReportCount && *pipelineReportCount < 4) {
+        if (pipelineReportCount && *pipelineReportCount < 4 && !sVitaApplyingForCache) {
             const unsigned pipelineIndex = unsigned((*pipelineReportCount)++);
             if (pipelineIndex == 0) {
                 fprintf(stderr, "[PERF TEVPIPE%u %s] regs", unsigned(sNumTevStages), pipelineScope->name);
@@ -3727,42 +6614,8 @@ void pc_gfx_end(void) {
             }
         }
     }
-    for (u8 stage = 0; stage < sNumTevStages && stage < GX_MAXTEVSTAGE; ++stage) {
-        const TevStageState& st = sTevStages[stage];
-        float konst[4];
-        resolve_tev_konst(stage, konst);
-        glUniform4f_ptr(sLoc.tevKonst[stage], konst[0], konst[1], konst[2], konst[3]);
-        glUniform4i_ptr(sLoc.tevCSel[stage], st.colorIn[0], st.colorIn[1], st.colorIn[2], st.colorIn[3]);
-        glUniform4i_ptr(sLoc.tevASel[stage], st.alphaIn[0], st.alphaIn[1], st.alphaIn[2], st.alphaIn[3]);
-        int texIdx = (st.textureEnabled && st.texMap >= GX_TEXMAP0 && st.texMap < GX_MAX_TEXMAP)
-                         ? static_cast<int>(st.texMap) : -1;
-        glUniform4i_ptr(sLoc.tevTexInfo[stage], texIdx, st.texCoord, 0, 0);
-        const int packedColorOp = static_cast<int>(st.colorOp) | (st.colorClamp ? 0x100 : 0);
-        const int packedAlphaOp = static_cast<int>(st.alphaOp) | (st.alphaClamp ? 0x100 : 0);
-        glUniform4i_ptr(sLoc.tevCOps[stage], packedColorOp, st.colorBias, st.colorScale, st.colorOutReg);
-        glUniform4i_ptr(sLoc.tevAOps[stage], packedAlphaOp, st.alphaBias, st.alphaScale, st.alphaOutReg);
-        if (sLoc.tevChan[stage] >= 0) {
-            // GX_COLOR1/GX_COLOR1A1 stages sample the specular channel's raster.
-            glUniform4i_ptr(sLoc.tevChan[stage], st.rasChannel, 0, 0, 0);
-        }
-        // TEV swap mode
-        if (sLoc.tevSwapSel[stage] >= 0) {
-            int rasSel = (int)sTevRasSwapSel[stage];
-            int texSel = (int)sTevTexSwapSel[stage];
-            glUniform2i_ptr(sLoc.tevSwapSel[stage], rasSel, texSel);
-        }
-    }
-    // TEV swap mode tables
-    for (int t = 0; t < 4; ++t) {
-        if (sLoc.tevSwapTable[t] >= 0) {
-            glUniform4i_ptr(sLoc.tevSwapTable[t],
-                (int)sTevSwapModes[t].red,
-                (int)sTevSwapModes[t].green,
-                (int)sTevSwapModes[t].blue,
-                (int)sTevSwapModes[t].alpha);
-        }
-    }
-
+#endif
+    }   // !skipTev
     // Only touch texture units referenced by an active TEV stage. Most Pikmin
     // materials use one map; rebinding all eight for every tiny primitive was
     // a substantial driver overhead. Sampler locations are fixed at init.
@@ -3783,11 +6636,19 @@ void pc_gfx_end(void) {
             sBoundTextures[map] = wanted;
             lastActiveMap = map;
         }
+#ifdef __vita__
+        // Fast draw mode texture bind.
+        if (wanted && !sVitaFrameFirstDraw && sVitaGxmBound[map] != wanted) {
+            rec_gxm_fragment_texture(unsigned(map), wanted);
+            sVitaGxmBound[map] = wanted;
+        }
+#endif
     }
     if (lastActiveMap != 0) glActiveTexture_ptr(GL_TEXTURE0);
 
     // Upload lighting
-    if (sLoc.nrmMtx >= 0) {
+#ifndef __vita__
+    if (loc.nrmMtx != -1) {
         static const float identityNrm[9] = {
             1.0f, 0.0f, 0.0f,
             0.0f, 1.0f, 0.0f,
@@ -3796,106 +6657,35 @@ void pc_gfx_end(void) {
         const float* nrmMtx = sVerticesPretransformed
             ? identityNrm
             : sNrmMatrix[sCurrentPosMtxId < 64 ? sCurrentPosMtxId : 0];
-        glUniformMatrix3fv_ptr(sLoc.nrmMtx, 1, GL_FALSE, nrmMtx);
+        glUniformMatrix3fv_ptr(loc.nrmMtx, 1, GL_FALSE, nrmMtx);
     }
-    int numLights = 0;
-    float ambR = 1.0f, ambG = 1.0f, ambB = 1.0f, ambA = 1.0f;
-    if (sChannels[0].enabled) {
-        // Only lit channels contribute lighting; a disabled channel must pass
-        // rasterized colors through untouched (matches GX hardware behavior).
-        ambR = sChannels[0].ambColor[0];
-        ambG = sChannels[0].ambColor[1];
-        ambB = sChannels[0].ambColor[2];
-        ambA = sChannels[0].ambColor[3];
-        u32 mask = sChannels[0].lightMask;
-        for (int i = 0; i < 8 && numLights < 4; i++) {
-            if (mask & (1u << i)) {
-                glUniform4f_ptr(sLoc.lightPos[numLights], sLights[i].pos[0], sLights[i].pos[1], sLights[i].pos[2], 0.0f);
-                glUniform4f_ptr(sLoc.lightColor[numLights], sLights[i].color[0], sLights[i].color[1], sLights[i].color[2], sLights[i].color[3]);
-                // Distance attenuation applies when the channel's attention
-                // function requests it (game uses GX_AF_SPOT with lights).
-                const float* k = sLights[i].k;
-                bool attnOn = (sChannels[0].attnFn != GX_AF_NONE);
-                glUniform4f_ptr(sLoc.lightK[numLights], k[0], k[1], k[2], attnOn ? 1.0f : 0.0f);
-                numLights++;
-            }
-        }
-    }
-    if (sLoc.numLights >= 0) glUniform1i_ptr(sLoc.numLights, numLights);
-    if (sLoc.ambColor >= 0) glUniform4f_ptr(sLoc.ambColor, ambR, ambG, ambB, ambA);
-    if (sLoc.chan0En >= 0) glUniform1i_ptr(sLoc.chan0En, sChannels[0].enabled ? 1 : 0);
-    if (sLoc.chan0AttnFn >= 0) glUniform1i_ptr(sLoc.chan0AttnFn, (int)sChannels[0].attnFn);
-
-    // Channel 1 (typically specular) feeds stages whose TEV order selects it.
-    int numLights1 = 0;
-    float a1r = 0.0f, a1g = 0.0f, a1b = 0.0f, a1a = 1.0f;
-    if (sChannels[1].enabled) {
-        a1r = sChannels[1].ambColor[0];
-        a1g = sChannels[1].ambColor[1];
-        a1b = sChannels[1].ambColor[2];
-        a1a = sChannels[1].ambColor[3];
-        u32 mask1 = sChannels[1].lightMask;
-        for (int i = 0; i < 8 && numLights1 < 4; i++) {
-            if (mask1 & (1u << i)) {
-                glUniform4f_ptr(sLoc.lightPos1[numLights1], sLights[i].pos[0], sLights[i].pos[1], sLights[i].pos[2], 0.0f);
-                glUniform4f_ptr(sLoc.lightColor1[numLights1], sLights[i].color[0], sLights[i].color[1], sLights[i].color[2], sLights[i].color[3]);
-                const float* k1 = sLights[i].k;
-                bool attnOn1 = (sChannels[1].attnFn != GX_AF_NONE);
-                glUniform4f_ptr(sLoc.lightK1[numLights1], k1[0], k1[1], k1[2], attnOn1 ? 1.0f : 0.0f);
-                numLights1++;
-            }
-        }
-    }
-    if (sLoc.numLights1 >= 0) glUniform1i_ptr(sLoc.numLights1, numLights1);
-    if (sLoc.ambColor1 >= 0) glUniform4f_ptr(sLoc.ambColor1, a1r, a1g, a1b, a1a);
-    if (sLoc.chan1En >= 0) glUniform1i_ptr(sLoc.chan1En, sChannels[1].enabled ? 1 : 0);
-    if (sLoc.chan1AttnFn >= 0) glUniform1i_ptr(sLoc.chan1AttnFn, (int)sChannels[1].attnFn);
-    // Specular half-vector: light 7's dir field (offset 0x34) holds it.
-    if (sChannels[1].enabled && sChannels[1].attnFn == GX_AF_SPEC) {
-        u32 mask1 = sChannels[1].lightMask;
-        for (int i = 7; i < 8; i++) {
-            if (mask1 & (1u << i) && sLights[i].active) {
-                if (sLoc.specHalf1 >= 0) {
-                    glUniform4f_ptr(sLoc.specHalf1, sLights[i].dir[0], sLights[i].dir[1], sLights[i].dir[2], 0.0f);
-                }
-                if (sLoc.specAttn1 >= 0) {
-                    glUniform4f_ptr(sLoc.specAttn1, sLights[i].a[0], sLights[i].a[1], sLights[i].a[2], 0.0f);
-                }
-                
-                break;
-            }
-        }
-    }
-    if (sLoc.materialColor1 >= 0)
-        glUniform4f_ptr(sLoc.materialColor1, sChannels[1].matColor[0], sChannels[1].matColor[1],
-                        sChannels[1].matColor[2], sChannels[1].matColor[3]);
-    if (sLoc.useMaterialRgb1 >= 0)
-        glUniform1i_ptr(sLoc.useMaterialRgb1, sChannels[1].matSrc == GX_SRC_REG ? 1 : 0);
+#endif
+    if (!skipChan) {
+#ifdef __vita__
+        if (rtShip) rtSections |= kVgxSecChan;
+        if (ownWrites) vgx_write_chan(src, loc, xs);
+#else
+        vgx_write_chan(src, loc, xs);
+#endif
+    }   // !skipChan
 
     // Texture coordinate generation for every GX slot. TEX0-TEX7 sources are
     // independent from the destination slot and may use different matrices.
-    for (int slot = 0; slot < 8; slot++) {
-        int mode = 0;
-        if (slot < 8 && sTexCoordGen[slot].active) {
-            GXTexGenSrc src = static_cast<GXTexGenSrc>(sTexCoordGen[slot].src);
-            if (src == GX_TG_POS) mode = 1;
-            else if (src == GX_TG_NRM) mode = 2;
-            else if (src >= GX_TG_TEX0 && src <= GX_TG_TEX7)
-                mode = 3 + int(src - GX_TG_TEX0);
-            else if (src >= GX_TG_TEXCOORD0 && src <= GX_TG_TEXCOORD6)
-                mode = 11 + int(src - GX_TG_TEXCOORD0);
-        }
-        if (sLoc.tcMode[slot] >= 0) glUniform1i_ptr(sLoc.tcMode[slot], mode);
-        if (mode != 0 && sLoc.tcMtx[slot] >= 0) {
-            u32 mtxIdx = (slot < 8) ? sTexCoordGen[slot].mtxIdx : 0;
-            if (mtxIdx >= 64) mtxIdx = 0;
-            glUniformMatrix4fv_ptr(sLoc.tcMtx[slot], 1, GL_FALSE, sTexMatrices[mtxIdx]);
-        }
+    if (!skipTexGen) {
+#ifdef __vita__
+        if (rtShip) rtSections |= kVgxSecTexGen;
+        if (ownWrites) vgx_write_texgen(src, loc, xs);
+#else
+        vgx_write_texgen(src, loc, xs);
+#endif
     }
-
-    const double submitT1 = profilingSubmit ? submit_clock_ms() : 0.0;
-    if (profilingSubmit) sSubmitUniformMs += submitT1 - submitT0;
-
+#ifdef __vita__
+    // rtunif apply record.
+    if (rtShip && rtSections) vita_rtgx_ship_apply(loc, rtSections, rtSlot0, rtSlot0Idx, src);
+#endif
+#ifdef __vita__
+    pa.valid = true; pa.tev = sKeyBlockTev; pa.alpha = sKeyBlockAlpha; pa.chan = sKeyBlockChan; pa.texgen = sKeyBlockTexGen; pa.proj = sProjMtxGen; pa.fog = sFogHash;
+#else
     switch (sCurrentPrimType) {
         case GX_TRIANGLES: ++sPerfPrimitiveDraws[0]; break;
         case GX_TRIANGLESTRIP: ++sPerfPrimitiveDraws[1]; break;
@@ -3905,8 +6695,425 @@ void pc_gfx_end(void) {
         case GX_POINTS: ++sPerfPrimitiveDraws[5]; break;
         case GX_QUADS: ++sPerfPrimitiveDraws[6]; break;
     }
+#endif
 
     gl_error_checkpoint("uniform upload");
+}
+
+#ifdef __vita__
+// Constant channel colour folded into the vertices.
+static uint64_t sVitaFoldMemoIdent = 0;   // config fingerprint of the memo
+static uint64_t sVitaFoldIdent = 0;       // this primitive's fingerprint
+static int      sVitaFoldMemoMat1 = -1;
+static int      sVitaFoldBaked = -1;   // 0 not baked, 1 baked
+static inline float vita_clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
+// Every light in the mask is unloaded or black.
+static bool vita_lights_dead(u32 mask, bool alpha) {
+    for (int i = 0; i < 8; ++i) {
+        if (!(mask & (1u << i))) continue;
+        const GfxLight& l = sLights[i];
+        if (!l.active) continue;
+        if (alpha ? (l.color[3] != 0.0f) : (l.color[0] != 0.0f || l.color[1] != 0.0f || l.color[2] != 0.0f)) return false;
+    }
+    return true;
+}
+// Material fold outcome.
+enum { kVitaMatFoldOk = 0, kVitaMatFoldLit = 1, kVitaMatFoldVtx = 2 };
+static int vita_fold_material_values(const GfxChannel& c0, float rgb[3], float& alpha, bool& rgbConst, bool& aConst) {
+    rgbConst = false; aConst = false;
+    rgb[0] = rgb[1] = rgb[2] = 1.0f; alpha = 1.0f;
+    if (c0.matSrc == GX_SRC_REG) {
+        if (!c0.enabled) { rgb[0] = c0.matColor[0]; rgb[1] = c0.matColor[1]; rgb[2] = c0.matColor[2]; rgbConst = true; }
+        else if (c0.ambSrc == GX_SRC_REG && vita_lights_dead(c0.lightMask, false)) {
+            for (int k = 0; k < 3; ++k) rgb[k] = vita_clamp01(c0.matColor[k] * vita_clamp01(c0.ambColor[k]));
+            rgbConst = true;
+        } else return kVitaMatFoldLit;
+    } else if (c0.enabled) return kVitaMatFoldLit;
+    if (c0.alphaMatSrc == GX_SRC_REG) {
+        if (!c0.alphaEnabled) { alpha = c0.matColor[3]; aConst = true; }
+        else if (c0.alphaAmbSrc == GX_SRC_REG && vita_lights_dead(c0.alphaLightMask, true)) {
+            alpha = vita_clamp01(c0.matColor[3] * vita_clamp01(c0.ambColor[3]));
+            aConst = true;
+        } else return kVitaMatFoldLit;
+    } else if (c0.alphaEnabled) return kVitaMatFoldLit;
+    if (!rgbConst && !aConst) return kVitaMatFoldVtx;   // vertex colours already
+    return kVitaMatFoldOk;
+}
+// Material colour fold.
+static bool vita_fold_material_colour(GfxChannel saved[2]) {
+    const int stages = std::min<int>(sNumTevStages, GX_MAXTEVSTAGE);
+    for (int i = 0; i < stages; ++i) if (sTevStages[i].rasChannel == 1) return false;
+    bool rgbConst = false, aConst = false;
+    float rgb[3], alpha;
+    switch (vita_fold_material_values(sChannels[0], rgb, alpha, rgbConst, aConst)) {
+    case kVitaMatFoldLit: return false;
+    case kVitaMatFoldVtx: return false;   // vertex colours already
+    default: break;
+    }
+    // Vertex-colour twin baked?
+    memcpy(saved, sChannels, sizeof(sChannels));
+    sChannels[0].matSrc = GX_SRC_VTX;
+    sChannels[0].alphaMatSrc = GX_SRC_VTX;
+    if (sVitaFoldBaked < 0 || sVitaFoldMemoIdent != sVitaFoldIdent) {
+        PcTevShaderKey key;
+        build_tev_shader_key(key);
+        const uint64_t hash = pc_tev_hash_key(key);
+        sVitaFoldBaked = sTevProgramByHash.find(hash) != sTevProgramByHash.end() ? 1 : 0;
+        if (!sVitaFoldBaked) vita_gx_capture_key(key, hash);
+        sVitaFoldMemoIdent = sVitaFoldIdent;
+    }
+    if (!sVitaFoldBaked) {
+        memcpy(sChannels, saved, sizeof(sChannels));
+        return false;
+    }
+    for (Vertex& v : sVertexStream) {
+        if (rgbConst) { v.r = rgb[0]; v.g = rgb[1]; v.b = rgb[2]; }
+        if (aConst) v.a = alpha;
+    }
+    // Canonical unlit vertex-colour channel 0.
+    GfxChannel& f = sChannels[0];
+    f.enabled = false; f.alphaEnabled = false; f.lightMask = 0; f.alphaLightMask = 0;
+    f.ambSrc = GX_SRC_REG; f.alphaAmbSrc = GX_SRC_REG;
+    f.diffFn = GX_DF_NONE; f.attnFn = GX_AF_NONE; f.alphaDiffFn = GX_DF_NONE; f.alphaAttnFn = GX_AF_NONE;
+    for (int k = 0; k < 4; ++k) { f.matColor[k] = 1.0f; f.ambColor[k] = 0.0f; }
+    vita_key_dirty(kKeyChan);
+    sChanSrcDirty = true;
+    sVitaImmEnd.rgbConst = rgbConst ? 1 : 0;
+    sVitaImmEnd.aConst = aConst ? 1 : 0;
+    return true;
+}
+// TEV register colour fold.
+struct VitaRegFoldSaved { TevStageState stages[GX_MAXTEVSTAGE]; float reg0[4]; float reg1[4]; GfxChannel chan[2]; bool c1Attr; int nStages; };
+static uint64_t sVitaRegFoldMemoIdent = 0; static int sVitaRegFoldMemoWhich = -1; static int sVitaRegFoldBaked = -1;
+static int sVitaRegFoldLastWhich = 0;   // bit 0: register 0 folded, bit 1: register 1
+static uint64_t sVitaRegFoldMemoHash = 0, sVitaRegFoldMemoVh = 0; static int sVitaRegFoldPairOk = 0;   // the twin's hash; its pair with the current vertex key
+// Fold registers 0 and 1 into the vertices.
+static bool vita_fold_register_colour(VitaRegFoldSaved& saved) {
+    const int stages = std::min<int>(sNumTevStages, GX_MAXTEVSTAGE);
+    bool reads0 = false, reads1 = false, writes0 = false, writes1 = false;
+    for (int i = 0; i < stages; ++i) {
+        const TevStageState& st = sTevStages[i];
+        if (st.rasChannel == 1) return false;
+        if (st.colorOutReg == GX_TEVREG0 || st.alphaOutReg == GX_TEVREG0) writes0 = true;
+        if (st.colorOutReg == GX_TEVREG1 || st.alphaOutReg == GX_TEVREG1) writes1 = true;
+        for (int a = 0; a < 4; ++a) {
+            if (st.colorIn[a] == GX_CC_RASC || st.colorIn[a] == GX_CC_RASA || st.alphaIn[a] == GX_CA_RASA) return false;
+            if (st.colorIn[a] == GX_CC_C0 || st.colorIn[a] == GX_CC_A0 || st.alphaIn[a] == GX_CA_A0) reads0 = true;
+            if (st.colorIn[a] == GX_CC_C1 || st.colorIn[a] == GX_CC_A1 || st.alphaIn[a] == GX_CA_A1) reads1 = true;
+        }
+    }
+    if (writes0) reads0 = false;   // a stage output, not a constant
+    if (writes1) reads1 = false;
+    // Register 1 in the normal and matrix-index attributes.
+    bool can1 = reads1 && sVitaPaletteSlots <= 1 && !sChannels[1].enabled && !sChannels[1].alphaEnabled;
+    // Normal-based texgens some stage samples.
+    unsigned tcRead = 0;
+    for (int i = 0; i < stages; ++i)
+        if (sTevStages[i].textureEnabled && sTevStages[i].texCoord >= GX_TEXCOORD0 && sTevStages[i].texCoord < 8)
+            tcRead |= 1u << unsigned(sTevStages[i].texCoord);
+    for (int slot = 0; slot < 4 && can1; ++slot)
+        if (((tcRead >> slot) & 1u) && sTexCoordGen[slot].active && sTexCoordGen[slot].src == GX_TG_NRM) can1 = false;
+    const float* r0 = sTevRegisters[GX_TEVREG0];
+    const float* r1 = sTevRegisters[GX_TEVREG1];
+    for (int k = 0; k < 4 && reads0; ++k) if (!(r0[k] >= 0.0f && r0[k] <= 1.0f)) reads0 = false;   // outside the attribute's range
+    for (int k = 0; k < 4 && can1; ++k) if (!(r1[k] >= 0.0f && r1[k] <= 1.0f)) can1 = false;
+    if (!reads0 && !can1) return false;
+    const int which = (reads0 ? 1 : 0) | (can1 ? 2 : 0);
+    sVitaRegFoldLastWhich = which;
+    saved.nStages = stages;
+    memcpy(saved.stages, sTevStages, sizeof(TevStageState) * size_t(stages));
+    memcpy(saved.reg0, r0, sizeof(saved.reg0));
+    memcpy(saved.reg1, r1, sizeof(saved.reg1));
+    memcpy(saved.chan, sChannels, sizeof(saved.chan));
+    saved.c1Attr = sVitaColor1FromAttr;
+    if (reads0) {
+        for (int i = 0; i < stages; ++i) {
+            TevStageState& st = sTevStages[i];
+            for (int a = 0; a < 4; ++a) {
+                if (st.colorIn[a] == GX_CC_C0) st.colorIn[a] = GX_CC_RASC;
+                else if (st.colorIn[a] == GX_CC_A0) st.colorIn[a] = GX_CC_RASA;
+                if (st.alphaIn[a] == GX_CA_A0) st.alphaIn[a] = GX_CA_RASA;
+            }
+            st.rasChannel = 0;
+        }
+        // Canonical unlit vertex-colour channel 0.
+        GfxChannel& f = sChannels[0];
+        f.matSrc = GX_SRC_VTX; f.alphaMatSrc = GX_SRC_VTX;
+        f.enabled = false; f.alphaEnabled = false; f.lightMask = 0; f.alphaLightMask = 0;
+        f.ambSrc = GX_SRC_REG; f.alphaAmbSrc = GX_SRC_REG;
+        f.diffFn = GX_DF_NONE; f.attnFn = GX_AF_NONE; f.alphaDiffFn = GX_DF_NONE; f.alphaAttnFn = GX_AF_NONE;
+        for (int k = 0; k < 4; ++k) { f.matColor[k] = 1.0f; f.ambColor[k] = 0.0f; }
+    }
+    if (can1) sVitaColor1FromAttr = true;
+    vita_key_dirty(kKeyTev | kKeyChan);
+    sChanSrcDirty = true;
+    // Twin baked?
+    if (sVitaRegFoldBaked < 0 || sVitaRegFoldMemoIdent != sVitaFoldIdent || sVitaRegFoldMemoWhich != which) {
+        PcTevShaderKey key;
+        build_tev_shader_key(key);
+        const uint64_t hash = pc_tev_hash_key(key);
+        sVitaRegFoldBaked = sTevProgramByHash.find(hash) != sTevProgramByHash.end() ? 1 : 0;
+        if (!sVitaRegFoldBaked) vita_gx_capture_key(key, hash);
+        sVitaRegFoldMemoIdent = sVitaFoldIdent; sVitaRegFoldMemoWhich = which;
+        sVitaRegFoldMemoHash = hash; sVitaRegFoldMemoVh = 0; sVitaRegFoldPairOk = 0;
+    }
+    // Register 1 fold needs a baked pair.
+    bool pairOk = true;
+    if (sVitaRegFoldBaked && can1) {
+        uint64_t vh;
+        const VitaVsKey vk = vita_vs_key_and_hash(&vh);
+        if (sVitaRegFoldMemoVh != vh) {
+            sVitaRegFoldMemoVh = vh;
+            sVitaRegFoldPairOk = sVitaPairByKey.find(vita_pair_key(sVitaRegFoldMemoHash, vh)) != sVitaPairByKey.end() ? 1 : 0;
+            if (!sVitaRegFoldPairOk) vita_gx_capture_vs_pair(sVitaRegFoldMemoHash, vk);
+        }
+        pairOk = sVitaRegFoldPairOk != 0;
+    }
+    if (!sVitaRegFoldBaked || !pairOk) {
+        memcpy(sTevStages, saved.stages, sizeof(TevStageState) * size_t(saved.nStages));
+        memcpy(sChannels, saved.chan, sizeof(saved.chan));
+        sVitaColor1FromAttr = saved.c1Attr;
+        vita_key_dirty(kKeyTev | kKeyChan);
+        sChanSrcDirty = true;
+        return false;
+    }
+    for (Vertex& v : sVertexStream) {
+        if (reads0) { v.r = r0[0]; v.g = r0[1]; v.b = r0[2]; v.a = r0[3]; }
+        if (can1)   { v.nx = r1[0]; v.ny = r1[1]; v.nz = r1[2]; v.mtxIdx = r1[3]; }
+    }
+    // Folded registers hash as constants.
+    if (reads0) { float* w = sTevRegisters[GX_TEVREG0]; w[0] = w[1] = w[2] = w[3] = 0.0f; }
+    if (can1)   { float* w = sTevRegisters[GX_TEVREG1]; w[0] = w[1] = w[2] = w[3] = 0.0f; }
+    return true;
+}
+static void pc_gfx_end_core(void);
+// Fold chain note.
+static inline void vita_imm_end_note(uint8_t outcome) {
+    sVitaImmEnd.outcome = outcome;
+    sVitaImmEnd.reads = vita_tev_reads_mask();
+    sVitaImmEnd.reg0Neg = sTevRegisters[GX_TEVREG0][0] < 0.0f ? 1 : 0;
+}
+// Fold block hash memo.
+struct VitaFoldHashMemo { uint64_t key, tev, chan, ident; unsigned used; bool valid; };
+static VitaFoldHashMemo sVitaFoldHashMemo[128];
+static uint64_t vita_fold_memo_key(uint64_t ident, int which, bool matFold) {
+    uint64_t h = 0x7A3D9E1B5C2F8046ull ^ ident;
+    const uint8_t tag[2] = { uint8_t(which), uint8_t(matFold ? 1 : 0) };
+    h = hash_bytes(h, tag, sizeof(tag));
+    h = hash_bytes(h, sTevRegisters[GX_TEVPREV], sizeof(sTevRegisters[0]));
+    h = hash_bytes(h, sTevRegisters[GX_TEVREG2], sizeof(sTevRegisters[0]));
+    if (!(which & 1)) h = hash_bytes(h, sTevRegisters[GX_TEVREG0], sizeof(sTevRegisters[0]));
+    if (!(which & 2)) h = hash_bytes(h, sTevRegisters[GX_TEVREG1], sizeof(sTevRegisters[0]));
+    h = hash_bytes(h, sKonstColors, sizeof(sKonstColors));
+    const int ns = sNumTevStages < GX_MAXTEVSTAGE ? int(sNumTevStages) : GX_MAXTEVSTAGE;
+    h = hash_bytes(h, sKonstColorSel, sizeof(sKonstColorSel[0]) * size_t(ns));
+    h = hash_bytes(h, sKonstAlphaSel, sizeof(sKonstAlphaSel[0]) * size_t(ns));
+    h = hash_bytes(h, sTevSwapModes, sizeof(sTevSwapModes));
+    h = hash_bytes(h, sTevRasSwapSel, sizeof(sTevRasSwapSel[0]) * size_t(ns));
+    h = hash_bytes(h, sTevTexSwapSel, sizeof(sTevTexSwapSel[0]) * size_t(ns));
+    h = hash_bytes(h, &sNumTevStages, sizeof(sNumTevStages));
+    // channel 1 material source
+    const uint8_t m1 = sChannels[1].matSrc == GX_SRC_REG ? 1 : 0;
+    h = hash_bytes(h, &m1, 1);
+    return h;
+}
+void pc_gfx_end(void) {
+    if (sInPrimitive && sHaveVertex) {
+        sVertexStream.push_back(sCurVertex);
+        sHaveVertex = false;
+    }
+    GfxChannel saved[2];
+    const bool canFold = sInPrimitive && !sVertexStream.empty();
+    // Pre-fold block hashes.
+    const bool preClean = canFold && (sKeyDirty & (kKeyTev | kKeyChan)) == 0 && !sChanSrcDirty;
+    const uint64_t preTev = sKeyBlockTev, preChan = sKeyBlockChan, preIdent = sKeyBlockTevIdent;
+    if (canFold) sVitaFoldIdent = (sKeyDirty & (kKeyTev | kKeyChan | kKeyAlpha)) ? tev_config_fingerprint() : sKeyBlockTevIdent;
+    const bool folded = canFold && vita_fold_material_colour(saved);
+    static VitaRegFoldSaved regSaved;
+    const bool regFolded = sInPrimitive && !sVertexStream.empty() && vita_fold_register_colour(regSaved);
+    VitaFoldHashMemo* memo = nullptr;
+    const int which = regFolded ? sVitaRegFoldLastWhich : 0;
+    if (sVitaImmNoting) { sVitaImmEnd.matFold = folded ? 1 : 0; sVitaImmEnd.which = uint8_t(which); }
+    if (folded || (which & 1)) {
+        const uint64_t mk = vita_fold_memo_key(sVitaFoldIdent, which, folded);
+        memo = &sVitaFoldHashMemo[size_t(mk ^ (mk >> 31)) & 127u];
+        if (memo->valid && memo->key == mk) {
+            sKeyBlockTev = memo->tev; sKeyBlockChan = memo->chan; sKeyBlockTevIdent = memo->ident;
+            sVitaUsedMapMask = memo->used;
+            sVitaChanBlockC1 = false;
+            sKeyDirty &= ~unsigned(kKeyTev | kKeyChan);
+            sChanSrcDirty = false;
+            sVitaLastFastValid = false;
+            memo = nullptr;
+        } else { memo->key = mk; memo->valid = false; }
+    }
+    pc_gfx_end_core();
+    if (memo && (sKeyDirty & (kKeyTev | kKeyChan)) == 0 && !sChanSrcDirty) {
+        memo->tev = sKeyBlockTev; memo->chan = sKeyBlockChan; memo->ident = sKeyBlockTevIdent;
+        memo->used = sVitaUsedMapMask; memo->valid = true;
+    }
+    if (regFolded) {
+        memcpy(sTevStages, regSaved.stages, sizeof(TevStageState) * size_t(regSaved.nStages));
+        memcpy(sTevRegisters[GX_TEVREG0], regSaved.reg0, sizeof(regSaved.reg0));
+        memcpy(sTevRegisters[GX_TEVREG1], regSaved.reg1, sizeof(regSaved.reg1));
+        memcpy(sChannels, regSaved.chan, sizeof(regSaved.chan));
+        sVitaColor1FromAttr = regSaved.c1Attr;
+    }
+    if (folded) memcpy(sChannels, saved, sizeof(sChannels));
+    if (folded || regFolded) {
+        if (preClean) {
+            sKeyBlockTev = preTev; sKeyBlockChan = preChan; sKeyBlockTevIdent = preIdent;
+            sKeyDirty &= ~unsigned(kKeyTev | kKeyChan);
+            sChanSrcDirty = false;
+            sVitaLastFastValid = false;
+        } else {
+            vita_key_dirty(kKeyTev | kKeyChan);
+            sChanSrcDirty = true;
+        }
+    }
+}
+
+// Fold values for a chained primitive.
+static bool vita_imm_chain_values(Vertex* v, size_t n) {
+    const VitaImmChain& g = g_vitaImmChain;
+    float rgb[3] = { 1.0f, 1.0f, 1.0f }, alpha = 1.0f;
+    bool rgbC = false, aC = false;
+    if (g.matFold) {
+        if (vita_fold_material_values(sChannels[0], rgb, alpha, rgbC, aC) != kVitaMatFoldOk) return false;
+        if (uint8_t(rgbC ? 1 : 0) != g.rgbConst || uint8_t(aC ? 1 : 0) != g.aConst) return false;
+    }
+    const float* r0 = sTevRegisters[GX_TEVREG0];
+    const float* r1 = sTevRegisters[GX_TEVREG1];
+    for (int k = 0; k < 4; ++k) {
+        if ((g.which & 1) && !(r0[k] >= 0.0f && r0[k] <= 1.0f)) return false;
+        if ((g.which & 2) && !(r1[k] >= 0.0f && r1[k] <= 1.0f)) return false;
+    }
+    for (size_t i = 0; i < n; ++i) {
+        Vertex& x = v[i];
+        if (rgbC) { x.r = rgb[0]; x.g = rgb[1]; x.b = rgb[2]; }
+        if (aC) x.a = alpha;
+        if (g.which & 1) { x.r = r0[0]; x.g = r0[1]; x.b = r0[2]; x.a = r0[3]; }
+        if (g.which & 2) { x.nx = r1[0]; x.ny = r1[1]; x.nz = r1[2]; x.mtxIdx = r1[3]; }
+    }
+    return true;
+}
+// Fold chain join.
+static bool vita_imm_chain_join() {
+    if (!vita_imm_chain_values(sVertexStream.data(), sVertexStream.size())) return false;
+    append_primitive_to_batch();
+    ++sBatchPrims;
+    sInPrimitive = false;
+    sAttrStep = 0;
+    return true;
+}
+// End of a stream primitive.
+static void vita_imm_chain_end(int flags, bool xf) {
+    VitaImmChain& g = g_vitaImmChain;
+    const bool chainable = flags == 3 && !sVertexStream.empty() && xf && batching_enabled();
+    if (chainable && g.armed && sBatchOpen && sVitaBatchSerial == g.serial && sBatchKey == g.key
+        && uint32_t(batch_mode_for(sCurrentPrimType)) == g.mode && vita_imm_chain_join())
+        return;
+    // Full path.
+    sVitaImmEnd = VitaImmEndNote();
+    sVitaImmNoting = true;
+    pc_gfx_end();
+    sVitaImmNoting = false;
+    const VitaImmEndNote& e = sVitaImmEnd;
+    // Arm the chain.
+    g.armed = 0;
+    if (chainable && (e.outcome == 1 || e.outcome == 2) && sBatchOpen) {
+        const GfxChannel& c0 = sChannels[0];
+        g.matFold = e.matFold; g.which = e.which; g.rgbConst = e.rgbConst; g.aConst = e.aConst;
+        g.reg0Ok = ((e.which & 1) || (!(e.reads & 1u) && !e.reg0Neg)) ? 1 : 0;   // folded, or unread with sign 0
+        g.reg1Ok = ((e.which & 2) || !(e.reads & 2u)) ? 1 : 0;                   // folded, or unread
+        g.mat0Ok = (e.matFold || (e.which & 1) || (c0.matSrc == GX_SRC_VTX && c0.alphaMatSrc == GX_SRC_VTX)) ? 1 : 0;
+        g.amb0Ok = (e.matFold || (e.which & 1) || (!c0.enabled && !c0.alphaEnabled)) ? 1 : 0;
+        g.mode = uint32_t(sBatchMode); g.key = sBatchKey; g.serial = sVitaBatchSerial;
+        g.armed = 1;
+    }
+}
+static void pc_gfx_end_core(void) {
+#else
+void pc_gfx_end(void) {
+#endif
+    if (sInPrimitive && sHaveVertex) {
+        sVertexStream.push_back(sCurVertex);
+        sHaveVertex = false;
+    }
+    if (sInPrimitive && sVertexStream.empty() && !sRawPush.empty()) {
+        // Raw FIFO bytes primitive decoded as a display list.
+        static std::vector<u8> list;
+        list.clear();
+        list.push_back(u8(u8(sCurrentPrimType) & GX_OPCODE_MASK) | u8(int(sCurVtxFmt) & GX_VAT_MASK));
+        list.push_back(u8(sExpectedVerts >> 8));
+        list.push_back(u8(sExpectedVerts & 0xFF));
+        list.insert(list.end(), sRawPush.begin(), sRawPush.end());
+        sRawPush.clear();
+        sInPrimitive = false;
+        call_display_list_impl(list.data(), u32(list.size()));
+        return;
+    }
+    if (!sInPrimitive || sVertexStream.empty()) {
+        sInPrimitive = false;
+        return;
+    }
+
+    // Capture immutable packet before emitting to OpenGL (disabled - use display list capture)
+    // captureCurrentPacket();
+
+    // Same state key: join the open batch.
+#ifdef __vita__
+    // CPU model-view transform of immediate-mode primitives.
+    if (!sVerticesPretransformed) {
+        const u32 mtxId = sCurrentPosMtxId < 64 ? sCurrentPosMtxId : 0;
+        const float* M = sPosMatrix[mtxId];
+        const float* N = sNrmMatrix[mtxId];
+        for (Vertex& v : sVertexStream) {
+            const float x = v.x, y = v.y, z = v.z;
+            v.x = M[0] * x + M[4] * y + M[8] * z + M[12];
+            v.y = M[1] * x + M[5] * y + M[9] * z + M[13];
+            v.z = M[2] * x + M[6] * y + M[10] * z + M[14];
+            const float nx = v.nx, ny = v.ny, nz = v.nz;
+            v.nx = N[0] * nx + N[3] * ny + N[6] * nz;
+            v.ny = N[1] * nx + N[4] * ny + N[7] * nz;
+            v.nz = N[2] * nx + N[5] * ny + N[8] * nz;
+        }
+        sVerticesPretransformed = true;
+    }
+#endif
+    const uint64_t stateKey  = compute_batch_state_key();
+    const GLenum   batchMode = batch_mode_for(sCurrentPrimType);
+
+    if (sBatchOpen && batching_enabled() && stateKey == sBatchKey && batchMode == sBatchMode) {
+        append_primitive_to_batch();
+        ++sBatchPrims;
+#ifdef __vita__
+        if (sVitaImmNoting) vita_imm_end_note(1);
+#endif
+        sInPrimitive = false;
+        sAttrStep = 0;
+        return;
+    }
+
+    pc_gfx_flush_batch();
+
+#ifdef __vita__
+    sVitaApplyKey = stateKey; sVitaApplyKeyValid = true;
+    // Apply memo hit.
+    if (VitaApplyMemo* memo = vita_apply_memo_find(stateKey)) {
+        vita_apply_memo_bind(*memo);
+        apply_batch_state(true);
+    } else {
+        apply_batch_state();
+        vita_apply_memo_store(stateKey);
+    }
+    sVitaApplyKeyValid = false;
+    sVitaAppliedKey = stateKey;
+    vita_prog_applied_set(sCurrentProgram, stateKey);
+    sVitaAppliedKeyValid = true;
+#else
+    apply_batch_state();
+#endif
 
     // Uniforms for this state are now on the GPU. Open the batch; the draw
     // happens at the next flush, with these same uniforms still bound.
@@ -3914,9 +7121,16 @@ void pc_gfx_end(void) {
     sBatchMode  = batchMode;
     sBatchOpen  = true;
     sBatchPrims = 1;
+#ifdef __vita__
+    ++sVitaBatchSerial;                        // new batch
+#endif
     append_primitive_to_batch();
+#ifdef __vita__
+    if (sVitaImmNoting) vita_imm_end_note(2);
+#endif
     if (!batching_enabled()) pc_gfx_flush_batch();
 
+#ifndef __vita__
     static bool reportedFirstDraw = false;
     if (!reportedFirstDraw) {
         GLenum error = glGetError();
@@ -3968,6 +7182,7 @@ void pc_gfx_end(void) {
                sPosMatrix[sCurrentPosMtxId][13], sPosMatrix[sCurrentPosMtxId][14]);
         reportedFirstDraw = true;
     }
+#endif
 
     sInPrimitive = false;
     sAttrStep = 0;
@@ -4026,10 +7241,19 @@ static inline u8 get_color_size(GXCompType type) {
 }
 
 static inline void read_attr_color(const u8* ptr, GXCompType type, u8& r, u8& g, u8& b, u8& a) {
-    if (type == GX_RGBA8 || type == GX_RGBX8) {
+    if (type == GX_RGBA8) {
         r = ptr[0]; g = ptr[1]; b = ptr[2]; a = ptr[3];
-    } else if (type == GX_RGB8 || type == GX_RGBA6) {
+    } else if (type == GX_RGBX8) {
+        r = ptr[0]; g = ptr[1]; b = ptr[2]; a = 255;   // X = padding, not alpha
+    } else if (type == GX_RGB8) {
         r = ptr[0]; g = ptr[1]; b = ptr[2]; a = 255;
+    } else if (type == GX_RGBA6) {
+        // 24 bits, 6 per channel, MSB first: RRRRRRGG GGGGBBBB BBAAAAAA.
+        const u32 v = (u32(ptr[0]) << 16) | (u32(ptr[1]) << 8) | u32(ptr[2]);
+        r = (v >> 18) & 0x3F; r = u8((r << 2) | (r >> 4));
+        g = (v >> 12) & 0x3F; g = u8((g << 2) | (g >> 4));
+        b = (v >> 6)  & 0x3F; b = u8((b << 2) | (b >> 4));
+        a =  v        & 0x3F; a = u8((a << 2) | (a >> 4));
     } else if (type == GX_RGB565) {
         u16 val;
         memcpy(&val, ptr, sizeof(u16));
@@ -4106,6 +7330,9 @@ static inline float bits_to_float(u32 bits) {
 }
 
 static void handle_bp_reg(u32 hex) {
+#ifdef __vita__
+    vita_key_dirty(kKeyAll);
+#endif
     const u32 reg = (hex >> 24) & 0xFF;
     switch (reg) {
     case 0x41: { // PE color mode: blend/logic operation and write masks
@@ -4250,6 +7477,9 @@ static void handle_bp_reg(u32 hex) {
 }
 
 static void handle_xf_regs(u32 addrBase, u32 numWords, const u32* words) {
+#ifdef __vita__
+    vita_key_dirty(kKeyAll);
+#endif
     // Display lists embed whole matrix loads. Position matrices live at
     // XF addresses 12*n (3x4 words each); normal matrices at 0x400 + 9*n
     // (3x3 words each). GX matrix ids are 3*n to match PNMTXIDX values.
@@ -4264,6 +7494,7 @@ static void handle_xf_regs(u32 addrBase, u32 numWords, const u32* words) {
                 dst[col * 4 + 2] = bits_to_float(words[col + 8]);
             }
             dst[3] = 0.0f; dst[7] = 0.0f; dst[11] = 0.0f; dst[15] = 1.0f;
+            ++sPosMtxGen[mtxId];
         }
         return;
     }
@@ -4275,6 +7506,7 @@ static void handle_xf_regs(u32 addrBase, u32 numWords, const u32* words) {
             d[0] = bits_to_float(words[0]); d[1] = bits_to_float(words[3]); d[2] = bits_to_float(words[6]);
             d[3] = bits_to_float(words[1]); d[4] = bits_to_float(words[4]); d[5] = bits_to_float(words[7]);
             d[6] = bits_to_float(words[2]); d[7] = bits_to_float(words[5]); d[8] = bits_to_float(words[8]);
+            ++sNrmMtxGen[mtxId];
         }
         return;
     }
@@ -4320,7 +7552,20 @@ static void handle_xf_regs(u32 addrBase, u32 numWords, const u32* words) {
     }
 }
 
+#ifdef __vita__
+#include "vita_dl_cache.inl"
+#else
+extern "C" int pc_gx_dl_bounds(const void*, u32, const void*, float*, float*, int*) { return 0; }
+#endif
+static void call_display_list_impl(const void* list, u32 nbytes);
 void pc_gfx_call_display_list(const void* list, u32 nbytes) {
+#ifdef __vita__
+    g_vitaImmChain.armed = 0;
+    if (vita_dl_try_draw(list, nbytes)) return;
+#endif
+    call_display_list_impl(list, nbytes);
+}
+static void call_display_list_impl(const void* list, u32 nbytes) {
     // On its own switch rather than the tick profiler's: tying it to
     // PIKMIN_TICK_STATS would put the cost back exactly when measuring, which
     // is the one time it must not be there. Shares the switch with the vertex
@@ -4329,6 +7574,9 @@ void pc_gfx_call_display_list(const void* list, u32 nbytes) {
     static bool reportedUnsupportedCommand = false;
     static bool reportedMalformedVertex = false;
     static bool reportedInvalidMatrix = false;
+#ifdef __vita__
+    g_vitaImmChain.armed = 0;
+#endif
     if (!list || nbytes == 0) return;
 
     // Capture display list if capture is active
@@ -4336,8 +7584,10 @@ void pc_gfx_call_display_list(const void* list, u32 nbytes) {
         sPacketStore.captureDisplayList(list, nbytes);
     }
 
+#ifndef __vita__
     ++sPerfDisplayLists;
     sPerfDisplayListBytes += nbytes;
+#endif
     const u8* cursor = static_cast<const u8*>(list);
     const u8* end = cursor + nbytes;
     bool pendingTriangleStrip = false;
@@ -4355,6 +7605,9 @@ void pc_gfx_call_display_list(const void* list, u32 nbytes) {
 
         // ── Non-draw GP commands: interpret and keep parsing ──
         if (command == GX_CMD_LOAD_BP_REG) {
+#ifdef __vita__
+            vita_gxq_note_dl_register_write();
+#endif
             flushPendingStrip();
             u32 hex;
             if (!read_be_u32(cursor, end, hex)) break;
@@ -4362,6 +7615,9 @@ void pc_gfx_call_display_list(const void* list, u32 nbytes) {
             continue;
         }
         if (command == GX_CMD_LOAD_XF_REG) {
+#ifdef __vita__
+            vita_gxq_note_dl_register_write();
+#endif
             flushPendingStrip();
             u32 header;
             if (!read_be_u32(cursor, end, header)) break;
@@ -4407,7 +7663,6 @@ void pc_gfx_call_display_list(const void* list, u32 nbytes) {
         const u8 opcode = command & GX_OPCODE_MASK;
         const u8 format = command & GX_VAT_MASK;
         if (opcode < GX_CMD_DRAW_QUADS || opcode > GX_CMD_DRAW_POINTS) {
-            ++sDlDesyncs;
             report_desync("unsupported opcode", list,
                           size_t(cursor - static_cast<const u8*>(list) - 1), nbytes);
             flushPendingStrip();
@@ -4444,6 +7699,9 @@ void pc_gfx_call_display_list(const void* list, u32 nbytes) {
             v.x = 0.0f; v.y = 0.0f; v.z = 0.0f;
             v.nx = 0.0f; v.ny = 0.0f; v.nz = 1.0f;
             v.r = 1.0f; v.g = 1.0f; v.b = 1.0f; v.a = 1.0f;
+#ifdef __vita__
+            v.mtxIdx = 0.0f;
+#endif
             for (int tc = 0; tc < 4; ++tc) {
                 v.tex[tc][0] = 0.0f;
                 v.tex[tc][1] = 0.0f;
@@ -4468,7 +7726,6 @@ void pc_gfx_call_display_list(const void* list, u32 nbytes) {
                     const u8 value = *cursor++;
                     if (attr == GX_VA_PNMTXIDX) {
                         matrixId = value;
-                        if (matrixId >= 64) ++sBadMtxIdx;
                         if (matrixId >= 64 && !reportedInvalidMatrix) {
                             fprintf(stderr, "[PC GX] Invalid PNMTXIDX %u in display list\n", matrixId);
                             reportedInvalidMatrix = true;
@@ -4519,7 +7776,6 @@ void pc_gfx_call_display_list(const void* list, u32 nbytes) {
                     if (profilingWildVerts
                         && (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.z)
                             || fabsf(v.x) > 1.0e6f || fabsf(v.y) > 1.0e6f || fabsf(v.z) > 1.0e6f)) {
-                        ++sWildVerts;
                         // Separate the two possible sources: the model data we
                         // read, or the matrix we multiplied it by. Printing
                         // both says which one is garbage without guessing.
@@ -4580,7 +7836,7 @@ void pc_gfx_call_display_list(const void* list, u32 nbytes) {
                                 // this list is reaching us from a draw path
                                 // that never programmed one. Name that path
                                 // instead of inferring it.
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__vita__)
                                 fprintf(stderr, "[PC GX] wild draw call path: "
                                                 "unavailable on this platform\n");
 #else
@@ -4648,7 +7904,6 @@ void pc_gfx_call_display_list(const void* list, u32 nbytes) {
         }
 
         if (malformed) {
-            ++sDlDesyncs;
             report_desync("truncated vertex", list,
                           size_t(cursor - static_cast<const u8*>(list)), nbytes);
             if (!reportedMalformedVertex) {

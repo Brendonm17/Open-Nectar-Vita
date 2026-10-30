@@ -842,6 +842,10 @@ struct NaviThrowState : public NaviState {
 	// _00-_10 = NaviState
 	bool mHasThrownPiki; // _10
 	bool _11;  // _11
+#if defined(PIKI_PC_PORT)
+	// Throw press queued during the wind-up.
+	bool mQueuedThrowPress;
+#endif
 	Piki* mTargetPiki; // _14
 };
 

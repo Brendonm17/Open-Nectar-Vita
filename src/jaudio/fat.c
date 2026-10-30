@@ -33,6 +33,7 @@ static FATEntry fattmp[FAT_SIZE];
  */
 void Jac_FatMemory_Init(u32 size)
 {
+	PC_JAC_JOIN();
 	fatheapptr = (u8*)OSAlloc2(size);
 
 	if (fatheapptr) {

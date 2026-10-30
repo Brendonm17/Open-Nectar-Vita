@@ -8,6 +8,7 @@ static InterleaveBuffer* buf = &interleavebuf;
  */
 BOOL Jac_SendStreamData(u8* data, u32 size)
 {
+	PC_JAC_JOIN();
 	if (buf->streamFree < size) {
 		return FALSE;
 	}
@@ -27,6 +28,7 @@ BOOL Jac_SendStreamData(u8* data, u32 size)
  */
 BOOL Jac_CheckStreamFree(u32 size)
 {
+	PC_JAC_JOIN();
 	return (buf->streamFree >= size) ? TRUE : FALSE;
 }
 
@@ -35,6 +37,7 @@ BOOL Jac_CheckStreamFree(u32 size)
  */
 BOOL Jac_CheckStreamRemain(u32 size)
 {
+	PC_JAC_JOIN();
 	return (buf->streamRemain < size) ? FALSE : TRUE;
 }
 
@@ -44,6 +47,7 @@ BOOL Jac_CheckStreamRemain(u32 size)
  */
 u32 Jac_GetStreamRemain()
 {
+	PC_JAC_JOIN();
 	return buf->streamRemain;
 }
 
@@ -52,6 +56,7 @@ u32 Jac_GetStreamRemain()
  */
 u32 Jac_GetStreamData(u8* data, u32 size)
 {
+	PC_JAC_JOIN();
 	if (buf->isInit) {
 		if (buf->streamRemain < buf->bufSize / 2) {
 			return 0;
@@ -77,6 +82,7 @@ u32 Jac_GetStreamData(u8* data, u32 size)
  */
 void Jac_InitStreamData(u8* data, u32 size)
 {
+	PC_JAC_JOIN();
 	buf->bufData      = data;
 	buf->bufSize      = size;
 	buf->bufSendIdx   = 0;

@@ -1,6 +1,9 @@
 #include "Actor.h"
 #include "DebugLog.h"
 #include "SimpleAI.h"
+#ifdef __vita__
+#include "gl/vita_drawrec.h" // Draw-record join
+#endif
 
 /**
  * @todo: Documentation
@@ -29,6 +32,9 @@ Actor::Actor()
  */
 void Actor::setType(int, PikiShapeObject* shape, CreatureProp* props, SimpleAI* ai)
 {
+#ifdef __vita__
+	vita_drawrec_join(kDrJoinCine);
+#endif
 	mProps               = props;
 	mPikiShape           = shape;
 	mPikiShape->mAnimMgr = PikiShapeObject::getAnimMgr();
@@ -62,7 +68,11 @@ void Actor::refresh(Graphics& gfx)
 
 	mPikiAnimMgr.updateContext();
 	f32 light = mapMgr->getLight(mSRT.t.x, mSRT.t.z);
+#if defined(__vita__)
+	gfx.setLightingNoPrev(true, nullptr);
+#else
 	gfx.setLighting(true, nullptr);
+#endif
 
 	mPikiShape->mShape->updateAnim(gfx, mtx, nullptr, this);
 	mPikiShape->mShape->drawshape(gfx, *gfx.mCamera, nullptr);

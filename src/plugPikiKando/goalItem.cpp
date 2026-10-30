@@ -19,6 +19,9 @@
 #include "bugprint.h"
 #include "gameflow.h"
 #include "jaudio/pikiinter.h"
+#if defined(__vita__)
+#include "gl/vita_drawrec.h"
+#endif
 
 // this nonsense is specifically to get the sdata ordered correctly
 // GoalItem::startAI needs to generate these Vector3f floats before earlier functions in the file
@@ -762,6 +765,9 @@ void GoalItem::refresh(Graphics& gfx)
 	if (gameflow.mMoviePlayer->mIsActive && IS_DEMO_HIDE_ONYON(demoHideFlag, mOnionColour)) {
 		return;
 	}
+#if defined(__vita__)
+	const bool rec = g_pcDrRecObj == this && pcDrItemBegin(*this, mItemShapeObject->mShape, gfx);
+#endif
 
 	f32 scale = 1.0f;
 	mSRT.s.set(scale, scale, scale);
@@ -779,8 +785,15 @@ void GoalItem::refresh(Graphics& gfx)
 		mSpotModelEff->mIsVisible = true;
 	}
 
+#if defined(__vita__)
+	if (!rec) {
+		gfx.setLightingNoPrev(true, nullptr);
+		gfx.useMatrix(Matrix4f::ident, 0);
+	}
+#else
 	gfx.setLighting(true, nullptr);
 	gfx.useMatrix(Matrix4f::ident, 0);
+#endif
 	mItemAnimator.updateContext();
 
 	f32 rate;
@@ -789,11 +802,22 @@ void GoalItem::refresh(Graphics& gfx)
 	} else {
 		rate = int(mOnionColour << 1);
 	}
+#if defined(__vita__)
+	if (!rec) {
+		mAnimatedMaterials.animate(&rate);
+	}
+	mItemShapeObject->mShape->updateAnim(gfx, mtx1, nullptr, this);
+	const bool visible = aiCullable();
+	if (visible && !rec) {
+		mItemShapeObject->mShape->drawshape(gfx, *gfx.mCamera, &mAnimatedMaterials);
+	}
+#else
 	mAnimatedMaterials.animate(&rate);
 	mItemShapeObject->mShape->updateAnim(gfx, mtx1, nullptr, this);
 	if (aiCullable()) {
 		mItemShapeObject->mShape->drawshape(gfx, *gfx.mCamera, &mAnimatedMaterials);
 	}
+#endif
 	mCollInfo->updateInfo(gfx, false);
 
 	for (int i = 0; i < 3; i++) {
@@ -814,6 +838,26 @@ void GoalItem::refresh(Graphics& gfx)
 			printMatrix("invCam", gfx.mCamera->mInverseLookAtMtx);
 		}
 	}
+#if defined(__vita__)
+	if (rec) {
+		// The record
+		PcDrItemRec r;
+		r.obj        = this;
+		r.shape      = mItemShapeObject->mShape;
+		r.dyn        = &mAnimatedMaterials;
+		r.animDyn    = &mAnimatedMaterials;
+		r.build      = nullptr;
+		r.val        = rate;
+		r.lane       = kDrLaneGoal;
+		r.priceClass = kDrPcGoal;
+		r.animVal    = true;
+		r.light      = true;
+		r.ident      = true;
+		r.draw       = visible;
+		r.stamp      = true;
+		pcDrItemRecord(r, gfx);
+	}
+#endif
 
 	STACK_PAD_TERNARY(mCollInfo, 1);
 	STACK_PAD_VAR(3);

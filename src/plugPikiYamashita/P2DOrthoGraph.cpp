@@ -1,5 +1,8 @@
 #include "Dolphin/gx.h"
 #include "P2D/Graph.h"
+#if defined(PIKI_PC_PORT)
+#include "gl/pc_gfx.h"
+#endif
 
 /**
  * @todo: Documentation
@@ -48,6 +51,13 @@ void P2DOrthoGraph::setPort()
 
 	MTXOrtho(mProjectionMtx.mMtx, mLogicalViewBounds.mMinY, mLogicalViewBounds.mMaxY, mLogicalViewBounds.mMinX, mLogicalViewBounds.mMaxX,
 	         mLogicalNearZ, mLogicalFarZ);
+#if defined(PIKI_PC_PORT)
+	// Interface: 640x480 in a centred 4:3 box
+	{
+		const f32 sx = pc_gfx_ui_projection_scale_x();
+		for (int c = 0; c < 4; c++) mProjectionMtx.mMtx[0][c] *= sx;
+	}
+#endif
 	GXSetProjection(mProjectionMtx.mMtx, GX_ORTHOGRAPHIC);
 }
 

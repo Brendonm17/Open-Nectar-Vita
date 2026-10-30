@@ -181,7 +181,11 @@ void Spider::drawShape(Graphics& gfx)
 
 			// Why are these inside the for loop?
 			gfx.useMatrix(Matrix4f::ident, 0);
+#if defined(__vita__)
+			gfx.setLightingNoPrev(false, nullptr);
+#else
 			gfx.setLighting(false, nullptr);
+#endif
 			gfx.setFog(false);
 			gfx.useTexture(nullptr, GX_TEXMAP0);
 

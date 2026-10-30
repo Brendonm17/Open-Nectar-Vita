@@ -346,6 +346,8 @@ std::string pc_tev_build_fragment_source(const PcTevShaderKey& key)
 	}
 	out += "uniform vec4 uMaterialColor;\n";
 	if (usesChannel1) out += "uniform vec4 uMaterialColor1;\n";
+	out += "uniform vec4 uFogParams;\n";   // start, end, near, far
+	out += "uniform vec4 uFogColour;\n";
 	out += "uniform vec4 uTevPrev;\n";
 	out += "uniform vec4 uTevReg0;\n";
 	out += "uniform vec4 uTevReg1;\n";
@@ -399,6 +401,23 @@ std::string pc_tev_build_fragment_source(const PcTevShaderKey& key)
 		out += "\tif (!(" + test0 + " " + combiner + " " + test1 + ")) discard;\n";
 	}
 
+	out += "\t// Fog, where the GameCube put it: after the stages, before the blend,\n";
+	out += "\t// on colour only -- a fogged transparent surface stays as transparent as\n";
+	out += "\t// it was. uFogParams is (start, end, near, far); a zero-width span is how\n";
+	out += "\t// the host says fog is off, and it makes this a no-op.\n";
+	out += "\t//\n";
+	out += "\t// The window depth is not linear in view distance, so it is turned back\n";
+	out += "\t// into one before being measured against start and end. Interpolating the\n";
+	out += "\t// window value instead would bunch the whole ramp up against the camera.\n";
+	// GameCube projection depth: distance = n*f / (n - ndc*(f - n)).
+	out += "\tif (uFogParams.y > uFogParams.x) {\n";
+	out += "\tfloat fogNdc = gl_FragCoord.z * 2.0 - 1.0;\n";
+	out += "\tfloat fogDenom = uFogParams.z - fogNdc * (uFogParams.w - uFogParams.z);\n";
+	out += "\tfloat fogZ = (abs(fogDenom) < 1e-6) ? uFogParams.w : (uFogParams.z * uFogParams.w) / fogDenom;\n";
+	out += "\tfloat fogSpan = uFogParams.y - uFogParams.x;\n";
+	out += "\tfloat fogAmount = (fogSpan < 1e-6) ? 0.0 : clamp((fogZ - uFogParams.x) / fogSpan, 0.0, 1.0);\n";
+	out += "\tprev.rgb = mix(prev.rgb, uFogColour.rgb, fogAmount);\n";
+	out += "\t}\n";
 	out += "\tfragColor = prev;\n";
 	out += "}\n";
 	return out;

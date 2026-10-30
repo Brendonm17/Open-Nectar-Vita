@@ -216,6 +216,11 @@ public:
 	Camera mCamera;              // _A8
 	int mCameraIdx;              // _3F0
 	SceneData* mSceneData;       // _3F4
+#if defined(PIKI_PC_PORT)
+	// Last reliable horizontal heading.
+	f32 mPcStableYaw   = 0.0f;
+	bool mPcHasStableYaw = false;
+#endif
 };
 
 #endif

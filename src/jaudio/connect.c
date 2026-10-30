@@ -79,6 +79,7 @@ static BOOL UpdateWave_Extern(WaveArchiveBank_* bank, CtrlGroup_* group, Ctrl_* 
  */
 void Jac_SceneClose(WaveArchiveBank_* bank, CtrlGroup_* group, u32 id, BOOL set)
 {
+	PC_JAC_JOIN();
 	WaveArchive_* arc;
 	SCNE_* scene;
 
@@ -101,6 +102,7 @@ void Jac_SceneClose(WaveArchiveBank_* bank, CtrlGroup_* group, u32 id, BOOL set)
  */
 BOOL Jac_SceneSet(WaveArchiveBank_* bank, CtrlGroup_* group, u32 id, BOOL set)
 {
+	PC_JAC_JOIN();
 	WaveArchiveBank_** bankp = &bank;
 	u32* idp                 = &id;
 	WaveArchive_* arc;
@@ -229,6 +231,7 @@ WaveID_* GetSoundHandle(CtrlGroup_* group, u32 flag)
  */
 u16 Jac_WsVirtualToPhysical(u16 vID)
 {
+	PC_JAC_JOIN();
 	return WS_V2P_TABLE[vID];
 }
 
@@ -237,6 +240,7 @@ u16 Jac_WsVirtualToPhysical(u16 vID)
  */
 u16 Jac_BnkVirtualToPhysical(u16 vID)
 {
+	PC_JAC_JOIN();
 	return BNK_V2P_TABLE[vID];
 }
 
@@ -246,6 +250,7 @@ u16 Jac_BnkVirtualToPhysical(u16 vID)
  */
 u16 Jac_BnkPhysicalToVirtual(u16 bnk)
 {
+	PC_JAC_JOIN();
 	TRAP_UNIMPLEMENTED;
 }
 
@@ -255,6 +260,7 @@ u16 Jac_BnkPhysicalToVirtual(u16 bnk)
  */
 u16 Jac_WsPhysicalToVirtual(u16 ws)
 {
+	PC_JAC_JOIN();
 	TRAP_UNIMPLEMENTED;
 }
 
@@ -263,6 +269,7 @@ u16 Jac_WsPhysicalToVirtual(u16 ws)
  */
 void Jac_WsConnectTableSet(u32 id, u32 val)
 {
+	PC_JAC_JOIN();
 	u32* id2 = &id;
 	u32* bnk = &val;
 
@@ -278,6 +285,7 @@ void Jac_WsConnectTableSet(u32 id, u32 val)
  */
 void Jac_BnkConnectTableSet(u32 id, u32 val)
 {
+	PC_JAC_JOIN();
 	u32* id2 = &id;
 	u32* bnk = &val;
 
@@ -293,6 +301,7 @@ void Jac_BnkConnectTableSet(u32 id, u32 val)
  */
 void Jac_ConnectTableInit()
 {
+	PC_JAC_JOIN();
 	for (int i = 0; i < 0x100; i++) {
 		WS_V2P_TABLE[i]  = -1;
 		BNK_V2P_TABLE[i] = -1;

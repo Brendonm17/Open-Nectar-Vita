@@ -27,6 +27,7 @@ JSTREAM J_STREAM = {
  */
 void Jac_PlayStreamBGM(s32, s32, s32)
 {
+	PC_JAC_JOIN();
 	TRAP_UNIMPLEMENTED;
 }
 
@@ -36,6 +37,7 @@ void Jac_PlayStreamBGM(s32, s32, s32)
  */
 void Jac_StopStreamBGM(s32, s32)
 {
+	PC_JAC_JOIN();
 	TRAP_UNIMPLEMENTED;
 }
 
@@ -45,6 +47,7 @@ void Jac_StopStreamBGM(s32, s32)
  */
 void Jac_VolMoveStreamBGM(s32 vol, s32)
 {
+	PC_JAC_JOIN();
 	TRAP_UNIMPLEMENTED;
 	// this is just to make the magic int-to-float conversion double spawn earlier.
 	J_STREAM.target_vol1 = vol;
@@ -172,3 +175,11 @@ void StreamMain()
 
 	STACK_PAD_VAR(4);
 }
+
+#if defined(PIKI_PC_PORT)
+/* True when the stream state machine does DVD I/O this step. */
+BOOL StreamStepTouchesDisc()
+{
+	return J_STREAM.state != JSTREAM_STATE_STOPPED && J_STREAM.state != JSTREAM_STATE_PLAYING;
+}
+#endif

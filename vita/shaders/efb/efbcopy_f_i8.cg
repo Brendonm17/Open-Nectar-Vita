@@ -1,0 +1,10 @@
+// EFB copy to GX_TF_I8: the colour converted to luma (Y of BT.601 YCbCr, 16..235),
+// the conversion the GameCube's copy unit applies for intensity formats.
+float4 main(float4 vUV01 : TEXCOORD0, float4 vUV23 : TEXCOORD1, uniform sampler2D uTex : TEXUNIT0) : COLOR
+{
+    float3 c = (tex2D(uTex, vUV01.xy).rgb + tex2D(uTex, vUV01.zw).rgb + tex2D(uTex, vUV23.xy).rgb + tex2D(uTex, vUV23.zw).rgb) * 0.25f;
+    float3 v8 = floor(c * 255.0f + 0.5f);
+    float y = floor((66.0f * v8.r + 129.0f * v8.g + 25.0f * v8.b + 128.0f) / 256.0f) + 16.0f;
+    y = min(y, 255.0f) / 255.0f;
+    return float4(y, y, y, y);
+}

@@ -1164,16 +1164,3 @@ void Jac_PauseOrimaSe() {
 void Jac_UnPauseOrimaSe() { apply_gameplay_audio_pause(); }
 
 #endif // !PIKI_USE_JAUDIO
-
-// H4M video decoding is not implemented by this Linux port.
-extern "C" {
-void Jac_StreamMovieUpdate() {}
-void Jac_StreamMovieInit(const char*, u8*, int) {}
-int Jac_StreamMovieGetPicture(void* pictureBuffer, int* widthOut, int* heightOut) {
-    if (pictureBuffer) *static_cast<void**>(pictureBuffer) = nullptr;
-    if (widthOut) *widthOut = 0;
-    if (heightOut) *heightOut = 0;
-    return -1;
-}
-void Jac_StreamMovieStop() {}
-}

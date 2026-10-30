@@ -46,6 +46,10 @@ typedef enum JSTREAM_STATE_ {
 
 // Global functions (all C++, so no extern C wrap).
 void StreamMain();
+#if defined(PIKI_PC_PORT)
+// True if the next StreamMain step does DVD I/O.
+BOOL StreamStepTouchesDisc();
+#endif
 
 /////////////////////////////////////////////////
 

@@ -1,4 +1,14 @@
 #include "MapMgr.h"
+#if defined(PIKI_PC_PORT)
+#include <cstring>
+#endif
+#if defined(__vita__)
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include "pc_gfx.h"
+#include "settings/pc_settings.h"
+#endif
 
 #include "AIPerf.h"
 #include "Creature.h"
@@ -26,6 +36,16 @@
 #pragma region DECLARATIONS
 
 struct SoftLightAccumulator;
+
+#if defined(__vita__)
+// node.cpp: watched node lists.
+void pcNodeListWatch(CoreNode* root);
+void pcNodeListTouched(CoreNode* root);
+u32 pcNodeListGen(CoreNode* root);
+// Packed map collision planes.
+void pcMapPlanesRelease();
+void pcMapPlanesBuild(Shape* model);
+#endif
 
 //////////////////////////////////////////////////////
 //////////////// PRINT/ERROR DEFINES /////////////////
@@ -154,6 +174,10 @@ void DynCollShape::drawAtari(Graphics& gfx)
  */
 void DynCollShape::updatePos()
 {
+#if defined(__vita__)
+	// Platform list changed.
+	pcNodeListTouched(mParent);
+#endif
 	// shrink box back down so it can be a minimum bound
 	mBoundingBox.resetBound();
 	// transform all vertices
@@ -1115,6 +1139,10 @@ MapMgr::MapMgr(Controller* controller)
 
 	mCurrTraceTick = 0;
 	mMapModel      = nullptr;
+#if defined(__vita__)
+	// Release the previous map's packed planes.
+	pcMapPlanesRelease();
+#endif
 
 	// set up debug collisions
 	mDebugCollCount = 0;
@@ -1142,6 +1170,9 @@ MapMgr::MapMgr(Controller* controller)
 	// set up map collision handler
 	memStat->start("dyncolshape");
 	mCollShapeList = new DynCollShape(nullptr);
+#if defined(__vita__)
+	pcNodeListWatch(mCollShapeList);
+#endif
 	memStat->end("dyncolshape");
 
 	// set up shadow handlers
@@ -1213,6 +1244,10 @@ void MapMgr::initShape()
 	// set up collisions (with grid size of 64)
 	mMapModel->createCollisions(MAP_GRID_SIZE);
 	mMapBounds.expandBound(mMapModel->mCourseExtents);
+#if defined(__vita__)
+	// Pack collision planes.
+	pcMapPlanesBuild(mMapModel);
+#endif
 
 	// set up physics
 	mWorldSimulator         = new DynSimulator();
@@ -1308,8 +1343,21 @@ void MapMgr::update()
 		    || ((creature->aiCullable() || !creature->mGrid.aiCulling())
 		        && ((!creature->isSluice() && creature->mObjType != OBJTYPE_WorkObject) || !creature->mGrid.aiCulling()))) {
 
+#if defined(PIKI_PC_PORT)
+			// Skip the rebuild for an unmoved platform.
+			const bool srtSame = coll->mPcSameCount >= 0 && memcmp(&coll->mLocalSRT, &coll->mPcLastSRT, sizeof(SRT)) == 0;
+			const bool mtxSame = srtSame && memcmp(&coll->mTransformMtx, &coll->mPcLastMtx, sizeof(Matrix4f)) == 0;
+			if (!(mtxSame && coll->mPcSameCount >= 1)) {
+				coll->update();
+				coll->updatePos();
+				coll->mPcSameCount = srtSame ? coll->mPcSameCount + 1 : 0;
+				coll->mPcLastSRT   = coll->mLocalSRT;
+				coll->mPcLastMtx   = coll->mTransformMtx;
+			}
+#else
 			coll->update();
 			coll->updatePos();
+#endif
 			coll->mContactTickCount = 0;
 
 			// these debug amounts are completely unused
@@ -1432,7 +1480,11 @@ void MapMgr::refresh(Graphics& gfx)
 	Matrix4f modelMtx;
 	modelMtx.makeSRT(Vector3f(1.0f, 1.0f, 1.0f), Vector3f(0.0f, 0.0f, 0.0f), Vector3f(0.0f, 0.0f, 0.0f));
 	gfx.calcViewMatrix(modelMtx, viewMtx);
+#if defined(__vita__)
+	gfx.setLightingNoPrev(true, nullptr);
+#else
 	gfx.setLighting(true, nullptr);
+#endif
 	// don't allow translucent things
 	gfx.mMatRenderMask = (MATFLAG_Opaque | MATFLAG_AlphaTest);
 	mMapModel->updateAnim(gfx, viewMtx, nullptr, this);
@@ -1452,7 +1504,11 @@ void MapMgr::refresh(Graphics& gfx)
 		gfx.calcViewMatrix(coll->mTransformMtx, coll->mViewMtx);
 		gfx.useMatrix(coll->mViewMtx, 0);
 		gfx.mHasTexGen = TRUE;
+#if defined(__vita__)
+		gfx.setLightingNoPrev(true, nullptr);
+#else
 		gfx.setLighting(true, nullptr);
+#endif
 
 		// draw the object
 		coll->refresh(gfx);
@@ -1611,7 +1667,11 @@ void MapMgr::drawXLU(Graphics& gfx)
 			modelMtx.makeSRT(Vector3f(1.0f, 1.0f, 1.0f), Vector3f(0.0f, 0.0f, 0.0f), Vector3f(0.0f, 0.0f, 0.0f));
 			gfx.calcViewMatrix(modelMtx, viewMtx);
 			gfx.useMatrix(viewMtx, 0);
+#if defined(__vita__)
+			gfx.setLightingNoPrev(true, nullptr);
+#else
 			gfx.setLighting(true, nullptr);
+#endif
 			// only allow translucent things this pass
 			gfx.mMatRenderMask = MATFLAG_AlphaBlend;
 			mMapModel->updateAnim(gfx, viewMtx, nullptr, this);
@@ -1661,10 +1721,13 @@ void MapMgr::postrefresh(Graphics& gfx)
 		gsys->mTimer->stop("eff draw");
 	}
 
-#if PIKI_USE_DGX && !PIKI_PC_PORT
+#if PIKI_USE_DGX && (!PIKI_PC_PORT || defined(__vita__))
 	// make and draw infamous blur effect - on by default
-	// Disabled on PC: requires GXCopyTex framebuffer capture which is stubbed.
+#if defined(__vita__)
+	if (gsys->mToggleBlur && pc_settings_get_blur()) {
+#else
 	if (gsys->mToggleBlur) {
+#endif
 		// set up screen environment for drawing
 		Matrix4f orthoMtx;
 		gfx.setOrthogonal(orthoMtx.mMtx, AREA_FULL_SCREEN(gfx));
@@ -1695,7 +1758,12 @@ void MapMgr::postrefresh(Graphics& gfx)
 		gfx.setPrimEnv(stack_new(Colour)(255, 255, 255, gfx.mCamera->mBlurAlpha), nullptr);
 
 		// render multi-texture blend (blur)
+#if defined(__vita__)
+		// Blur composite.
+		pc_gfx_efb_composite(0, mBlurResultTexture->mPixelData, mBlurSourceTexture->mPixelData, gfx.mCamera->mBlurAlpha, 0.0f);
+#else
 		gfx.blatRectangle(AREA_FULL_SCREEN(gfx));
+#endif
 
 		// clean up graphics settings + store current blur result for use next frame
 		gfx.setCBlending(blend);
@@ -1737,6 +1805,13 @@ void MapMgr::postrefresh(Graphics& gfx)
 	if (mCurrDesaturationLevel > 0.0f || mCurrFadeLevel > 0.0f) {
 		Matrix4f orthoMtx;
 		gfx.setOrthogonal(orthoMtx.mMtx, AREA_FULL_SCREEN(gfx));
+#if defined(__vita__)
+		// Grey-out source when the blur copy is off.
+		if (mCurrDesaturationLevel > 0.0f && !(gsys->mToggleBlur && pc_settings_get_blur())) {
+			mBlurResultTexture->grabBuffer(mBlurResultTexture->mWidth, mBlurResultTexture->mHeight, false, true);
+			gfx.resetCopyFilter();
+		}
+#endif
 
 		// apply desaturated blur texture to desired level
 #if PIKI_USE_DGX
@@ -1744,7 +1819,14 @@ void MapMgr::postrefresh(Graphics& gfx)
 #endif
 		gfx.setColour(Colour(160, 160, 160, (int)(mCurrDesaturationLevel * 255.0f)), true);
 		gfx.useTexture(mBlurResultTexture, GX_TEXMAP0);
+#if defined(__vita__)
+		// Grey-out composite.
+		if (mCurrDesaturationLevel > 0.0f) {
+			pc_gfx_efb_composite(1, mBlurResultTexture->mPixelData, nullptr, mCurrDesaturationLevel * 255.0f, 160.0f);
+		}
+#else
 		gfx.drawRectangle(AREA_FULL_SCREEN(gfx), RectArea(0, 0, mBlurResultTexture->mWidth, mBlurResultTexture->mHeight), nullptr);
+#endif
 
 #if PIKI_USE_DGX
 		GXSetTevSwapModeTable(GX_TEV_SWAP0, GX_CH_RED, GX_CH_GREEN, GX_CH_BLUE, GX_CH_ALPHA);
@@ -1752,6 +1834,10 @@ void MapMgr::postrefresh(Graphics& gfx)
 		gfx.setColour(Colour(0, 0, 0, int(mCurrFadeLevel * 255.0f)), true);
 		gfx.useTexture(nullptr, GX_TEXMAP0);
 		gfx.fillRectangle(AREA_FULL_SCREEN(gfx));
+#if defined(PIKI_PC_PORT)
+		// Full-screen scissor for the effects.
+		gfx.setScissor(AREA_FULL_SCREEN(gfx));
+#endif
 	}
 
 	// draw debug triangle outlines
@@ -2081,6 +2167,221 @@ f32 MapMgr::findEdgePenetration(CollTriInfo& tri, immut Vector3f* vertexList, im
 	return 0.0f;
 }
 
+#if defined(__vita__)
+/*
+ * PS Vita: packed map collision planes, one per mTriList entry.
+ */
+#if defined(__ARM_FEATURE_FMA)
+#define PC_MAP_PLANES 0
+#else
+#define PC_MAP_PLANES 1
+#endif
+static const Plane* sPcMapPlanes     = nullptr;
+static uintptr_t sPcMapPlaneTris     = 0;
+static uintptr_t sPcMapPlaneTriBytes = 0;
+static int sPcMapPlaneCount          = 0;
+static Shape* sPcMapPlaneModel       = nullptr;
+static u32 sPcMapPlaneGen            = 0;
+static u32 sPcMapLoadGen             = 0;
+static uintptr_t sPcMapGroupLo       = 0;
+static uintptr_t sPcMapGroupSpan     = 0;
+
+void pcMapPlanesRelease()
+{
+	if (sPcMapPlanes) {
+		free(const_cast<Plane*>(sPcMapPlanes));
+	}
+	sPcMapPlanes        = nullptr;
+	sPcMapPlaneTris     = 0;
+	sPcMapPlaneTriBytes = 0;
+	sPcMapPlaneCount    = 0;
+	sPcMapPlaneModel    = nullptr;
+	sPcMapGroupLo       = 0;
+	sPcMapGroupSpan     = 0;
+	sPcMapLoadGen++;
+}
+
+void pcMapPlanesBuild(Shape* model)
+{
+	pcMapPlanesRelease();
+	if (!PC_MAP_PLANES || !model || !model->mTriList || model->mTriCount <= 0 || !model->mCollGroups) {
+		return;
+	}
+
+	const int triCount       = model->mTriCount;
+	const uintptr_t triBase  = reinterpret_cast<uintptr_t>(model->mTriList);
+	const uintptr_t triBytes = uintptr_t(triCount) * sizeof(CollTriInfo);
+	const int cellCount      = model->mGridSizeX * model->mGridSizeY;
+
+	// Address range of the non-empty grid groups.
+	uintptr_t groupLo = UINTPTR_MAX, groupHi = 0;
+	int groupRefs     = 0;
+	for (int cell = 0; cell < cellCount; cell++) {
+		CollGroup* group = model->mCollGroups[cell];
+		if (!group || group->mTriCount <= 0) {
+			continue;
+		}
+		const uintptr_t addr = reinterpret_cast<uintptr_t>(group);
+		groupLo              = addr < groupLo ? addr : groupLo;
+		groupHi              = addr > groupHi ? addr : groupHi;
+		groupRefs++;
+	}
+	if (groupRefs == 0) {
+		return;
+	}
+
+	Plane* planes = static_cast<Plane*>(malloc(size_t(triCount) * sizeof(Plane)));
+	if (!planes) {
+		printf("[VITA COLL] packed map planes unavailable for this map: out of memory for %d planes (%u KB)\n", triCount,
+		       unsigned(size_t(triCount) * sizeof(Plane) / 1024));
+		return;
+	}
+	for (int i = 0; i < triCount; i++) {
+		memcpy(&planes[i], &model->mTriList[i].mTriangle, sizeof(Plane));
+	}
+
+	sPcMapPlanes        = planes;
+	sPcMapPlaneTris     = triBase;
+	sPcMapPlaneTriBytes = triBytes;
+	sPcMapPlaneCount    = triCount;
+	sPcMapPlaneModel    = model;
+	sPcMapPlaneGen      = sPcMapLoadGen;
+	sPcMapGroupLo       = groupLo;
+	sPcMapGroupSpan     = groupHi - groupLo;
+}
+
+/**
+ * @brief Packed planes for one of the current map's grid groups, else null.
+ */
+static inline immut Plane* pcMapPlanesFor(immut CollGroup* group, immut Shape* mapModel)
+{
+	if (!sPcMapPlanes || mapModel != sPcMapPlaneModel || sPcMapPlaneGen != sPcMapLoadGen) {
+		return nullptr;
+	}
+	return (reinterpret_cast<uintptr_t>(group) - sPcMapGroupLo <= sPcMapGroupSpan) ? sPcMapPlanes : nullptr;
+}
+
+/*
+ * PS Vita: recTraceMove triangle classification, edge distances computed once.
+ */
+enum {
+	kPcCollNone     = 0,
+	kPcCollFace     = 1,
+	kPcCollBoundary = 2,
+};
+
+/**
+ * @brief findEdgePenetration with precomputed edge distances.
+ * UPSTREAM SYNC: mirror upstream fixes to findEdgePenetration.
+ */
+static inline __attribute__((no_instrument_function)) f32 pcFindEdgePenetrationPre(CollTriInfo& tri, immut Vector3f* vertexList,
+                                                                                   immut Vector3f& sphereCenter, f32 sphereRadius,
+                                                                                   Vector3f& outNormal, immut f32* edgeDist)
+{
+	// check each edge in turn
+	for (int i = 0; i < 3; i++) {
+		f32 dist = edgeDist[i];
+		// check if we're a) centered outside the triangle, and b) radius intersects some part of the edge
+		if (dist < 0.0f && dist >= -sphereRadius) {
+			immut Vector3f& edgeStart = vertexList[tri.mVertexIndices[i % 3]];
+			immut Vector3f& edgeEnd   = vertexList[tri.mVertexIndices[(i + 1) % 3]];
+
+			Vector3f edgeVec = edgeEnd - edgeStart;
+			f32 edgeSqrLen   = edgeVec.x * edgeVec.x + edgeVec.y * edgeVec.y + edgeVec.z * edgeVec.z;
+			// calc normalised edge parameter - between 0 and 1 = edge point is closest; < 0 or > 1 = vertex is closest
+			f32 t = edgeVec.DP(sphereCenter - edgeStart) / edgeSqrLen;
+			if (t >= 0.0f && t < 1.0f) {
+				// closest point is on an edge - get the position
+				Vector3f edgePos(edgeVec.x * t + edgeStart.x, edgeVec.y * t + edgeStart.y, edgeVec.z * t + edgeStart.z);
+				// calc direction from closest point to sphere center
+				Vector3f dirEdge(sphereCenter.x - edgePos.x, sphereCenter.y - edgePos.y, sphereCenter.z - edgePos.z);
+				outNormal.set(dirEdge.x, dirEdge.y, dirEdge.z);
+				f32 distEdge = outNormal.normalise(); // normalise and return distance
+				if (distEdge < sphereRadius) {
+					return distEdge;
+				}
+			} else {
+				// closest point is one of the two vertices - try the "start" one first
+				Vector3f dirStartVtx(sphereCenter.x - edgeStart.x, sphereCenter.y - edgeStart.y, sphereCenter.z - edgeStart.z);
+				f32 distStartVtx = dirStartVtx.normalise();
+				if (distStartVtx < sphereRadius) {
+					outNormal.set(dirStartVtx.x, dirStartVtx.y, dirStartVtx.z);
+					return distStartVtx;
+				}
+
+				// otherwise, try "end" one
+				Vector3f dirEndVtx(sphereCenter.x - edgeEnd.x, sphereCenter.y - edgeEnd.y, sphereCenter.z - edgeEnd.z);
+				f32 distEndVtx = dirEndVtx.normalise();
+				if (distEndVtx < sphereRadius) {
+					outNormal.set(dirEndVtx.x, dirEndVtx.y, dirEndVtx.z);
+					return distEndVtx;
+				}
+			}
+		}
+	}
+
+	// no penetration found
+	return 0.0f;
+}
+
+/**
+ * @brief Original triangle classification.
+ */
+static inline __attribute__((always_inline, no_instrument_function)) int
+pcCollClassifyOriginal(MapMgr& mgr, CollTriInfo& tri, immut Vector3f* vertexList, immut Vector3f& pos, f32 collRadius,
+                       Vector3f& collNormal, f32& penDepth)
+{
+	int collisionType = kPcCollNone;
+	collNormal        = tri.mTriangle.mNormal;
+	penDepth          = tri.mTriangle.dist(pos);
+
+	// if triangle is within trace radius of tentative position AND we're above it, we have some collision happening
+	if (penDepth < collRadius && penDepth > 0.0f) {
+		if (tri.behindEdge(pos) == -1) {
+			// no edge collision, so must be face collision (i.e. inside triangle)
+			collisionType = kPcCollFace;
+		} else {
+			// check edge collision again to be sure
+			penDepth = mgr.findEdgePenetration(tri, vertexList, pos, collRadius, collNormal);
+			if (penDepth != 0.0f) {
+				// trace sphere collides with one of the triangle edges or vertices
+				collisionType = kPcCollBoundary;
+			}
+		}
+	}
+	return collisionType;
+}
+
+/**
+ * @brief Triangle classification from precomputed edge distances.
+ */
+static inline __attribute__((always_inline, no_instrument_function)) int
+pcCollEdgeClassify(CollTriInfo& tri, immut Vector3f* vertexList, immut Vector3f& pos, f32 collRadius, Vector3f& collNormal,
+                   f32& penDepth)
+{
+	f32 edgeDist[3];
+	edgeDist[0] = tri.mEdgePlanes[0].dist(pos);
+	edgeDist[1] = tri.mEdgePlanes[1].dist(pos);
+	edgeDist[2] = tri.mEdgePlanes[2].dist(pos);
+
+	// No edge distance below zero.
+	if (!(edgeDist[0] < 0.0f) && !(edgeDist[1] < 0.0f) && !(edgeDist[2] < 0.0f)) {
+		collNormal = tri.mTriangle.mNormal;
+		return kPcCollFace;
+	}
+
+	// No edge in reach.
+	if (!(edgeDist[0] < 0.0f && edgeDist[0] >= -collRadius) && !(edgeDist[1] < 0.0f && edgeDist[1] >= -collRadius)
+	    && !(edgeDist[2] < 0.0f && edgeDist[2] >= -collRadius)) {
+		return kPcCollNone;
+	}
+
+	penDepth = pcFindEdgePenetrationPre(tri, vertexList, pos, collRadius, collNormal, edgeDist);
+	return (penDepth != 0.0f) ? kPcCollBoundary : kPcCollNone;
+}
+
+#endif
+
 /**
  * @brief Performs a single movement/collision resolution step for a moving sphere against a list of collision.
  *
@@ -2126,6 +2427,12 @@ void MapMgr::recTraceMove(CollGroup* collGroupList, MoveTrace& trace, f32 timeSt
 			// if everything is far culled, treat it as a bit suspicious and check them all anyway
 			activeTriCount = collGroupList->mTriCount;
 		}
+#if defined(__vita__)
+		// Packed planes for this group.
+		immut Plane* packedPlanes   = pcMapPlanesFor(currGroup, mMapModel);
+		const uintptr_t packedTris  = sPcMapPlaneTris;
+		const uintptr_t packedBytes = sPcMapPlaneTriBytes;
+#endif
 
 		for (int i = 0; i < currGroup->mTriCount; i++) {
 			CollTriInfo* tri = currGroup->mTriangleList[i];
@@ -2138,6 +2445,23 @@ void MapMgr::recTraceMove(CollGroup* collGroupList, MoveTrace& trace, f32 timeSt
 				continue;
 			}
 
+#if defined(__vita__)
+			// Packed plane test.
+			bool packedPass = false;
+			f32 passDepth   = 0.0f;
+			if (packedPlanes) {
+				const uintptr_t triOffset = reinterpret_cast<uintptr_t>(tri) - packedTris;
+				if (triOffset < packedBytes) {
+					const f32 packedDepth = packedPlanes[triOffset / sizeof(CollTriInfo)].dist(proposedPosition);
+					if (!(packedDepth < trace.mRadius && packedDepth > 0.0f)) {
+						continue;
+					}
+					packedPass = true;
+					passDepth  = packedDepth;
+				}
+			}
+#endif
+
 			// pretty sure this is just used here
 			enum {
 				NoCollision       = 0,
@@ -2146,6 +2470,29 @@ void MapMgr::recTraceMove(CollGroup* collGroupList, MoveTrace& trace, f32 timeSt
 			};
 
 			int collisionType = NoCollision; // no collision
+#if defined(__vita__)
+			static_assert(NoCollision == kPcCollNone && FaceCollision == kPcCollFace && BoundaryCollision == kPcCollBoundary,
+			              "the pass path's collision types are recTraceMove's");
+			// Triangle classification.
+			Vector3f collNormal;
+			f32 collRadius = trace.mRadius;
+			f32 penDepth;
+			if (PC_MAP_PLANES) {
+				// Plane depth.
+				if (packedPass) {
+					penDepth = passDepth;
+				} else {
+					penDepth = tri->mTriangle.dist(proposedPosition);
+					if (!(penDepth < collRadius && penDepth > 0.0f)) {
+						continue;
+					}
+				}
+				collisionType = pcCollEdgeClassify(*tri, currGroup->mVertexList, proposedPosition, collRadius, collNormal, penDepth);
+			} else {
+				collisionType
+				    = pcCollClassifyOriginal(*this, *tri, currGroup->mVertexList, proposedPosition, collRadius, collNormal, penDepth);
+			}
+#else
 			Vector3f collNormal(tri->mTriangle.mNormal);
 			f32 collRadius = trace.mRadius;
 			f32 penDepth   = tri->mTriangle.dist(proposedPosition);
@@ -2165,6 +2512,7 @@ void MapMgr::recTraceMove(CollGroup* collGroupList, MoveTrace& trace, f32 timeSt
 					}
 				}
 			}
+#endif
 
 			if (collisionType == NoCollision) {
 				// nothing left to do if we don't collide with the triangle
@@ -2263,6 +2611,97 @@ void MapMgr::recTraceMove(CollGroup* collGroupList, MoveTrace& trace, f32 timeSt
 	trace.mPosition = proposedPosition;
 }
 
+#if defined(__vita__)
+/*
+ * PS Vita: flat copy of the platform-shape list for traceMove and traceMove2.
+ */
+struct PcPlatformEntry {
+	BoundBox mBox;
+	DynCollShape* mShape;
+};
+static const int kPcPlatformMax = 256;
+static PcPlatformEntry sPcPlatforms[kPcPlatformMax];
+static int sPcPlatformCount          = 0;
+static bool sPcPlatformOverflow      = false;
+static CoreNode* sPcPlatformRoot     = nullptr;
+static u32 sPcPlatformGen            = 0;
+
+// Chain the shape's visible collision groups.
+static inline void pcChainPlatformGroups(DynCollShape* coll, CollGroup*& collGroup)
+{
+	for (int j = 0; j < coll->mCollGroupCount; j++) {
+		if (coll->mJointVisibility[coll->mCollGroupList[j]->mJointIndex]) {
+			coll->mCollGroupList[j]->mModel         = coll->mCollisionModel;
+			coll->mCollGroupList[j]->mVertexList    = coll->mVertexList;
+			coll->mCollGroupList[j]->mPlatCollision = coll;
+			coll->mCollGroupList[j]->mNextCollGroup = collGroup;
+			collGroup                               = coll->mCollGroupList[j];
+		}
+	}
+}
+
+// List walk fallback.
+static CollGroup* pcWalkPlatformGroups(DynCollShape* root, Creature* creature, immut BoundBox& box)
+{
+	CollGroup* collGroup = nullptr;
+	FOREACH_NODE(DynCollShape, root->mChild, coll)
+	{
+		if (coll->mCreature && coll->mCreature == creature) {
+			continue;
+		}
+		if (box.intersects(coll->mBoundingBox)) {
+			pcChainPlatformGroups(coll, collGroup);
+		}
+	}
+	return collGroup;
+}
+
+/**
+ * @brief Platform collision groups for a trace inside `box`.
+ */
+CollGroup* pcCollectPlatformGroups(DynCollShape* root, Creature* creature, immut BoundBox& box)
+{
+	const u32 gen = pcNodeListGen(root);
+	if (gen == 0) {
+		return pcWalkPlatformGroups(root, creature, box);
+	}
+	if (root != sPcPlatformRoot || gen != sPcPlatformGen) {
+		int count     = 0;
+		bool overflow = false;
+		FOREACH_NODE(DynCollShape, root->mChild, coll)
+		{
+			if (count == kPcPlatformMax) {
+				overflow = true;
+				break;
+			}
+			sPcPlatforms[count].mBox   = coll->mBoundingBox;
+			sPcPlatforms[count].mShape = coll;
+			count++;
+		}
+		sPcPlatformCount    = count;
+		sPcPlatformOverflow = overflow;
+		sPcPlatformRoot     = root;
+		sPcPlatformGen      = gen;
+	}
+	if (sPcPlatformOverflow) {
+		return pcWalkPlatformGroups(root, creature, box);
+	}
+
+	CollGroup* collGroup = nullptr;
+	for (int k = 0; k < sPcPlatformCount; k++) {
+		if (!box.intersects(sPcPlatforms[k].mBox)) {
+			continue;
+		}
+		DynCollShape* coll = sPcPlatforms[k].mShape;
+		if (coll->mCreature && coll->mCreature == creature) {
+			continue;
+		}
+		pcChainPlatformGroups(coll, collGroup);
+	}
+	return collGroup;
+}
+#endif
+
 /**
  * @brief Performs a full movement trace for an object over a given time, breaking the movement into substeps when required to avoid
  * tunnelling.
@@ -2315,6 +2754,9 @@ void MapMgr::traceMove(Creature* creature, MoveTrace& trace, f32 timeStep)
 		if (!trace.mIgnoreDynamicCollision) {
 			// unless we're ignoring it, check any dynamic collision parts of the map first
 			// (in reality, only pikmin sprouts ignore this)
+#if defined(__vita__)
+			collGroup = pcCollectPlatformGroups(mCollShapeList, creature, collCheckBox);
+#else
 			FOREACH_NODE(DynCollShape, mCollShapeList->mChild, coll)
 			{
 				if (coll->mCreature && coll->mCreature == creature) {
@@ -2332,6 +2774,7 @@ void MapMgr::traceMove(Creature* creature, MoveTrace& trace, f32 timeStep)
 					}
 				}
 			}
+#endif
 		}
 
 		// also collect any static map collision as well

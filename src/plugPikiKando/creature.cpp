@@ -344,7 +344,7 @@ u32 Creature::getGeneratorID()
  */
 bool Creature::stimulate(immut Interaction& interaction)
 {
-	PRINT("objType=%s creature %x got interaction %x\n", ObjType::getName(mObjType), &interaction);
+	PRINT("objType=%s creature %p got interaction %p\n", ObjType::getName(mObjType), this, &interaction);
 	return false;
 }
 
@@ -921,6 +921,60 @@ f32 sphereDist(Creature* c1, Creature* c2)
 	return dist - (c1->getCentreSize() + c2->getCentreSize());
 }
 
+#if defined(__vita__)
+/* PS Vita: collisionCheck's collider walk, in place over the search buffer. */
+namespace {
+typedef SearchData* SearchBuffer::*PcAtariDataPtr;
+typedef s16 SearchBuffer::*PcAtariCountPtr;
+struct PcAtariPeek : public SearchBuffer {
+	static __attribute__((no_instrument_function)) PcAtariDataPtr data() { return &PcAtariPeek::mDataList; }
+	static __attribute__((no_instrument_function)) PcAtariCountPtr count() { return &PcAtariPeek::mCurrentEntries; }
+};
+} // namespace
+
+/** @brief SearchBuffer::getCreature(i), in place. */
+static inline __attribute__((always_inline, no_instrument_function)) Creature* pcGetC(SearchBuffer& buffer, int i)
+{
+	return (i < 0 || i >= buffer.*PcAtariPeek::count()) ? nullptr : (buffer.*PcAtariPeek::data())[i].mTargetCreature.getPtr();
+}
+
+/** @brief Iterator::isDone at i, in place. */
+static inline __attribute__((always_inline, no_instrument_function)) bool pcAtariDone(SearchBuffer& buffer, int i)
+{
+	return i >= buffer.*PcAtariPeek::count() || !pcGetC(buffer, i);
+}
+
+/** @brief Next entry from i whose creature isAtari(). */
+static inline __attribute__((always_inline, no_instrument_function)) int pcAtariSkip(SearchBuffer& buffer, int i)
+{
+	while (!pcAtariDone(buffer, i)) {
+		if (pcGetC(buffer, i)->isAtari()) {
+			break;
+		}
+		++i;
+	}
+	return i;
+}
+
+/** @brief The collider walk of collisionCheck. */
+namespace {
+struct PcAtariWalk {
+	explicit __attribute__((always_inline, no_instrument_function)) PcAtariWalk(SearchBuffer& buffer)
+	    : mBuffer(buffer)
+	    , mIndex(0)
+	{
+	}
+	__attribute__((always_inline, no_instrument_function)) void first() { mIndex = pcAtariSkip(mBuffer, 0); }
+	__attribute__((always_inline, no_instrument_function)) void next() { mIndex = pcAtariSkip(mBuffer, mIndex + 1); }
+	__attribute__((always_inline, no_instrument_function)) bool isDone() { return pcAtariDone(mBuffer, mIndex); }
+	__attribute__((always_inline, no_instrument_function)) Creature* get() { return pcGetC(mBuffer, mIndex); }
+
+	SearchBuffer& mBuffer;
+	int mIndex;
+};
+} // namespace
+#endif
+
 /**
  * @todo: Documentation
  */
@@ -942,10 +996,21 @@ void Creature::collisionCheck(f32 _unused)
 	// this pointer for the whole loop, so the temporary was already dead by the
 	// first CI_LOOP condition check.
 	CndIsAtari isAtariCondition;
+#if defined(__vita__)
+	// In-place collider walk.
+	(void)isAtariCondition;
+	PcAtariWalk walk(mSearchBuffer);
+	for (walk.first(); !walk.isDone(); walk.next())
+#else
 	Iterator iter(&mSearchBuffer, &isAtariCondition);
 	CI_LOOP(iter)
+#endif
 	{
+#if defined(__vita__)
+		Creature* collider = walk.get();
+#else
 		Creature* collider = *iter;
+#endif
 
 		// don't worry about dead creatures.
 		if (!collider->isAlive()) {

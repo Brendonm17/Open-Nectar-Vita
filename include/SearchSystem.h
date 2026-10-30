@@ -35,6 +35,10 @@ public:
 	void invalidate();
 	void insertQuick(Creature*, f32);
 	void insert(Creature*, f32);
+#if defined(PIKI_PC_PORT)
+	// insertQuick past its early return. True if the buffer changed.
+	bool insertQuickVisible(Creature*, f32);
+#endif
 
 	// unused/inlined:
 	SearchBuffer TERNARY_BUGFIX(&, MACRO_NOTHING) operator=(immut SearchBuffer&);
@@ -71,8 +75,16 @@ struct SearchSystem {
 
 	void update();
 	void updateLoopOptimised();
+#if defined(PIKI_PC_PORT)
+	void legacyCalls(); // original update() body
+#endif
 
 	// TODO: members
 };
+
+#if defined(__vita__)
+// The frame's search (objectMgr.cpp).
+void pcSearchUpdate(SearchSystem* sys);
+#endif
 
 #endif

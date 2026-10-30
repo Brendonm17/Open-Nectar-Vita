@@ -9,6 +9,10 @@
 #include "Piki.h"
 #include "SlotChangeListner.h"
 #include "sysNew.h"
+#if defined(__vita__)
+#include <stdint.h>
+#include <string.h>
+#endif
 
 /**
  * @todo: Documentation
@@ -21,6 +25,80 @@ DEFINE_ERROR(10)
  * @note UNUSED Size: 0000F0
  */
 DEFINE_PRINT("cPlate");
+
+#if defined(__vita__)
+/* PS Vita: squad sorts on index arrays, falling back to the original loop. */
+static const int kPcPlateSortMax = 1024; // at most 999 Pikmin + 10
+static Creature* sPcSortOwner[kPcPlateSortMax];
+static SlotChangeListner* sPcSortListener[kPcPlateSortMax];
+static int sPcSortColor[kPcPlateSortMax];
+static u8 sPcSortRank[kPcPlateSortMax];
+static u8 sPcSortScore[kPcPlateSortMax];
+static f32 sPcSortDist[kPcPlateSortMax];
+static u16 sPcSortFrom[kPcPlateSortMax]; // slot k ends up with what was gathered from slot sPcSortFrom[k]
+static u8 sPcSortTouched[kPcPlateSortMax];
+
+// Pointer set for the distinctness check.
+static const void* sPcSeenKey[2 * kPcPlateSortMax];
+static u32 sPcSeenGen[2 * kPcPlateSortMax];
+static u32 sPcSeenCurrent = 0;
+
+static void pcSeenReset()
+{
+	if (++sPcSeenCurrent == 0) {
+		memset(sPcSeenGen, 0, sizeof(sPcSeenGen));
+		sPcSeenCurrent = 1;
+	}
+}
+
+// False if p is already in the set.
+static bool pcSeenInsert(const void* p)
+{
+	u32 h = (u32(uintptr_t(p) >> 2) * 2654435761u) >> 21; // 2048 entries
+	while (sPcSeenGen[h] == sPcSeenCurrent) {
+		if (sPcSeenKey[h] == p) {
+			return false;
+		}
+		h = (h + 1) & (2 * kPcPlateSortMax - 1);
+	}
+	sPcSeenGen[h] = sPcSeenCurrent;
+	sPcSeenKey[h] = p;
+	return true;
+}
+
+static bool pcPlateApplyIsExact(int n)
+{
+	pcSeenReset();
+	for (int k = 0; k < n; k++) {
+		if (!sPcSortListener[k] || sPcSortOwner[k]->getCnt() < 1 || !pcSeenInsert(sPcSortOwner[k])) {
+			return false;
+		}
+	}
+	pcSeenReset();
+	for (int k = 0; k < n; k++) {
+		if (!pcSeenInsert(sPcSortListener[k])) {
+			return false;
+		}
+	}
+	return true;
+}
+
+// Rewrite each touched slot once.
+static void pcPlateApply(CPlate::Slot* slots, int n)
+{
+	for (int k = 0; k < n; k++) {
+		if (!sPcSortTouched[k]) {
+			continue;
+		}
+		CPlate::Slot* slot = &slots[k];
+		const int from     = sPcSortFrom[k];
+		slot->mOccupant.clear();
+		slot->mOccupant.set(sPcSortOwner[from]);
+		slot->mListener = sPcSortListener[from];
+		slot->mListener->inform(k);
+	}
+}
+#endif
 
 /**
  * @todo: Documentation
@@ -222,6 +300,80 @@ void CPlate::sortByColor(Piki* piki)
 	int nextColor = (color + 1) % PikiColorCount;
 	int happa     = piki->mHappa;
 
+#if defined(__vita__)
+	const int n = mUsedSlotCount;
+	if (n <= kPcPlateSortMax) {
+		// Per-occupant sort keys.
+		bool gathered      = true;
+		bool ranksDistinct = color >= 0 && color < PikiColorCount; // then colour, next colour and the third get 1, 2, 3
+		for (int k = 0; k < n; k++) {
+			Piki* owner = static_cast<Piki*>(mSlotList[k].mOccupant.getPtr());
+			if (!owner) {
+				gathered = false;
+				break;
+			}
+			const int ownerColor = owner->mColor;
+			int bomb;
+			if (hasBomb) {
+				bomb = owner->hasBomb() ? 0 : 1;
+			} else {
+				bomb = owner->hasBomb() ? 1 : 0;
+			}
+			bomb += (happa == owner->mHappa) ? 0 : 1;
+			sPcSortOwner[k]    = owner;
+			sPcSortListener[k] = mSlotList[k].mListener;
+			sPcSortColor[k]    = ownerColor;
+			sPcSortRank[k]     = (ownerColor == color) ? 1 : (ownerColor == nextColor) ? 2 : 3;
+			sPcSortScore[k]    = u8(bomb);
+			sPcSortFrom[k]     = u16(k);
+			sPcSortTouched[k]  = 0;
+			if (ownerColor >= PikiColorCount) {
+				ranksDistinct = false; // two different colours could share rank 3
+			}
+		}
+		if (gathered) {
+			// Already in order.
+			if (ranksDistinct) {
+				bool ordered = true;
+				for (int k = 1; k < n; k++) {
+					if (sPcSortRank[k] < sPcSortRank[k - 1]
+					    || (sPcSortRank[k] == sPcSortRank[k - 1] && sPcSortScore[k] < sPcSortScore[k - 1])) {
+						ordered = false;
+						break;
+					}
+				}
+				if (ordered) {
+					return;
+				}
+			}
+			// The loop below, on indices.
+			bool swapped = false;
+			for (int i = 0; i < n; i++) {
+				for (int j = i + 1; j < n; j++) {
+					const int iFrom = sPcSortFrom[i];
+					const int jFrom = sPcSortFrom[j];
+					const bool swap = (sPcSortColor[iFrom] != sPcSortColor[jFrom]) ? sPcSortRank[jFrom] < sPcSortRank[iFrom]
+					                                                               : sPcSortScore[jFrom] < sPcSortScore[iFrom];
+					if (swap) {
+						sPcSortFrom[i]    = u16(jFrom);
+						sPcSortFrom[j]    = u16(iFrom);
+						sPcSortTouched[i] = 1;
+						sPcSortTouched[j] = 1;
+						swapped           = true;
+					}
+				}
+			}
+			if (!swapped) {
+				return;
+			}
+			if (pcPlateApplyIsExact(n)) {
+				pcPlateApply(mSlotList, n);
+				return;
+			}
+		}
+	}
+#endif
+
 	for (int i = 0; i < mUsedSlotCount; i++) {
 		for (int j = 0; j < mUsedSlotCount; j++) {
 			Piki* iOwner = static_cast<Piki*>(mSlotList[i].mOccupant.getPtr());
@@ -270,6 +422,53 @@ void CPlate::sortByColor(Piki* piki)
  */
 void CPlate::rearrangeSlot(immut Vector3f& position, f32, immut Vector3f&)
 {
+#if defined(__vita__)
+	const int n = mUsedSlotCount;
+	if (n <= kPcPlateSortMax) {
+		if (n < 2) {
+			return;
+		}
+		// Per-occupant distance.
+		bool gathered = true;
+		for (int k = 0; k < n; k++) {
+			Creature* owner = mSlotList[k].mOccupant.getPtr();
+			if (!owner) {
+				gathered = false;
+				break;
+			}
+			Vector3f sep       = position - owner->mSRT.t;
+			sPcSortDist[k]     = sep.length();
+			sPcSortOwner[k]    = owner;
+			sPcSortListener[k] = mSlotList[k].mListener;
+			sPcSortFrom[k]     = u16(k);
+			sPcSortTouched[k]  = 0;
+		}
+		if (gathered) {
+			// The loop below, on indices.
+			bool swapped = false;
+			for (int i = n - 1; i >= 1; i--) {
+				for (int j = i; j >= 1; j--) {
+					const int jFrom    = sPcSortFrom[j];
+					const int prevFrom = sPcSortFrom[j - 1];
+					if (sPcSortDist[jFrom] < sPcSortDist[prevFrom]) {
+						sPcSortFrom[j]        = u16(prevFrom);
+						sPcSortFrom[j - 1]    = u16(jFrom);
+						sPcSortTouched[j]     = 1;
+						sPcSortTouched[j - 1] = 1;
+						swapped               = true;
+					}
+				}
+			}
+			if (!swapped) {
+				return;
+			}
+			if (pcPlateApplyIsExact(n)) {
+				pcPlateApply(mSlotList, n);
+				return;
+			}
+		}
+	}
+#endif
 	for (int i = mUsedSlotCount - 1; i >= 1; i--) {
 		for (int j = i; j >= 1; j--) {
 			Vector3f sep = position - mSlotList[j].mOccupant.getPtr()->mSRT.t;

@@ -232,6 +232,10 @@ public:
 	virtual bool interactDefault(immut TekiInteractionKey&);   // _1A8
 	virtual void drawDefault(Graphics&);                       // _1AC
 	virtual void drawTekiShape(Graphics&);                     // _1B0
+#if defined(__vita__)
+	// GX half of drawTekiShape for a teki that is not AI-culled.
+	void pcDrawTekiB(Graphics& gfx);
+#endif
 	virtual void drawTekiDebugInfo(Graphics&);                 // _1B4
 	virtual void drawTekiDebugInfoDefault(Graphics&);          // _1B8
 	virtual void playTableSound(int);                          // _1BC
@@ -298,6 +302,10 @@ public:
 	virtual bool isAtari() { return getTekiOption(TEKI_OPTION_ATARI) != 0; }             // _84
 	virtual bool isAlive() { return getTekiOption(TEKI_OPTION_ALIVE) != 0; }             // _88
 	virtual bool needShadow() { return getTekiOption(TEKI_OPTION_SHADOW_VISIBLE) != 0; } // _90
+#if defined(__vita__)
+	// S2 view kind: teki.
+	virtual int pcDrViewKind() { return 1; }
+#endif
 
 	void prepareEffects();
 	void startStoppingMove();
@@ -807,6 +815,12 @@ public:
 	bool isUsingType(int type) { return mUsingType[type]; }
 	bool hasType(int type) { return mTekiParams[type] != nullptr; }
 	bool isVisibleType(int type) { return mVisibleType[type]; }
+#if defined(__vita__)
+	// Slot table, for the teki lane pre-scan.
+	Creature** pcSlots() { return mObjectList; }
+	int* pcSlotStatus() { return mEntryStatus; }
+	int pcSlotCount() { return mMaxElements; }
+#endif
 
 protected:
 	virtual Creature* createObject(); // _80

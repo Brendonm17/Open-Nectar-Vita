@@ -227,6 +227,12 @@ public:
 	 */
 	bool isStageOpen(int storyStageID)
 	{
+#if defined(NECTAR_DEBUG_UNLOCK)
+		// Debug unlock (NECTAR_DEBUG_UNLOCK): every story stage reports as unlocked.
+		if (storyStageID >= STAGE_START && storyStageID <= STAGE_TESTMAP) {
+			return true;
+		}
+#endif
 		if (storyStageID >= STAGE_START && storyStageID <= STAGE_TESTMAP) {
 			return IS_STAGE_OPEN(mCourseOpenFlags, storyStageID) != false;
 		}

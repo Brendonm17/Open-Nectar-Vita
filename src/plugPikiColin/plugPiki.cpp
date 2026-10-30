@@ -13,7 +13,6 @@
 #include <cstdlib>
 
 #include "timing/pc_render_phase.h"
-#include "timing/pc_tick_profiler.h"
 #include "pc_gfx.h"
 
 #define TIMER_STATE_X           (32) ///< Horizontal position to start printing timer debug text from.
@@ -46,7 +45,15 @@ void PlugPikiApp::hardReset()
 
 	// allocate space for overlay heap from the system heap
 	int oldAlloc = sysHeap->setAllocType(AYU_STACK_GROW_UP);
+#ifdef __vita__
+	// Free the previous overlay buffer.
+	static u8* sVitaPrevOvlBuf = nullptr;
+	if (sVitaPrevOvlBuf) { delete[] sVitaPrevOvlBuf; sVitaPrevOvlBuf = nullptr; }
+#endif
 	u8* buf      = new u8[sysHeap->getMaxFree()];
+#ifdef __vita__
+	sVitaPrevOvlBuf = buf;
+#endif
 	sysHeap->setAllocType(oldAlloc);
 
 	// set up overlay heap using all remaining free space from system heap
@@ -210,41 +217,23 @@ int PlugPikiApp::idle()
 		PRINT("idle attach\n");
 		gsys->attachObjs();
 		PRINT("done attaching objs!\n");
+#if defined(PIKI_PC_PORT)
+		gsys->setHeap(SYSHEAP_NULL);
+#endif
 		return 1;
 	}
 
 	// Begin authoritative tick
 	pc_render_begin_authoritative_tick();
 
-	// Cost of the work a 60 Hz gameplay mode would have to run twice as often.
-	// waitRetrace below is deliberately outside every span: it is the wait, not
-	// the work, and counting it would make every tick look exactly like the
-	// frame period no matter how cheap it really was.
-	const bool profiling = pc_tick_profiler_enabled();
-	const auto clockNow  = [] {
-		return std::chrono::duration<double, std::milli>(
-		           std::chrono::steady_clock::now().time_since_epoch())
-		    .count();
-	};
-	const double tickStart = profiling ? clockNow() : 0.0;
-
-	const double updateStart = profiling ? clockNow() : 0.0;
 	update();
-	if (profiling) {
-		pc_tick_profiler_record(kPcTickUpdate, clockNow() - updateStart);
-	}
 
 	gsys->beginRender();
 
 	// Begin capture for immutable render packets
 	pc_gfx_begin_capture(pc_render_tick_serial());
 
-	const double renderStart = profiling ? clockNow() : 0.0;
 	renderall();
-	if (profiling) {
-		pc_tick_profiler_record(kPcTickRenderAll, clockNow() - renderStart);
-		pc_gfx_flush_submit_stats();
-	}
 
 	pc_gfx_end_capture();
 
@@ -252,12 +241,7 @@ int PlugPikiApp::idle()
 		gsys->mDvdErrorCallback->invoke(*gsys->mDGXGfx);
 	}
 	gsys->mTimer->start("render", true);
-	const double doneStart = profiling ? clockNow() : 0.0;
 	gsys->doneRender();
-	if (profiling) {
-		pc_tick_profiler_record(kPcTickDoneRender, clockNow() - doneStart);
-		pc_tick_profiler_record(kPcTickWhole, clockNow() - tickStart);
-	}
 	gsys->mTimer->stop("render");
 
 	// process any messages that have built up this frame

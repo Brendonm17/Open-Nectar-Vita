@@ -711,6 +711,9 @@ static void pcUpdatePreferredThrowColor()
 	}
 
 	const int steps = pc_window_take_wheel_steps();
+	if (sPreferredThrowColor < 0 && steps == 0) {
+		return;
+	}
 	if (steps != 0) {
 		index = ((index + steps) % presentCount + presentCount) % presentCount;
 	}
@@ -730,11 +733,20 @@ void Navi::findNextThrowPiki()
 	pcUpdatePreferredThrowColor();
 #endif
 	mNextThrowPiki = nullptr;
-	Iterator iter(mPlateMgr);
 	f32 minDist = 200.0f;
+#if defined(__vita__)
+	// Plate slots, in Iterator order.
+	for (int slot = 0; slot < mPlateMgr->mTotalSlotCount; slot++) {
+		Piki* piki = static_cast<Piki*>(mPlateMgr->mSlotList[slot].mOccupant.getPtr());
+		if (!piki) {
+			break;
+		}
+#else
+	Iterator iter(mPlateMgr);
 	CI_LOOP(iter)
 	{
 		Piki* piki = static_cast<Piki*>(*iter);
+#endif
 		if (roughCull(this, piki, minDist)) {
 			continue;
 		}
@@ -1969,7 +1981,7 @@ void Navi::makeVelocity(bool isSunset)
 		// this hides many developer sins i am sure.
 		STACK_PAD_VAR(5);
 		return;
-	} else if (pc_window_get_control_mode() != PC_CONTROL_CLASSIC) {
+	} else if (pc_window_get_control_mode() != PC_CONTROL_CLASSIC && pc_window_get_control_mode() != PC_CONTROL_CAMERA_STICK) {
 		// Fallback for other non-classic modes (if any): use virtual cursor
 		NVector3f cursorStickVec(
 			pc_window_get_virtual_cursor_x() / 127.0f,
@@ -2007,7 +2019,7 @@ void Navi::makeVelocity(bool isSunset)
 	// For cursor-facing logic, use virtual cursor in mouse modes
 	#ifdef PIKI_PC_PORT
 	f32 cursorStickMag = moveStickMag;
-	if (pc_window_get_control_mode() != PC_CONTROL_CLASSIC) {
+	if (pc_window_get_control_mode() != PC_CONTROL_CLASSIC && pc_window_get_control_mode() != PC_CONTROL_CAMERA_STICK) {
 		cursorStickMag = sqrtf(
 			(pc_window_get_virtual_cursor_x() / 127.0f) * (pc_window_get_virtual_cursor_x() / 127.0f) +
 			(pc_window_get_virtual_cursor_y() / 127.0f) * (pc_window_get_virtual_cursor_y() / 127.0f)
@@ -2126,12 +2138,22 @@ void Navi::makeCStick(bool isSunset)
 		}
 
 		mPlateMgr->refresh(getPlatePikis(), 0.0f);
-		Iterator iter(mPlateMgr);
 		f32 nearestPikiDist = 12800.0f;
+
+#if defined(__vita__)
+		// Plate slots, in Iterator order.
+		for (int slot = 0; slot < mPlateMgr->mTotalSlotCount; slot++) {
+			Creature* c = mPlateMgr->mSlotList[slot].mOccupant.getPtr();
+			if (!c) {
+				break;
+			}
+#else
+		Iterator iter(mPlateMgr);
 
 		CI_LOOP(iter)
 		{
 			Creature* c = *iter;
+#endif
 			Piki* piki  = static_cast<Piki*>(c);
 			int state   = piki->getState();
 			if (state == PIKISTATE_Hanged || state == PIKISTATE_GoHang) {
@@ -2870,7 +2892,11 @@ void Navi::renderParabola(Graphics& gfx, f32 height, f32 len)
 	int segmentCount = 16;
 	f32 inc          = len / 16.0f;
 	f32 x            = 0.0f;
+#if defined(__vita__)
+	gfx.setLightingNoPrev(false, nullptr);
+#else
 	gfx.setLighting(false, nullptr);
+#endif
 	gfx.useTexture(nullptr, GX_TEXMAP0);
 	gfx.setColour(Colour(0, 255, 0, 255), true);
 

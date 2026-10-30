@@ -21,6 +21,19 @@
 #include "system.h"
 #include "timers.h"
 #include <stddef.h>
+#if defined(PIKI_PC_PORT)
+#include "pc_photo_mode.h"
+#if defined(__vita__)
+#include "gl/vita_drawrec.h" // Draw-record stamps and cacheShape hoist
+#endif
+#include <stdlib.h>
+#endif
+#if defined(__vita__) && defined(__ARM_NEON)
+#include <arm_neon.h>
+#define PC_WEIGHTED_FAST 1
+#else
+#define PC_WEIGHTED_FAST 0
+#endif
 
 /**
  * @todo: Documentation
@@ -582,6 +595,34 @@ void CamDataInfo::update(f32 currentFrame, immut Matrix4f& mtx)
 		mCamera.mFocus = mStaticLookAt;
 	}
 
+#if defined(PIKI_PC_PORT)
+	// Hold the last reliable heading when looking almost straight down.
+	{
+		const f32 dx = mCamera.mPosition.x - mCamera.mFocus.x;
+		const f32 dy = mCamera.mPosition.y - mCamera.mFocus.y;
+		const f32 dz = mCamera.mPosition.z - mCamera.mFocus.z;
+		const f32 horiz = sqrtf(dx * dx + dz * dz);
+		const f32 len   = sqrtf(horiz * horiz + dy * dy);
+		if (len > 0.0f && horiz > len * 0.05f) {
+			mPcStableYaw    = atan2f(dx, dz);
+			mPcHasStableYaw = true;
+		} else if (len > 0.0f && mPcHasStableYaw) {
+			// Right vector from the stored heading.
+			Vector3f fwd(dx / len, dy / len, dz / len);
+			Vector3f right(cosf(mPcStableYaw), 0.0f, -sinf(mPcStableYaw));
+			const f32 along = right.DP(fwd);
+			right.x -= fwd.x * along;
+			right.y -= fwd.y * along;
+			right.z -= fwd.z * along;
+			right.normalise();
+			Vector3f up = fwd;
+			up.CP(right);
+			up.normalise();
+			mCamera.calcLookAt(mCamera.mPosition, mCamera.mFocus, &up);
+			return;
+		}
+	}
+#endif
 	mCamera.calcLookAt(mCamera.mPosition, mCamera.mFocus, nullptr);
 }
 
@@ -1784,6 +1825,12 @@ void BaseShape::importIni(RandomAccessStream& stream)
  */
 void ShapeDynMaterials::animate(f32* data)
 {
+#if defined(__vita__)
+	// Draw-record join.
+	if (mModel) {
+		pcDrStampCheck(mModel, kDrStampAnimate);
+	}
+#endif
 	gsys->mTimer->start("shpDynMats", true);
 
 	for (int i = 0; i < mMatCount; i++) {
@@ -1809,6 +1856,33 @@ void ShapeDynMaterials::animate(f32* data)
 
 	gsys->mTimer->stop("shpDynMats");
 }
+
+#if defined(__vita__)
+/* Draw-record animate loop for a record's B. */
+void ShapeDynMaterials::pcAnimateB(f32* data)
+{
+	for (int i = 0; i < mMatCount; i++) {
+		Material& mat = mMaterials[i];
+		if (mat.mFlags & MATFLAG_PVW) {
+			if (mat.mColourInfo.mTotalFrameCount != 0) {
+				mat.mColourInfo.animate(data, mat.colour());
+			}
+
+			for (int tevColIdx = 0; tevColIdx < 3; tevColIdx++) {
+				if (mat.mTevInfo->mTevColRegs[tevColIdx].mAnimFrameCount) {
+					mat.mTevInfo->mTevColRegs[tevColIdx].animate(data, mat.mTevInfo->mTevColRegs[tevColIdx].mAnimatedColor);
+				}
+			}
+
+			for (int textureIdx = 0; textureIdx < (int)mat.mTextureInfo.mTextureDataCount; textureIdx++) {
+				if (mat.mTextureInfo.mTextureData[textureIdx].mAnimationFactor != 255) {
+					mat.mTextureInfo.mTextureData[textureIdx].animate(data, mat.mTextureInfo.mTextureData[textureIdx].mAnimatedTexMtx);
+				}
+			}
+		}
+	}
+}
+#endif
 
 /**
  * @todo: Documentation
@@ -1848,6 +1922,9 @@ BaseShape::BaseShape()
 	mShapeFlags       = ShapeFlags::None;
 	mVertexCacheFlags = VertexCacheFlags::None;
 	_2AC              = 1;
+#if defined(__vita__)
+	mPcSegChain = 0;
+#endif
 	mVtxMatrixCount   = 0;
 	mVtxMatrixList    = nullptr;
 	mMaterialCount    = 0;
@@ -2062,6 +2139,32 @@ void BaseShape::drawroutes(Graphics& gfx, Camera& cam)
 	}
 }
 
+#if defined(PIKI_PC_PORT)
+namespace {
+// Scratch for the material-major draw order.
+u8* sPcVisible      = nullptr;
+int sPcVisibleCap   = 0;
+int* sPcMatStart    = nullptr;
+int sPcMatStartCap  = 0;
+int* sPcDrawOrder   = nullptr;
+int sPcDrawOrderCap = 0;
+
+template <typename T>
+void pcGrow(T*& buf, int& cap, int need)
+{
+	if (need <= cap) {
+		return;
+	}
+	int want = cap ? cap : 64;
+	while (want < need) {
+		want *= 2;
+	}
+	buf = (T*)realloc(buf, size_t(want) * sizeof(T));
+	cap = want;
+}
+} // namespace
+#endif
+
 /**
  * @todo: Documentation
  */
@@ -2077,6 +2180,66 @@ void BaseShape::drawculled(Graphics& gfx, Camera& cam, ShapeDynMaterials* dynMat
 		}
 	}
 
+#if defined(PIKI_PC_PORT)
+	// Map draw, material by material.
+	{
+		pcGrow(sPcVisible, sPcVisibleCap, (mJointCount > 0) ? mJointCount : 1);
+		for (int i = 0; i < mJointCount; i++) {
+			BoundBox& box = mJointList[i].mBounds;
+			if (cam.isBoundVisible(box, 0x8000 | 0x10 | 0x20 | 0x1 | 0x2 | 0x4 | 0x8)) {
+				sPcVisible[i] = 1;
+			} else {
+				sPcVisible[i] = 0;
+				culledJointCount++;
+				mJointList[i].mCullIndex = -1;
+			}
+		}
+
+		const int matCount = (mMaterialCount > 0) ? mMaterialCount : 1;
+		pcGrow(sPcMatStart, sPcMatStartCap, matCount + 1);
+		for (int m = 0; m <= matCount; m++) {
+			sPcMatStart[m] = 0;
+		}
+
+		// count what each material owns among the visible joints
+		int drawCount = 0;
+		for (int j = 0; j < mTotalMatpolyCount; j++) {
+			Joint::MatPoly* poly = mMatpolyList[j];
+			if (!poly->mJointList) {
+				continue;
+			}
+			const int jointIdx = int(poly->mJointList - mJointList);
+			if (jointIdx < 0 || jointIdx >= mJointCount || !sPcVisible[jointIdx]) {
+				continue;
+			}
+			const int matIdx = (poly->mIndex >= 0 && poly->mIndex < matCount) ? poly->mIndex : matCount - 1;
+			sPcMatStart[matIdx + 1]++;
+			drawCount++;
+		}
+		for (int m = 0; m < matCount; m++) {
+			sPcMatStart[m + 1] += sPcMatStart[m];
+		}
+
+		// place them descending
+		pcGrow(sPcDrawOrder, sPcDrawOrderCap, (drawCount > 0) ? drawCount : 1);
+		for (int j = mTotalMatpolyCount - 1; j >= 0; j--) {
+			Joint::MatPoly* poly = mMatpolyList[j];
+			if (!poly->mJointList) {
+				continue;
+			}
+			const int jointIdx = int(poly->mJointList - mJointList);
+			if (jointIdx < 0 || jointIdx >= mJointCount || !sPcVisible[jointIdx]) {
+				continue;
+			}
+			const int matIdx                    = (poly->mIndex >= 0 && poly->mIndex < matCount) ? poly->mIndex : matCount - 1;
+			sPcDrawOrder[sPcMatStart[matIdx]++] = j;
+		}
+
+		for (int k = 0; k < drawCount; k++) {
+			gfx.drawSingleMatpoly((Shape*)this, mMatpolyList[sPcDrawOrder[k]]);
+		}
+	}
+#else
 	for (int i = 0; i < mJointCount; i++) {
 		BoundBox& box = mJointList[i].mBounds;
 		if (cam.isBoundVisible(box, 0x8000 | 0x10 | 0x20 | 0x1 | 0x2 | 0x4 | 0x8)) {
@@ -2090,6 +2253,7 @@ void BaseShape::drawculled(Graphics& gfx, Camera& cam, ShapeDynMaterials* dynMat
 			mJointList[i].mCullIndex = -1;
 		}
 	}
+#endif
 
 	if (gsys->mToggleDebugInfo) {
 		for (int i = 0; i < mJointCount; i++) {
@@ -2126,11 +2290,21 @@ void BaseShape::drawculled(Graphics& gfx, Camera& cam, ShapeDynMaterials* dynMat
  */
 void BaseShape::drawshape(Graphics& gfx, Camera& cam, ShapeDynMaterials* dynMats)
 {
+#if defined(__vita__)
+	// Draw-record join.
+	if (!gfx.mPcIsClone) {
+		pcDrStampCheck(this, kDrStampDrawshape);
+	}
+#endif
 	gsys->mTimer->start("drawShape", true);
 	u32 prevRender = gfx.mMatRenderMask;
 	if (mMeshCount) {
 		if (!(mShapeFlags & ShapeFlags::AlwaysRedraw) && (mShapeFlags & ShapeFlags::AllowCaching)
 		    && (gfx.mMatRenderMask & MATFLAG_AlphaBlend)) {
+#if defined(__vita__)
+			// Draw-record context: cacheShape was hoisted.
+			if (!gfx.mPcIsClone)
+#endif
 			gfx.cacheShape(this, dynMats);
 			gfx.mMatRenderMask &= ~MATFLAG_AlphaBlend;
 		}
@@ -2148,7 +2322,12 @@ void BaseShape::drawshape(Graphics& gfx, Camera& cam, ShapeDynMaterials* dynMats
 			gfx.drawMeshes(cam, (Shape*)this);
 			gfx.useMatrix(*activeMtx, 0);
 			drawlights(gfx, cam);
+#if defined(__vita__)
+			// Fork snapshot of the switch.
+			if (gfx.pcDebugInfo() && (gfx.mMatRenderMask & MATFLAG_AlphaBlend)) {
+#else
 			if (gsys->mToggleDebugInfo && (gfx.mMatRenderMask & MATFLAG_AlphaBlend)) {
+#endif
 				gfx.useMatrix(gfx.mCamera->mLookAtMtx, 0);
 				drawroutes(gfx, cam);
 			}
@@ -2219,6 +2398,32 @@ void BaseShape::skipChunk(RandomAccessStream& stream, u32 amt)
 		stream.readByte();
 	}
 }
+
+#if defined(PIKI_PC_PORT)
+// Groups a shape's matpolys by material between blended fences.
+static void pcGroupMatpolysByMaterial(Joint::MatPoly** list, int count)
+{
+	const u32 pinFlags = MATFLAG_AlphaBlend | MATFLAG_InverseColorBlend;
+	int runStart       = 0;
+	for (int i = 0; i <= count; i++) {
+		const bool fence = (i == count) || !list[i]->mMaterial || (list[i]->mMaterial->mFlags & pinFlags) != 0;
+		if (!fence) {
+			continue;
+		}
+		for (int a = runStart + 1; a < i; a++) {
+			Joint::MatPoly* held = list[a];
+			const int heldMat    = held->mIndex;
+			int b                = a - 1;
+			while (b >= runStart && list[b]->mIndex > heldMat) {
+				list[b + 1] = list[b];
+				b--;
+			}
+			list[b + 1] = held;
+		}
+		runStart = i + 1;
+	}
+}
+#endif
 
 /**
  * @todo: Documentation
@@ -2527,6 +2732,10 @@ void BaseShape::read(RandomAccessStream& stream)
 			for (int matPolyIdx = 0; matPolyIdx < mTotalMatpolyCount; matPolyIdx++) {
 				mMatpolyList[matPolyIdx]->mJointList = mMatpolyList[matPolyIdx]->mMesh->mJointList;
 			}
+
+#if defined(PIKI_PC_PORT)
+			pcGroupMatpolysByMaterial(mMatpolyList, mTotalMatpolyCount);
+#endif
 
 			// This resembles the math done for the "kilobytes used" PRINT in the `BaseShapeChunk::CollisionGrid` chunk.
 			(static_cast<size_t>(freeBefore - gsys->getHeap(SYSHEAP_App)->getFree())) / 1024.0f;
@@ -3278,6 +3487,12 @@ void AnimFrameCacher::cacheFrameSpace(int numTextures, AnimCacheInfo* info)
 	}
 }
 
+#if PC_WEIGHTED_FAST
+// Shape and slice of the last calcWeightedMatrices.
+static const BaseShape* sPcWeightedShape = nullptr;
+static const Matrix4f* sPcWeightedMtx    = nullptr;
+#endif
+
 /**
  * @todo: Documentation
  */
@@ -3287,9 +3502,19 @@ void BaseShape::updateAnim(Graphics& gfx, immut Matrix4f& mtx, f32* p3, const vo
 	gsys->mTimer->start("updateAnim", true);
 	gsys->mAnimatedPolygons++;
 	mAnimMatrices = gfx.getMatrices(mAnimMtxCount);
+#if PC_WEIGHTED_FAST
+	sPcWeightedShape = nullptr;
+	sPcWeightedMtx   = nullptr;
+#endif
 
 	if (mCurrentAnimation->mData) {
-		if (!p3) {
+#if defined(PIKI_PC_PORT)
+		// Photo-mode freeze.
+		const bool holdAnimation = pc_photo_mode_active() != 0;
+#else
+		const bool holdAnimation = false;
+#endif
+		if (!p3 && !holdAnimation) {
 			mCurrentAnimation->animate(mCurrentAnimation->mAnimSpeed);
 		}
 
@@ -3384,11 +3609,91 @@ static inline void addMatrixWeights(register f32* animMtx, register f32* weighte
 #endif
 }
 
+#if PC_WEIGHTED_FAST
+static const int kPcJointProducts = 32;
+
+// NEON envelope blend. Returns false, writing nothing, if an envelope reads a non-joint slot.
+static bool pcCalcWeighted(BaseShape* shape, u32 dirtyJoints, bool partial)
+{
+	const int jointCount = shape->mJointCount;
+	for (int envIdx = 0; envIdx < shape->mEnvelopeCount; envIdx++) {
+		const Envelope& env = shape->mEnvelopeList[envIdx];
+		for (int i = 0; i < env.mIndexCount; i++) {
+			if (env.mJointIndices[i] < 0 || env.mJointIndices[i] >= jointCount) {
+				return false;
+			}
+		}
+	}
+
+	Mtx products[kPcJointProducts];
+	Mtx spill;
+	u32 have = 0;
+	for (int envIdx = 0; envIdx < shape->mEnvelopeCount; envIdx++) {
+		const Envelope& env = shape->mEnvelopeList[envIdx];
+		if (partial) {
+			bool touched = false;
+			for (int i = 0; i < env.mIndexCount; i++) {
+				const int idx = env.mJointIndices[i];
+				if (idx < 32 && ((dirtyJoints >> idx) & 1u)) {
+					touched = true;
+					break;
+				}
+			}
+			if (!touched) {
+				continue;
+			}
+		}
+
+		f32* animMtxFloats = reinterpret_cast<f32*>(&shape->mAnimMatrices[jointCount + envIdx].mMtx);
+		float32x4_t acc0   = vdupq_n_f32(0.0f);
+		float32x4_t acc1   = acc0;
+		float32x4_t acc2   = acc0;
+		for (int i = 0; i < env.mIndexCount; i++) {
+			const int idx    = env.mJointIndices[i];
+			const f32 weight = env.mWeights[i];
+			const f32(*product)[4];
+			if (idx < kPcJointProducts) {
+				if (!(have & (1u << idx))) {
+					MTXConcat(shape->getAnimMatrix(idx).mMtx, shape->mJointList[idx].mInverseAnimMatrix.mMtx, products[idx]);
+					have |= 1u << idx;
+				}
+				product = products[idx];
+			} else {
+				MTXConcat(shape->getAnimMatrix(idx).mMtx, shape->mJointList[idx].mInverseAnimMatrix.mMtx, spill);
+				product = spill;
+			}
+			acc0 = vmlaq_n_f32(acc0, vld1q_f32(product[0]), weight);
+			acc1 = vmlaq_n_f32(acc1, vld1q_f32(product[1]), weight);
+			acc2 = vmlaq_n_f32(acc2, vld1q_f32(product[2]), weight);
+		}
+		vst1q_f32(animMtxFloats, acc0);
+		vst1q_f32(animMtxFloats + 4, acc1);
+		vst1q_f32(animMtxFloats + 8, acc2);
+	}
+	return true;
+}
+
+/* PS Vita: calcWeightedMatrices for the joints in dirtyJoints only. */
+void pcCalcWeightedMatricesDirty(BaseShape* shape, u32 dirtyJoints)
+{
+	if (sPcWeightedShape != shape || sPcWeightedMtx != shape->mAnimMatrices || !pcCalcWeighted(shape, dirtyJoints, true)) {
+		shape->calcWeightedMatrices();
+	}
+}
+#endif
+
 /**
  * @todo: Documentation
  */
 void BaseShape::calcWeightedMatrices()
 {
+#if PC_WEIGHTED_FAST
+	if (pcCalcWeighted(this, 0u, false)) {
+		sPcWeightedShape = this;
+		sPcWeightedMtx   = mAnimMatrices;
+		return;
+	}
+#endif
 
 	for (int envIdx = 0; envIdx < mEnvelopeCount; envIdx++) {
 		f32* animMtxFloats = reinterpret_cast<f32*>(&mAnimMatrices[mJointCount + envIdx].mMtx);
@@ -3429,6 +3734,10 @@ void BaseShape::calcWeightedMatrices()
 #endif
 		}
 	}
+#if PC_WEIGHTED_FAST
+	sPcWeightedShape = this;
+	sPcWeightedMtx   = mAnimMatrices;
+#endif
 }
 
 /**

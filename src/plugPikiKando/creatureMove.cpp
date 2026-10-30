@@ -14,6 +14,9 @@
 #include "PikiState.h"
 #include "RopeCreature.h"
 #include "sysMath.h"
+#if defined(__vita__)
+CollGroup* pcCollectPlatformGroups(DynCollShape* root, Creature* creature, immut BoundBox& box);
+#endif
 
 /**
  * @todo: Documentation
@@ -382,8 +385,6 @@ CollTriInfo* Creature::checkForward(immut Vector3f& direction, f32 magnitude, f3
 		// ...unless it's gone on for long enough.
 		if (loopLimit-- < 0) {
 			PRINT("######################################################## loop !?\n");
-			f32* wtf = nullptr;
-			PRINT("%.1f \n", wtf[7]); // What the fuck?
 			return nullptr;
 		}
 	}
@@ -479,6 +480,10 @@ void traceMove2(Creature* target, MoveTrace& trace, f32 p3)
 		trace.mObject = target;
 
 		CollGroup* prevColl = nullptr;
+#if defined(__vita__)
+		// MapMgr::traceMove scan over the flat list.
+		prevColl = pcCollectPlatformGroups(mapMgr->mCollShapeList, target, box);
+#else
 		FOREACH_NODE(DynCollShape, mapMgr->mCollShapeList->mChild, collShape)
 		{
 			if ((!collShape->mCreature || collShape->mCreature != target) && box.intersects(collShape->mBoundingBox)) {
@@ -493,6 +498,7 @@ void traceMove2(Creature* target, MoveTrace& trace, f32 p3)
 				}
 			}
 		}
+#endif
 
 		CollGroup* coll = mapMgr->mMapModel->getCollTris(trace.mPosition);
 		if (coll && coll->mTriCount) {

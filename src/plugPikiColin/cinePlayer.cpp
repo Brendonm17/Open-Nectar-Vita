@@ -1,5 +1,8 @@
 #include "Age.h"
 #include "CinematicPlayer.h"
+#ifdef __vita__
+#include "gl/vita_drawrec.h" // Draw-record join
+#endif
 #include "Creature.h"
 #include "DebugLog.h"
 #include "Demo.h"
@@ -51,6 +54,9 @@ void CineShapeObject::init(immut char* modelPath, immut char* animPath, immut ch
  */
 void CinematicPlayer::init(immut char* cinFilePath)
 {
+#ifdef __vita__
+	vita_drawrec_join(kDrJoinCine);
+#endif
 	// reset cutscene-specific things
 	mTotalDuration       = 0;
 	mCurrentData         = nullptr;
@@ -403,7 +409,13 @@ BOOL CinematicPlayer::update()
 			mPlaybackMode          = (mCurrentScene->mFlags >> 1) & 7; // 0x2 | 0x4 | 0x8
 			mCurrentSceneStartTime = sceneStartTime;
 			// calc how far through the scene we are
+#if defined(PIKI_PC_PORT)
+			// Loop scenes show whole frames.
+			const f32 sceneTime = (mPlaybackMode == CINMODE_LoopScene) ? floorf(mCurrentPlaybackTime) : mCurrentPlaybackTime;
+			f32 ratio          = ((sceneTime - sceneStartTime) / absF(f32(scene->mEndFrame) - f32(scene->mStartFrame)));
+#else
 			f32 ratio          = ((mCurrentPlaybackTime - sceneStartTime) / absF(f32(scene->mEndFrame) - f32(scene->mStartFrame)));
+#endif
 			mCurrentSceneFrame = scene->mStartFrame + (f32(scene->mEndFrame) - f32(scene->mStartFrame)) * ratio;
 			foundActiveScene   = true;
 		}

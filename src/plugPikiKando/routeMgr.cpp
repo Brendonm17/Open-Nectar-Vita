@@ -1793,7 +1793,11 @@ int PathFinder::selectSecondBestWayOnyon(immut Vector3f& curPos, int& secondBest
 void RouteMgr::refresh(Graphics& gfx)
 {
 	gfx.setColour(COLOUR_WHITE, true);
+#if defined(__vita__)
+	gfx.setLightingNoPrev(false, nullptr);
+#else
 	gfx.setLighting(false, nullptr);
+#endif
 	gfx.useTexture(nullptr, GX_TEXMAP0);
 	for (int i = 0; i < getNumWayPoints('test'); i++) {
 		WayPoint* wp = getWayPoint('test', i);
